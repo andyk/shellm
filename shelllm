@@ -152,6 +152,17 @@ json_escape() {
     printf '%s' "$s" | jq -Rsa .
 }
 
+redact_sensitive() {
+    local input="$1"
+    local output="$input"
+
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        output="${output//${ANTHROPIC_API_KEY}/<redacted-anthropic-key>}"
+    fi
+
+    printf '%s' "$output" | sed -E 's/sk-ant-[A-Za-z0-9._-]+/<redacted-anthropic-key>/g'
+}
+
 # ---------------------------------------------------------------------------
 # Docker functions
 # ---------------------------------------------------------------------------
@@ -489,7 +500,7 @@ When you have the answer, set one of these in your bash code:
 
 ## Guidelines
 1. Think step by step. Use echo statements within your single script to document your reasoning.
-2. Use standard bash tools for data processing — they're fast and effective.
+2. If stdin or files were provided, inspect `$CONTEXT` and `$FILE_CONTEXT1`, `$FILE_CONTEXT2`, etc. before searching elsewhere.
 3. Use `shelllm query "prompt"` for subtasks that need LLM reasoning — but be economical, each call costs money.
 4. Use `shelllm query --fork-history "prompt"` when the subtask needs full iteration capability and access to your current workspace state.
 5. Your code runs with `set -e` — commands that fail will stop execution. Use `|| true` if a command might fail acceptably.
@@ -497,7 +508,8 @@ When you have the answer, set one of these in your bash code:
 7. Start by inspecting the existing environment before making changes. Prefer repairing what is already there over creating a new mock setup.
 8. Do not create fake test environments, replacement sample files, or extra users/directories unless the task explicitly requires creating them.
 9. Make the smallest changes that solve the task, then verify against the real task files, commands, or constraints before setting `FINAL`.
-10. Never generate more than one code block. After your closing ```, STOP. Do not write anything else.
+10. Do not print environment variables wholesale. Avoid `env`, `printenv`, or `set` unless the user explicitly asks for them.
+11. Never generate more than one code block. After your closing ```, STOP. Do not write anything else.
 SYSPROMPT
     fi
 
@@ -801,13 +813,15 @@ exit \$__shelllm_rc
         set +eo pipefail
         execute_code "$workspace" "$wrapped_code" "${env_vars[@]}" 2>&1 | \
             while IFS= read -r line; do
-                printf '%s\n' "$line" >> "$output_file"
-                if [[ "$line" == +* ]]; then
+                local redacted_line
+                redacted_line=$(redact_sensitive "$line")
+                printf '%s\n' "$redacted_line" >> "$output_file"
+                if [[ "$redacted_line" == +* ]]; then
                     # xtrace: show the command being run (cyan)
-                    printf '\033[36m  $ %s\033[0m\n' "${line#+ }" >&2
+                    printf '\033[36m  $ %s\033[0m\n' "${redacted_line#+ }" >&2
                 else
                     # regular output (dim)
-                    printf '\033[90m  │ %s\033[0m\n' "$line" >&2
+                    printf '\033[90m  │ %s\033[0m\n' "$redacted_line" >&2
                 fi
             done
         exit_code=${PIPESTATUS[0]}
@@ -830,7 +844,7 @@ exit \$__shelllm_rc
         if [[ -f "$workspace/.final" ]]; then
             echo >&2
             progress "Final answer received"
-            cat "$workspace/.final"
+            redact_sensitive "$(cat "$workspace/.final")"
             return 0
         fi
 
