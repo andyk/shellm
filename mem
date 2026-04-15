@@ -130,29 +130,48 @@ If nothing matches, say 'No matches found.'"
 }
 
 action_list() {
+    local limit="${1:-0}"
     local count
     count=$(ls -1 "$MEM_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ') || count=0
     [[ "$count" -eq 0 ]] && { echo "No memories stored." >&2; return 0; }
 
+    local files
+    files=$(ls -1 "$MEM_DIR"/*.md)
+    if [[ "$limit" -gt 0 ]]; then
+        files=$(printf '%s' "$files" | tail -n "$limit")
+    fi
+
     local f base date slug
-    for f in "$MEM_DIR"/*.md; do
+    while IFS= read -r f; do
         base=$(basename "$f" .md)
         date="${base%%_*}"
         slug="${base#*_}"
         printf '%s  %s\n' "$date" "$slug"
-    done
+    done <<< "$files"
 }
 
 action_dump() {
+    local limit="${1:-0}"
     local count
     count=$(ls -1 "$MEM_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ') || count=0
     [[ "$count" -eq 0 ]] && { echo "No memories stored." >&2; return 0; }
 
-    local f summary
-    for f in "$MEM_DIR"/*.md; do
+    local files
+    files=$(ls -1 "$MEM_DIR"/*.md)
+    if [[ "$limit" -gt 0 ]]; then
+        files=$(printf '%s' "$files" | tail -n "$limit")
+    fi
+
+    local f summary mtype base date
+    while IFS= read -r f; do
         summary=$(frontmatter_field "$f" "summary")
-        [[ -n "$summary" ]] && printf -- '- %s\n' "$summary"
-    done
+        [[ -z "$summary" ]] && continue
+        mtype=$(frontmatter_field "$f" "type")
+        [[ -z "$mtype" ]] && mtype="note"
+        base=$(basename "$f" .md)
+        date="${base%%_*}"
+        printf '%s  %-12s %s\n' "$date" "[$mtype]" "$summary"
+    done <<< "$files"
 }
 
 action_forget() {
@@ -230,8 +249,8 @@ mem — CLI memory store
 Usage:
   mem add [--type TYPE] <text>   Add a memory (or pipe text via stdin)
   mem search <query>             Semantic search via shelllm
-  mem list                       List memories (dates + slugs)
-  mem dump                       List all memory summaries
+  mem list [N]                   List memories (dates + slugs), last N if given
+  mem dump [N]                   Print all memories (date, type, summary), last N if given
   mem forget <name>              Delete a memory by name/prefix
   mem edit <name> <text>         Update a memory's body (or pipe via stdin)
 
@@ -307,10 +326,10 @@ main() {
             action_search "$*"
             ;;
         list)
-            action_list
+            action_list "${1:-0}"
             ;;
         dump)
-            action_dump
+            action_dump "${1:-0}"
             ;;
         forget)
             [[ $# -lt 1 ]] && die "Usage: mem forget <name>"

@@ -43,6 +43,7 @@ die() { echo "shelllm: error: $*" >&2; exit 1; }
 
 banner() {
     [[ "$QUIET" -eq 1 ]] && return
+    [[ "${SHELLLM_NO_BANNER:-0}" -eq 1 ]] && return
     cat <<'BANNER' >&2
            ______  _   _  _____ _______   __    __
 ___        |  ___|| | | ||  ___|| | | |  |  \  /  |
