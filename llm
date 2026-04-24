@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# llm — Minimal multi-provider LLM CLI tool
+# Supports Anthropic, OpenAI, and Gemini APIs.
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+# Load .env if present (check cwd, then script's own directory)
+_llm_load_env() {
+    local envfile="$1"
+    if [[ -f "$envfile" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "$envfile"
+        set +a
+        return 0
+    fi
+    return 1
+}
+_llm_load_env ".env" || _llm_load_env "$(dirname "$(realpath "$0")")/.env" || true
+
+LLM_MODEL=""
+LLM_SYSTEM=""
+LLM_MAX_TOKENS=4096
+LLM_MESSAGES=""
+LLM_STREAM=0
+LLM_PROVIDER=""
+LLM_THINKING=0
+LLM_EFFORT=""
+LLM_RAW=0
+LLM_PROMPT=""
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+die() { echo "llm: error: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--model)      LLM_MODEL="${2:?--model requires a value}"; shift 2 ;;
+        -s|--system)     LLM_SYSTEM="${2:?--system requires a value}"; shift 2 ;;
+        -t|--max-tokens) LLM_MAX_TOKENS="${2:?--max-tokens requires a value}"; shift 2 ;;
+        -M|--messages)   LLM_MESSAGES="${2:?--messages requires a value}"; shift 2 ;;
+        --stream)        LLM_STREAM=1; shift ;;
+        --provider)      LLM_PROVIDER="${2:?--provider requires a value}"; shift 2 ;;
+        --thinking)      LLM_THINKING=1; shift ;;
+        --effort)        LLM_EFFORT="${2:?--effort requires a value}"; shift 2 ;;
+        --raw)           LLM_RAW=1; shift ;;
+        -*)              die "Unknown option: $1" ;;
+        *)               LLM_PROMPT="$*"; break ;;
+    esac
+done
+
+# Read prompt from stdin if no prompt and no -M
+if [[ -z "$LLM_PROMPT" && -z "$LLM_MESSAGES" ]]; then
+    if [[ ! -t 0 ]]; then
+        LLM_PROMPT=$(cat)
+    fi
+fi
+
+[[ -z "$LLM_PROMPT" && -z "$LLM_MESSAGES" ]] && die "No prompt or messages provided"
+
+# Default model
+if [[ -z "$LLM_MODEL" ]]; then
+    LLM_MODEL="claude-sonnet-4-5-20250929"
+fi
+
+# ---------------------------------------------------------------------------
+# Provider detection
+# ---------------------------------------------------------------------------
+
+detect_provider() {
+    local model="$1"
+    case "$model" in
+        claude-*)                        echo "anthropic" ;;
+        gpt-*|o1-*|o3-*|o4-*|chatgpt-*) echo "openai" ;;
+        gemini-*)                        echo "gemini" ;;
+        *)                               die "Cannot detect provider for model '$model'. Use --provider." ;;
+    esac
+}
+
+if [[ -z "$LLM_PROVIDER" ]]; then
+    LLM_PROVIDER=$(detect_provider "$LLM_MODEL")
+fi
+
+# ---------------------------------------------------------------------------
+# Build messages JSON
+# ---------------------------------------------------------------------------
+
+if [[ -z "$LLM_MESSAGES" ]]; then
+    LLM_MESSAGES=$(jq -n --arg p "$LLM_PROMPT" '[{"role":"user","content":$p}]')
+fi
+
+# ---------------------------------------------------------------------------
+# Payload builders (one per provider)
+# ---------------------------------------------------------------------------
+
+build_payload_anthropic() {
+    local -a jq_args=(
+        --arg model "$LLM_MODEL"
+        --argjson max_tokens "$LLM_MAX_TOKENS"
+        --argjson messages "$LLM_MESSAGES"
+        --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )"
+    )
+    local jq_filter='{model:$model, max_tokens:$max_tokens, messages:$messages, stream:$stream}'
+
+    if [[ -n "$LLM_SYSTEM" ]]; then
+        jq_args+=(--arg system "$LLM_SYSTEM")
+        jq_filter='{model:$model, max_tokens:$max_tokens, system:$system, messages:$messages, stream:$stream}'
+    fi
+
+    if [[ "$LLM_THINKING" -eq 1 ]]; then
+        jq_filter="${jq_filter%\}} , thinking:{type:\"adaptive\",display:\"summarized\"}}"
+    fi
+
+    if [[ -n "$LLM_EFFORT" ]]; then
+        jq_filter="${jq_filter%\}} , output_config:{effort:\"$LLM_EFFORT\"}}"
+    fi
+
+    jq -n "${jq_args[@]}" "$jq_filter"
+}
+
+build_payload_openai() {
+    local msgs="$LLM_MESSAGES"
+    # Prepend system message if provided
+    if [[ -n "$LLM_SYSTEM" ]]; then
+        msgs=$(jq -n --arg s "$LLM_SYSTEM" --argjson m "$msgs" \
+            '[{"role":"system","content":$s}] + $m')
+    fi
+
+    jq -n \
+        --arg model "$LLM_MODEL" \
+        --argjson max_tokens "$LLM_MAX_TOKENS" \
+        --argjson messages "$msgs" \
+        --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )" \
+        '{model:$model, max_tokens:$max_tokens, messages:$messages, stream:$stream}'
+}
+
+build_payload_gemini() {
+    # Convert messages to Gemini format: {contents:[{role,parts:[{text}]}]}
+    local contents
+    contents=$(printf '%s' "$LLM_MESSAGES" | jq '[.[] | {role: (if .role == "assistant" then "model" else .role end), parts: [{text: .content}]}]')
+
+    local -a jq_args=(--argjson contents "$contents" --argjson maxOutputTokens "$LLM_MAX_TOKENS")
+    local jq_filter='{contents:$contents, generationConfig:{maxOutputTokens:$maxOutputTokens}}'
+
+    if [[ -n "$LLM_SYSTEM" ]]; then
+        jq_args+=(--arg system "$LLM_SYSTEM")
+        jq_filter='{contents:$contents, systemInstruction:{parts:[{text:$system}]}, generationConfig:{maxOutputTokens:$maxOutputTokens}}'
+    fi
+
+    jq -n "${jq_args[@]}" "$jq_filter"
+}
+
+# ---------------------------------------------------------------------------
+# URL and headers per provider
+# ---------------------------------------------------------------------------
+
+get_url_headers() {
+    case "$LLM_PROVIDER" in
+        anthropic)
+            [[ -z "${ANTHROPIC_API_KEY:-}" ]] && die "ANTHROPIC_API_KEY is not set"
+            url="${LLM_API_URL:-https://api.anthropic.com/v1/messages}"
+            headers=(-H "content-type: application/json"
+                     -H "x-api-key: $ANTHROPIC_API_KEY"
+                     -H "anthropic-version: 2023-06-01")
+            ;;
+        openai)
+            [[ -z "${OPENAI_API_KEY:-}" ]] && die "OPENAI_API_KEY is not set"
+            url="${LLM_API_URL:-https://api.openai.com/v1/chat/completions}"
+            headers=(-H "Content-Type: application/json"
+                     -H "Authorization: Bearer $OPENAI_API_KEY")
+            ;;
+        gemini)
+            [[ -z "${GEMINI_API_KEY:-}" ]] && die "GEMINI_API_KEY is not set"
+            local action="generateContent"
+            [[ "$LLM_STREAM" -eq 1 ]] && action="streamGenerateContent?alt=sse"
+            url="${LLM_API_URL:-https://generativelanguage.googleapis.com/v1beta/models/${LLM_MODEL}:${action}}"
+            headers=(-H "Content-Type: application/json"
+                     -H "x-goog-api-key: $GEMINI_API_KEY")
+            ;;
+        *)
+            die "Unknown provider: $LLM_PROVIDER"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Response text extractors (non-streaming)
+# ---------------------------------------------------------------------------
+
+extract_text_anthropic() {
+    jq -r '.content[]? | select(.type=="text") | .text' 2>/dev/null
+}
+
+extract_text_openai() {
+    jq -r '.choices[0].message.content // empty' 2>/dev/null
+}
+
+extract_text_gemini() {
+    jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Streaming handlers
+# ---------------------------------------------------------------------------
+
+stream_anthropic() {
+    while IFS= read -r raw_line; do
+        local line="${raw_line%$'\r'}"
+        [[ "$line" != data:\ * ]] && continue
+        local json="${line#data: }"
+        [[ "$json" == "[DONE]" ]] && continue
+
+        case "$json" in
+            *'"content_block_start"'*)
+                if [[ "$json" == *'"thinking"'* ]]; then
+                    _block="thinking"
+                elif [[ "$json" == *'"text"'* ]]; then
+                    _block="text"
+                fi
+                ;;
+            *'"content_block_delta"'*)
+                if [[ "$_block" == "thinking" ]]; then
+                    printf '%s' "$json" | jq -j '.delta.thinking // empty' >&2
+                elif [[ "$_block" == "text" ]]; then
+                    printf '%s' "$json" | jq -j '.delta.text // empty'
+                fi
+                ;;
+            *'"content_block_stop"'*)
+                _block=""
+                ;;
+            *'"type":"error"'*)
+                local err_msg
+                err_msg=$(printf '%s' "$json" | jq -r '.error.message // "unknown error"')
+                die "API stream error: $err_msg"
+                ;;
+        esac
+    done
+}
+
+stream_openai() {
+    while IFS= read -r raw_line; do
+        local line="${raw_line%$'\r'}"
+        [[ "$line" != data:\ * ]] && continue
+        local json="${line#data: }"
+        [[ "$json" == "[DONE]" ]] && continue
+        printf '%s' "$json" | jq -j '.choices[0].delta.content // empty'
+    done
+}
+
+stream_gemini() {
+    while IFS= read -r raw_line; do
+        local line="${raw_line%$'\r'}"
+        [[ "$line" != data:\ * ]] && continue
+        local json="${line#data: }"
+        [[ "$json" == "[DONE]" ]] && continue
+        printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty'
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Main execution
+# ---------------------------------------------------------------------------
+
+# Build payload
+payload=$("build_payload_${LLM_PROVIDER}")
+
+# Get URL and headers
+url=""
+headers=()
+get_url_headers
+
+if [[ "$LLM_STREAM" -eq 1 ]]; then
+    # Streaming path
+    _block=""
+    curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>/dev/null \
+        | "stream_${LLM_PROVIDER}"
+else
+    # Non-streaming path
+    local_resp=$(mktemp)
+    http_code=$(curl -sS -o "$local_resp" -w '%{http_code}' \
+        "${headers[@]}" -d "$payload" "$url" 2>/dev/null)
+
+    if [[ "$http_code" -ge 400 ]]; then
+        error_msg=$(jq -r '.error.message // .message // empty' "$local_resp" 2>/dev/null || true)
+        rm -f "$local_resp"
+        if [[ -n "$error_msg" ]]; then
+            die "API error (HTTP $http_code): $error_msg"
+        fi
+        die "API error (HTTP $http_code)"
+    fi
+
+    if [[ "$LLM_RAW" -eq 1 ]]; then
+        cat "$local_resp"
+    else
+        "extract_text_${LLM_PROVIDER}" < "$local_resp"
+    fi
+    rm -f "$local_resp"
+fi
