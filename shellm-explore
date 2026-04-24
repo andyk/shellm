@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellm-explore — Explore and visualize shellm run trees
+#
+# Usage: shellm-explore <RUN_ID> [--report] [--model MODEL]
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+die() { echo "shellm-explore: error: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+RUN_ID=""
+REPORT=0
+REPORT_MODEL="${SHELLM_MODEL:-claude-opus-4-7}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --report) REPORT=1; shift ;;
+        --model)  REPORT_MODEL="${2:?--model requires a value}"; shift 2 ;;
+        -*)       die "Unknown option: $1" ;;
+        *)        RUN_ID="$1"; shift ;;
+    esac
+done
+
+[[ -n "$RUN_ID" ]] || die "Usage: shellm-explore <RUN_ID> [--report] [--model MODEL]"
+
+# Resolve to absolute path and strip trailing slash
+RUN_ID="$(cd "$RUN_ID" 2>/dev/null && pwd)" || die "Not a directory: $RUN_ID"
+
+[[ -f "$RUN_ID/.shellm/command" ]] || die "Not a run record: $RUN_ID"
+
+# ---------------------------------------------------------------------------
+# Find root of the run tree
+# ---------------------------------------------------------------------------
+
+find_root() {
+    local dir="$1"
+    while [[ -f "$(dirname "$dir")/.shellm/command" ]]; do
+        dir="$(dirname "$dir")"
+    done
+    echo "$dir"
+}
+
+ROOT="$(find_root "$RUN_ID")"
+
+# ---------------------------------------------------------------------------
+# Get summary line for a run directory
+# ---------------------------------------------------------------------------
+
+get_summary() {
+    local dir="$1"
+    if [[ -f "$dir/.shellm/context.md" ]]; then
+        sed -n '2p' "$dir/.shellm/context.md"
+    elif [[ -f "$dir/.shellm/command" ]]; then
+        cut -c1-80 "$dir/.shellm/command"
+    else
+        echo "(no summary)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Tree visualization
+# ---------------------------------------------------------------------------
+
+print_tree() {
+    local root="$1"
+    local target="$2"
+
+    # Find all run records under root (directories containing .shellm/command)
+    # Sort for deterministic output
+    local runs
+    runs=$(find "$root" -name command -path '*/.shellm/command' | sort)
+
+    # For each run, derive the run dir and compute depth
+    local root_depth
+    root_depth=$(echo "$root" | tr '/' '\n' | wc -l | tr -d ' ')
+
+    while IFS= read -r cmd_file; do
+        # cmd_file is like .../rundir/.shellm/command
+        local run_dir
+        run_dir="$(dirname "$(dirname "$cmd_file")")"
+
+        local run_depth
+        run_depth=$(echo "$run_dir" | tr '/' '\n' | wc -l | tr -d ' ')
+        local indent_level=$(( run_depth - root_depth ))
+
+        local indent=""
+        local i
+        for (( i=0; i<indent_level; i++ )); do
+            indent+="  "
+        done
+
+        local basename
+        basename="$(basename "$run_dir")"
+        # Truncate long basenames
+        local display_name
+        if [[ ${#basename} -gt 40 ]]; then
+            display_name="${basename:0:37}..."
+        else
+            display_name="$basename"
+        fi
+
+        local summary
+        summary="$(get_summary "$run_dir")"
+
+        if [[ "$run_dir" == "$target" ]]; then
+            echo "${indent}>>> ${display_name}: ${summary} <<<"
+        else
+            echo "${indent}${display_name}: ${summary}"
+        fi
+    done <<< "$runs"
+}
+
+# ---------------------------------------------------------------------------
+# Report mode
+# ---------------------------------------------------------------------------
+
+generate_report() {
+    local root="$1"
+    local target="$2"
+
+    # Build the tree visualization
+    local tree_output
+    tree_output="$(print_tree "$root" "$target")"
+
+    # Collect context for every run in the tree
+    local all_contexts=""
+    local runs
+    runs=$(find "$root" -name command -path '*/.shellm/command' | sort)
+
+    while IFS= read -r cmd_file; do
+        local run_dir
+        run_dir="$(dirname "$(dirname "$cmd_file")")"
+        local run_basename
+        run_basename="$(basename "$run_dir")"
+
+        all_contexts+="
+## ${run_basename}
+"
+        if [[ -f "$run_dir/.shellm/context.md" ]]; then
+            all_contexts+="$(cat "$run_dir/.shellm/context.md")"
+        else
+            all_contexts+="Command: $(cat "$run_dir/.shellm/command")"
+        fi
+        all_contexts+="
+"
+    done <<< "$runs"
+
+    # Build the prompt
+    local user_prompt="Here is a shellm run tree visualization:
+
+\`\`\`
+${tree_output}
+\`\`\`
+
+The target run being analyzed is: $(basename "$target")
+Full path: ${target}
+
+Below is the detailed context for every run in the tree:
+${all_contexts}
+
+Please provide a detailed report explaining:
+1. What the overall run tree is trying to accomplish
+2. Why the target run (marked with >>>) exists in the context of the bigger picture
+3. How the target run relates to its parent and sibling runs
+4. What the target run's specific role and contribution is"
+
+    local system_prompt="You are an analyst examining shellm run trees. A shellm run tree represents a hierarchy of LLM-powered bash execution sessions, where parent runs spawn child sub-runs to break down tasks. Provide clear, insightful analysis."
+
+    local msg_json
+    msg_json=$(jq -n --arg p "$user_prompt" '[{"role":"user","content":$p}]')
+
+    local text
+    text=$(llm -m "$REPORT_MODEL" -t 4096 -s "$system_prompt" -M "$msg_json") \
+        || die "API request failed"
+
+    if [[ -z "$text" ]]; then
+        die "No text in API response"
+    fi
+
+    printf '%s\n' "$text"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+if [[ "$REPORT" -eq 1 ]]; then
+    generate_report "$ROOT" "$RUN_ID"
+else
+    print_tree "$ROOT" "$RUN_ID"
+fi

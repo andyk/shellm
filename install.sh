@@ -3,7 +3,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local/bin}"
 SYMLINKS="${SYMLINKS:-0}"
-TOOLS=(shellm shellm-explore shelly skills mem)
+TOOLS=(shellm shelly skills mem llm shellm-explore)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
