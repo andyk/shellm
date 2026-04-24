@@ -30,10 +30,52 @@ done
 
 [[ -n "$RUN_ID" ]] || die "Usage: shellm-explore <RUN_ID> [--report] [--model MODEL]"
 
-# Resolve to absolute path and strip trailing slash
-RUN_ID="$(cd "$RUN_ID" 2>/dev/null && pwd)" || die "Not a directory: $RUN_ID"
+# Resolve RUN_ID: absolute/relative path, name prefix match, or hex portion match
+resolve_run_id() {
+    local input="$1"
+    local runs_dir="$HOME/.shellm/runs"
 
-[[ -f "$RUN_ID/.shellm/command" ]] || die "Not a run record: $RUN_ID"
+    # 1. Direct path (absolute or relative)
+    if [[ -d "$input" && -f "$input/.shellm/command" ]]; then
+        (cd "$input" && pwd)
+        return
+    fi
+
+    # 2. Search all run records (including sub-runs) for matches
+    [[ -d "$runs_dir" ]] || return 1
+    local all_runs
+    all_runs=$(find "$runs_dir" -name command -path '*/.shellm/command' 2>/dev/null | sort)
+    [[ -z "$all_runs" ]] && return 1
+
+    local matches=()
+    while IFS= read -r cmd_file; do
+        local run_dir
+        run_dir="$(dirname "$(dirname "$cmd_file")")"
+        local name
+        name="$(basename "$run_dir")"
+
+        # Match by name prefix or hex portion (the 8-char hex after the timestamp)
+        if [[ "$name" == "$input"* ]] || [[ "$name" == *"_${input}_"* || "$name" == *"_${input}" ]]; then
+            matches+=("$run_dir")
+        fi
+    done <<< "$all_runs"
+
+    if [[ ${#matches[@]} -eq 1 ]]; then
+        echo "${matches[0]}"
+        return
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+        echo "Ambiguous run ID '$input' matches ${#matches[@]} runs:" >&2
+        for m in "${matches[@]}"; do
+            echo "  $(basename "$m")" >&2
+        done
+        return 1
+    fi
+
+    return 1
+}
+
+_run_input="$RUN_ID"
+RUN_ID="$(resolve_run_id "$RUN_ID")" || die "No matching run found: $_run_input"
 
 # ---------------------------------------------------------------------------
 # Find root of the run tree
