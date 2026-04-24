@@ -20,13 +20,14 @@ shellm takes this idea seriously. It's four small, composable tools — all pure
 
 | Tool | What it does |
 |------|-------------|
-| **shellm** | The core loop — sends context to Claude, executes the bash it writes back, repeats |
+| **shellm** | The core loop — sends context to an LLM, executes the bash it writes back, repeats |
+| **llm** | Minimal multi-provider LLM CLI — Anthropic, OpenAI, and Gemini behind one interface |
 | **shellm-explore** | Visualize run trees and generate LLM-powered reports on what a run did and why |
 | **shelly** | Interactive conversational agent with identity, memory, and skills |
 | **mem** | CLI memory store — markdown files with YAML frontmatter, no database |
 | **skills** | Skill manager — install, create, and use SKILL.md-based agent abilities |
 
-shellm is the engine at the center. shellm-explore gives you visibility into what the engine did. The other three build on shellm to get from a stateless tool to a stateful agent — with memory, learned abilities, and persistent identity across sessions.
+`llm` is the foundation — a single command that talks to any supported LLM provider. shellm is the engine that uses it to think and act. shellm-explore gives you visibility into what the engine did. The other three build on shellm to get from a stateless tool to a stateful agent — with memory, learned abilities, and persistent identity across sessions.
 
 ## Install
 
@@ -36,7 +37,7 @@ cd shellm
 ./install.sh
 ```
 
-This copies `shellm`, `shellm-explore`, `shelly`, `mem`, and `skills` to `/usr/local/bin`. Use `--symlinks` to symlink instead (edits take effect without reinstalling), or `--prefix ~/.local/bin` for a different location.
+This copies `shellm`, `llm`, `shellm-explore`, `shelly`, `mem`, and `skills` to `/usr/local/bin`. Use `--symlinks` to symlink instead (edits take effect without reinstalling), or `--prefix ~/.local/bin` for a different location.
 
 ## Quick start
 
@@ -61,8 +62,8 @@ shellm research the latest advances in protein folding and write a summary
 
 shellm runs a loop:
 
-1. Sends your context to Claude with a system prompt that says "write bash code"
-2. Claude responds with a ` ```bash ` code block
+1. Sends your context to an LLM with a system prompt that says "write bash code"
+2. The LLM responds with a ` ```bash ` code block
 3. shellm executes the code (in Docker if available, locally otherwise)
 4. Output streams back to Claude as the next message
 5. Repeat until the code sets `FINAL="answer"` or hits max iterations
@@ -264,6 +265,37 @@ Tree output highlights the target run and shows parent/child relationships:
 
 With `--report`, it sends the full tree context to an LLM and generates an analysis of what the run tree accomplished, why each sub-run exists, and how they relate to each other.
 
+## The llm tool
+
+`llm` is a standalone multi-provider LLM CLI that shellm and shellm-explore use under the hood. It auto-detects the provider from the model name and handles streaming, thinking, and error reporting.
+
+```bash
+# Simple prompt (provider auto-detected from model name)
+echo "what is 2+2" | llm -m claude-opus-4-7
+
+# Streaming with thinking
+llm --stream --thinking -m claude-opus-4-7 "explain quicksort"
+
+# OpenAI
+llm -m gpt-4o "summarize this" < article.txt
+
+# Gemini
+llm -m gemini-2.5-pro "translate to French: hello world"
+
+# Multi-turn conversation from JSON
+llm -m claude-opus-4-7 -M '[{"role":"user","content":"hi"},{"role":"assistant","content":"hello!"},{"role":"user","content":"what did I just say?"}]'
+```
+
+**Provider auto-detection:**
+
+| Model prefix | Provider |
+|---|---|
+| `claude-*` | Anthropic (`ANTHROPIC_API_KEY`) |
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*` | OpenAI (`OPENAI_API_KEY`) |
+| `gemini-*` | Gemini (`GEMINI_API_KEY`) |
+
+**Output contract:** stdout = text response, stderr = thinking tokens (Anthropic only), exit 0 = success. This makes it composable with pipes and subshells.
+
 ## From tool to agent: shelly, mem, and skills
 
 shellm is a powerful primitive, but it's stateless. Each run starts fresh — no memory of what happened last time, no learned abilities, no persistent identity. To get from a tool to an agent, you need memory, skills, and a way to tie them together across conversations.
@@ -379,10 +411,10 @@ All configuration is available as both CLI flags and environment variables. Flag
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--model` | `SHELLM_MODEL` | `claude-opus-4-6` | Claude model to use |
+| `--model` | `SHELLM_MODEL` | `claude-opus-4-7` | LLM model to use |
 | `--max-iterations` | `SHELLM_MAX_ITERATIONS` | `25` | Max loop iterations before giving up |
 | `--max-tokens` | `SHELLM_MAX_TOKENS` | `16000` | Max tokens per API response |
-| `--thinking-budget` | `SHELLM_THINKING_BUDGET` | `10000` | Extended thinking token budget |
+| `--effort` | `SHELLM_EFFORT` | `high` | Thinking effort: low, medium, high, xhigh, max |
 | `--max-depth` | `SHELLM_MAX_DEPTH` | `5` | Max nesting depth for nested shellm calls |
 | — | `SHELLM_INACTIVITY_TIMEOUT` | `30` | Seconds before killing idle execution |
 | `--workdir DIR` | — | `~/.shellm/runs/...` | Working directory for the run |
@@ -438,9 +470,15 @@ shellm research the ai coding agent market, split the work into data gathering a
 ## Architecture
 
 ```
-shellm                      The execution engine
-├── run_loop()               Core iteration: call Claude → extract code → execute → repeat
-│   ├── call_claude()        Streaming API call with early code-block cutoff
+llm                          Multi-provider LLM CLI
+├── Provider auto-detect     claude-* → Anthropic, gpt-*/o*-* → OpenAI, gemini-* → Gemini
+├── Streaming                SSE parsing with per-provider delta extraction
+├── Thinking                 Anthropic adaptive thinking (stderr), effort control
+└── Output contract          stdout=text, stderr=thinking, exit 0/1
+
+shellm                       The execution engine (uses llm)
+├── run_loop()               Core iteration: call LLM → extract code → execute → repeat
+│   ├── call_llm()           Delegates to llm tool with streaming + thinking capture
 │   ├── extract_code()       Pull first ```bash block from response
 │   ├── execute_code()       Run in Docker or locally (stdin=/dev/null)
 │   ├── watchdog             Background: kill on inactivity timeout
@@ -451,9 +489,10 @@ shellm                      The execution engine
 ├── build_inactivity_feedback()  Structured LLM guidance for non-interactive retry
 └── Docker lifecycle         Auto-detect, setup, teardown
 
-shellm-explore              Run tree visualization & analysis
+shellm-explore               Run tree visualization & analysis
+├── resolve_run_id()         Fuzzy match: full path, name prefix, or hex portion
 ├── print_tree()             Walk run hierarchy, display with TLDR summaries
-├── generate_report()        LLM-powered analysis of run tree structure
+├── generate_report()        LLM-powered analysis of run tree structure (uses llm)
 └── get_summary()            Read TLDR from context.md (or fallback to command)
 
 shelly                       Conversational agent
@@ -475,7 +514,7 @@ skills                       Skill manager
 └── show                     Print a skill's SKILL.md
 ```
 
-All pure bash. No dependencies beyond bash, jq, and curl. Five tools, each a single file.
+All pure bash. No dependencies beyond bash, jq, and curl. Six tools, each a single file.
 
 ## Acknowledgements
 
