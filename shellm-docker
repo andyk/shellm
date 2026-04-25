@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  shellm-docker run IMAGE -- CMD [ARG...]
+  shellm-docker build DIR TAG
+  shellm-docker ps
+  shellm-docker logs CONTAINER
+  shellm-docker rm CONTAINER
+
+shellm-docker talks to the host-side shellm Docker broker. It is intentionally
+not a pass-through wrapper for the docker CLI.
+EOF
+}
+
+die() { echo "shellm-docker: error: $*" >&2; exit 1; }
+
+make_request_json() {
+    local op="$1"
+    shift
+    local args_json
+    args_json=$(printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]')
+    jq -n \
+        --arg op "$op" \
+        --arg cwd "$PWD" \
+        --arg workdir "${SHELLM_WORKDIR:-$PWD}" \
+        --argjson args "$args_json" \
+        '{op:$op,args:$args,cwd:$cwd,workdir:$workdir}'
+}
+
+send_socket() {
+    local request="$1"
+    local broker_dir="${SHELLM_DOCKER_BROKER:-}"
+    [[ -n "$broker_dir" ]] || die "SHELLM_DOCKER_BROKER is not set"
+    local socket="$broker_dir/broker.sock"
+    [[ -S "$socket" ]] || die "broker socket not found: $socket"
+    command -v socat >/dev/null 2>&1 || die "socket transport requires socat in the shellm container"
+    printf '%s' "$request" | socat - "UNIX-CONNECT:$socket"
+}
+
+send_filesystem() {
+    local request="$1"
+    local broker_dir="${SHELLM_DOCKER_BROKER:-}"
+    [[ -n "$broker_dir" ]] || die "SHELLM_DOCKER_BROKER is not set"
+    local req_dir="$broker_dir/requests"
+    local res_dir="$broker_dir/responses"
+    mkdir -p "$req_dir" "$res_dir"
+
+    local rand
+    rand=$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    local id
+    id="$(date +%s)-$$-$rand"
+    local tmp="$req_dir/$id.tmp"
+    local req="$req_dir/$id.json"
+    local res="$res_dir/$id.json"
+
+    printf '%s' "$request" > "$tmp"
+    mv "$tmp" "$req"
+
+    local timeout="${SHELLM_DOCKER_REQUEST_TIMEOUT:-300}"
+    local waited=0
+    while [[ ! -f "$res" ]]; do
+        if [[ "$waited" -ge "$timeout" ]]; then
+            rm -f "$req" "$tmp"
+            die "timed out waiting for broker response after ${timeout}s"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    cat "$res"
+    rm -f "$res"
+}
+
+print_response() {
+    local response="$1"
+    if ! printf '%s' "$response" | jq -e '.exit_code' >/dev/null 2>&1; then
+        printf '%s\n' "$response" >&2
+        die "invalid broker response"
+    fi
+
+    printf '%s' "$response" | jq -rj '.stdout // ""'
+    printf '%s' "$response" | jq -rj '.stderr // ""' >&2
+
+    local exit_code
+    exit_code=$(printf '%s' "$response" | jq -r '.exit_code')
+    exit "$exit_code"
+}
+
+main() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+    [[ $# -ge 1 ]] || { usage >&2; exit 1; }
+    [[ "${SHELLM_DOCKER_ACCESS:-}" == "broker" ]] || die "shellm-docker is only available when SHELLM_DOCKER_ACCESS=broker"
+
+    local op="$1"
+    shift
+    case "$op" in
+        run|build|ps|logs|rm) ;;
+        *) die "unsupported operation: $op" ;;
+    esac
+
+    local request response transport
+    request=$(make_request_json "$op" "$@")
+    transport="${SHELLM_DOCKER_TRANSPORT:-${SHELLM_DOCKER_BROKER_TRANSPORT:-filesystem}}"
+    case "$transport" in
+        socket) response=$(send_socket "$request") ;;
+        filesystem) response=$(send_filesystem "$request") ;;
+        *) die "unsupported broker transport: $transport" ;;
+    esac
+
+    print_response "$response"
+}
+
+main "$@"

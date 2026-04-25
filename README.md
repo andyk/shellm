@@ -192,12 +192,25 @@ shellm --docker-image python:3.12-slim write a flask app
 
 # Teardown container on exit instead of persisting
 shellm --temp-docker do something risky
+
+# Let generated code run bounded helper containers through a broker
+shellm --docker-access broker run tests in a clean alpine container
+
+# Unsafe escape hatch: expose the host Docker daemon directly
+shellm --docker-access socket inspect docker containers
+
+# Unsafe escape hatch: start an inner Docker daemon
+shellm --docker-access dind build and run a docker image
 ```
 
 Docker detection works like this:
 - If Docker daemon is running and env isn't `local` → uses Docker
-- If already inside a Docker container (e.g. CI) → runs locally (no nesting)
+- If already inside a Docker container (e.g. CI) → runs locally unless `SHELLM_ALLOW_NESTED_DOCKER=1`
 - If Docker isn't installed → runs locally
+
+Docker access from inside the sandbox is off by default. `--docker-access broker` is the recommended mode when the agent needs helper containers: generated code gets `shellm-docker`, which talks to a host-side shellm broker that rejects privileged containers, arbitrary bind mounts, host namespace sharing, device access, and Docker socket mounts. On Linux, the broker uses `socat` for a Unix socket transport when available; otherwise it falls back to a filesystem request/response transport.
+
+`--docker-access socket` mounts `/var/run/docker.sock` into the sandbox. This is convenient, but it is not a strong sandbox because the agent can control the host Docker daemon. `--docker-access dind` starts an inner Docker daemon in a privileged outer container, which is also not a strong sandbox.
 
 ### Envs
 
@@ -421,6 +434,10 @@ All configuration is available as both CLI flags and environment variables. Flag
 | `--env NAME` | `SHELLM_ENV` | auto-generated | Named execution environment (Docker container or `local`) |
 | `--temp-docker` | `SHELLM_TEMP_DOCKER=1` | off | Teardown Docker container on exit |
 | `--docker-image` | `SHELLM_DOCKER_IMAGE` | `ubuntu:latest` | Docker image to use |
+| `--docker-access MODE` | `SHELLM_DOCKER_ACCESS` | `none` | Docker access inside the sandbox: `none`, `broker`, `socket`, `dind` |
+| — | `SHELLM_DOCKER_BROKER_TRANSPORT` | `auto` | Broker transport: `auto`, `socket`, `filesystem` |
+| — | `SHELLM_DOCKER_SOCKET` | `/var/run/docker.sock` | Socket mounted for `--docker-access socket` |
+| — | `SHELLM_ALLOW_NESTED_DOCKER` | `0` | Allow shellm running inside Docker to use Docker |
 | `-f FILE` | — | — | Add file context (repeatable) |
 | `-v, --verbose` | — | off | Show debug output |
 | `-q, --quiet` | — | off | Suppress progress output, keep only final answer |
@@ -442,6 +459,7 @@ SHELLM_MAX_ITERATIONS=10
 
 **Optional:**
 - Docker — for sandboxed execution (auto-detected)
+- socat — optional, used for the fastest `--docker-access broker` transport
 - python3 — for some generated code
 - lynx — for web scraping tasks
 

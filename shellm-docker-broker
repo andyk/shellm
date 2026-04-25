@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { echo "shellm-docker-broker: error: $*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage:
+  shellm-docker-broker start --env NAME --workdir DIR --dir DIR --transport socket|filesystem --pid-file FILE --log FILE
+  shellm-docker-broker stop --pid-file FILE
+  shellm-docker-broker serve-one
+  shellm-docker-broker serve-filesystem
+
+This is a host-side broker for shellm's constrained Docker access mode.
+EOF
+}
+
+log_msg() {
+    local log="${SHELLM_BROKER_LOG:-}"
+    [[ -n "$log" ]] || return 0
+    mkdir -p "$(dirname "$log")"
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$log"
+}
+
+json_response() {
+    local exit_code="$1"
+    local stdout_file="$2"
+    local stderr_file="$3"
+    jq -n \
+        --argjson exit_code "$exit_code" \
+        --rawfile stdout "$stdout_file" \
+        --rawfile stderr "$stderr_file" \
+        '{exit_code:$exit_code,stdout:$stdout,stderr:$stderr}'
+}
+
+json_error() {
+    local exit_code="$1"
+    local message="$2"
+    jq -n --argjson exit_code "$exit_code" --arg message "$message" \
+        '{exit_code:$exit_code,stdout:"",stderr:("shellm-docker: " + $message + "\n")}'
+}
+
+valid_image() {
+    [[ "$1" =~ ^[A-Za-z0-9._/:@-]+$ ]]
+}
+
+valid_tag() {
+    [[ "$1" =~ ^[A-Za-z0-9._/:@-]+$ ]]
+}
+
+valid_container_ref() {
+    [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+path_under() {
+    local path="$1"
+    local root="$2"
+    [[ "$path" == "$root" || "$path" == "$root"/* ]]
+}
+
+safe_cwd() {
+    local requested="$1"
+    local workdir="$2"
+    if path_under "$requested" "$workdir"; then
+        printf '%s\n' "$requested"
+    else
+        printf '%s\n' "$workdir"
+    fi
+}
+
+container_belongs_to_env() {
+    local ref="$1"
+    local env_name="$2"
+    local label
+    label=$(docker inspect -f '{{ index .Config.Labels "shellm.broker.env" }}' "$ref" 2>/dev/null || true)
+    [[ "$label" == "$env_name" ]]
+}
+
+run_capture() {
+    local out err rc
+    out=$(mktemp)
+    err=$(mktemp)
+    set +e
+    "$@" >"$out" 2>"$err"
+    rc=$?
+    set -e
+    json_response "$rc" "$out" "$err"
+    rm -f "$out" "$err"
+}
+
+request_args() {
+    local request="$1"
+    printf '%s' "$request" | jq -r '.args[]?'
+}
+
+handle_run() {
+    local request="$1"
+    local env_name="$SHELLM_BROKER_ENV"
+    local workdir="$SHELLM_BROKER_WORKDIR"
+    local requested_cwd cwd
+    requested_cwd=$(printf '%s' "$request" | jq -r '.cwd // empty')
+    cwd=$(safe_cwd "$requested_cwd" "$workdir")
+
+    local -a args=()
+    while IFS= read -r arg; do
+        args+=("$arg")
+    done < <(request_args "$request")
+    [[ "${#args[@]}" -ge 1 ]] || { json_error 64 "run requires IMAGE"; return; }
+
+    local image="${args[0]}"
+    valid_image "$image" || { json_error 64 "rejected invalid image name: $image"; return; }
+
+    local -a command=()
+    local start=1
+    [[ "${args[1]:-}" == "--" ]] && start=2
+    local i
+    for ((i=start; i<${#args[@]}; i++)); do
+        command+=("${args[$i]}")
+    done
+
+    local cpus="${SHELLM_BROKER_CPUS:-2}"
+    local memory="${SHELLM_BROKER_MEMORY:-2g}"
+    local pids="${SHELLM_BROKER_PIDS_LIMIT:-512}"
+
+    local -a cmd=(
+        docker run --rm
+        --label "shellm.broker=1"
+        --label "shellm.broker.env=$env_name"
+        --security-opt no-new-privileges
+        --cpus "$cpus"
+        --memory "$memory"
+        --pids-limit "$pids"
+        -v "$workdir:$workdir"
+        -w "$cwd"
+        -e "SHELLM_WORKDIR=$workdir"
+        "$image"
+    )
+    cmd+=("${command[@]}")
+    log_msg "run image=$image cwd=$cwd argc=${#command[@]}"
+    run_capture "${cmd[@]}"
+}
+
+handle_build() {
+    local request="$1"
+    local env_name="$SHELLM_BROKER_ENV"
+    local workdir="$SHELLM_BROKER_WORKDIR"
+    local -a args=()
+    while IFS= read -r arg; do
+        args+=("$arg")
+    done < <(request_args "$request")
+    [[ "${#args[@]}" -eq 2 ]] || { json_error 64 "build requires DIR TAG"; return; }
+
+    local context="${args[0]}"
+    local tag="${args[1]}"
+    valid_tag "$tag" || { json_error 64 "rejected invalid tag: $tag"; return; }
+
+    local abs_context
+    abs_context=$(realpath "$context" 2>/dev/null || true)
+    [[ -n "$abs_context" && -d "$abs_context" ]] || { json_error 64 "build context does not exist: $context"; return; }
+    path_under "$abs_context" "$workdir" || { json_error 64 "build context must be under SHELLM_WORKDIR"; return; }
+
+    log_msg "build context=$abs_context tag=$tag"
+    run_capture docker build \
+        --label "shellm.broker=1" \
+        --label "shellm.broker.env=$env_name" \
+        -t "$tag" \
+        "$abs_context"
+}
+
+handle_ps() {
+    local env_name="$SHELLM_BROKER_ENV"
+    log_msg "ps"
+    run_capture docker ps --filter "label=shellm.broker.env=$env_name"
+}
+
+handle_logs() {
+    local request="$1"
+    local env_name="$SHELLM_BROKER_ENV"
+    local -a args=()
+    while IFS= read -r arg; do
+        args+=("$arg")
+    done < <(request_args "$request")
+    [[ "${#args[@]}" -eq 1 ]] || { json_error 64 "logs requires CONTAINER"; return; }
+    local ref="${args[0]}"
+    valid_container_ref "$ref" || { json_error 64 "rejected invalid container ref"; return; }
+    container_belongs_to_env "$ref" "$env_name" || { json_error 65 "container is not managed by this shellm broker"; return; }
+    log_msg "logs ref=$ref"
+    run_capture docker logs "$ref"
+}
+
+handle_rm() {
+    local request="$1"
+    local env_name="$SHELLM_BROKER_ENV"
+    local -a args=()
+    while IFS= read -r arg; do
+        args+=("$arg")
+    done < <(request_args "$request")
+    [[ "${#args[@]}" -eq 1 ]] || { json_error 64 "rm requires CONTAINER"; return; }
+    local ref="${args[0]}"
+    valid_container_ref "$ref" || { json_error 64 "rejected invalid container ref"; return; }
+    container_belongs_to_env "$ref" "$env_name" || { json_error 65 "container is not managed by this shellm broker"; return; }
+    log_msg "rm ref=$ref"
+    run_capture docker rm -f "$ref"
+}
+
+process_request() {
+    local request="$1"
+    if ! printf '%s' "$request" | jq -e '.op and (.args | type == "array")' >/dev/null 2>&1; then
+        json_error 64 "invalid broker request"
+        return
+    fi
+
+    local op
+    op=$(printf '%s' "$request" | jq -r '.op')
+    case "$op" in
+        run) handle_run "$request" ;;
+        build) handle_build "$request" ;;
+        ps) handle_ps ;;
+        logs) handle_logs "$request" ;;
+        rm) handle_rm "$request" ;;
+        *) json_error 64 "unsupported operation: $op" ;;
+    esac
+}
+
+serve_one() {
+    local request
+    request=$(cat)
+    process_request "$request"
+}
+
+serve_filesystem() {
+    local dir="$SHELLM_BROKER_DIR"
+    local req_dir="$dir/requests"
+    local res_dir="$dir/responses"
+    local processing_dir="$dir/processing"
+    mkdir -p "$req_dir" "$res_dir" "$processing_dir"
+    log_msg "filesystem broker started env=$SHELLM_BROKER_ENV workdir=$SHELLM_BROKER_WORKDIR"
+
+    while true; do
+        local req
+        for req in "$req_dir"/*.json; do
+            [[ -e "$req" ]] || continue
+            local base processing response tmp
+            base=$(basename "$req")
+            processing="$processing_dir/$base"
+            response="$res_dir/$base"
+            tmp="$response.tmp"
+            mv "$req" "$processing" 2>/dev/null || continue
+            process_request "$(cat "$processing")" > "$tmp" 2>>"${SHELLM_BROKER_LOG:-/dev/null}" || true
+            mv "$tmp" "$response"
+            rm -f "$processing"
+        done
+        sleep 0.2
+    done
+}
+
+stop_pid_file() {
+    local pid_file="$1"
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            kill "$pid" >/dev/null 2>&1 || true
+            sleep 0.1
+            kill -9 "$pid" >/dev/null 2>&1 || true
+        fi
+        rm -f "$pid_file"
+    fi
+}
+
+start_broker() {
+    local env_name="" workdir="" dir="" transport="" pid_file="" log=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --env) env_name="${2:?--env requires a value}"; shift 2 ;;
+            --workdir) workdir="${2:?--workdir requires a value}"; shift 2 ;;
+            --dir) dir="${2:?--dir requires a value}"; shift 2 ;;
+            --transport) transport="${2:?--transport requires a value}"; shift 2 ;;
+            --pid-file) pid_file="${2:?--pid-file requires a value}"; shift 2 ;;
+            --log) log="${2:?--log requires a value}"; shift 2 ;;
+            *) die "unknown start option: $1" ;;
+        esac
+    done
+
+    [[ -n "$env_name" && -n "$workdir" && -n "$dir" && -n "$transport" && -n "$pid_file" && -n "$log" ]] || die "start requires --env, --workdir, --dir, --transport, --pid-file, and --log"
+    command -v docker >/dev/null 2>&1 || die "broker mode requires docker on the host"
+    docker info >/dev/null 2>&1 || die "broker mode cannot reach the host Docker daemon"
+
+    mkdir -p "$dir" "$(dirname "$pid_file")" "$(dirname "$log")"
+    stop_pid_file "$pid_file"
+
+    export SHELLM_BROKER_ENV="$env_name"
+    export SHELLM_BROKER_WORKDIR="$workdir"
+    export SHELLM_BROKER_DIR="$dir"
+    export SHELLM_BROKER_LOG="$log"
+
+    case "$transport" in
+        socket)
+            command -v socat >/dev/null 2>&1 || die "socket transport requires socat"
+            rm -f "$dir/broker.sock"
+            socat "UNIX-LISTEN:$dir/broker.sock,fork,unlink-early" "EXEC:$0 serve-one" >>"$log" 2>&1 &
+            ;;
+        filesystem)
+            "$0" serve-filesystem >>"$log" 2>&1 &
+            ;;
+        *) die "unknown broker transport: $transport" ;;
+    esac
+
+    local pid=$!
+    printf '%s\n' "$pid" > "$pid_file"
+    log_msg "broker started pid=$pid transport=$transport env=$env_name workdir=$workdir"
+}
+
+main() {
+    [[ $# -gt 0 ]] || { usage >&2; exit 1; }
+    case "$1" in
+        -h|--help) usage ;;
+        start) shift; start_broker "$@" ;;
+        stop)
+            shift
+            [[ "${1:-}" == "--pid-file" ]] || die "stop requires --pid-file"
+            stop_pid_file "${2:?--pid-file requires a value}"
+            ;;
+        serve-one) serve_one ;;
+        serve-filesystem) serve_filesystem ;;
+        *) die "unknown command: $1" ;;
+    esac
+}
+
+main "$@"

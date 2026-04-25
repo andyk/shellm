@@ -18,6 +18,10 @@ SHELLM_MAX_TOKENS="${SHELLM_MAX_TOKENS:-16000}"
 SHELLM_EFFORT="${SHELLM_EFFORT:-high}"
 SHELLM_MAX_DEPTH="${SHELLM_MAX_DEPTH:-5}"
 SHELLM_DOCKER_IMAGE="${SHELLM_DOCKER_IMAGE:-ubuntu:latest}"
+SHELLM_DOCKER_ACCESS="${SHELLM_DOCKER_ACCESS:-none}"
+SHELLM_DOCKER_BROKER_TRANSPORT="${SHELLM_DOCKER_BROKER_TRANSPORT:-auto}"
+SHELLM_DOCKER_SOCKET="${SHELLM_DOCKER_SOCKET:-/var/run/docker.sock}"
+SHELLM_ALLOW_NESTED_DOCKER="${SHELLM_ALLOW_NESTED_DOCKER:-0}"
 SHELLM_TEMP_DOCKER="${SHELLM_TEMP_DOCKER:-0}"
 SHELLM_INACTIVITY_TIMEOUT="${SHELLM_INACTIVITY_TIMEOUT:-30}"
 VERBOSE=0
@@ -27,6 +31,8 @@ QUIET=0
 _SHELLM_DOCKER_MODE=0
 _SHELLM_CONTAINER=""
 _SHELLM_WORKDIR_USER=""
+_SHELLM_DOCKER_BROKER_DIR=""
+_SHELLM_DOCKER_BROKER_TRANSPORT=""
 
 # Load .env if present
 if [[ -f ".env" ]]; then
@@ -105,6 +111,7 @@ Options:
   --temp-docker        Teardown Docker container on exit (default: persist)
   --system-prompt FILE Override the default system prompt with contents of FILE
   --docker-image IMAGE Docker image to use (default: ubuntu:latest)
+  --docker-access MODE Docker access for generated code: none, broker, socket, dind
   --print-system-prompt Print the system prompt and exit
 
 Environment:
@@ -116,6 +123,10 @@ Environment:
   SHELLM_MAX_DEPTH        Max recursion depth for nested shellm calls
   SHELLM_SYSTEM_PROMPT    Override the default system prompt text
   SHELLM_DOCKER_IMAGE     Docker image to use
+  SHELLM_DOCKER_ACCESS    Docker access mode: none, broker, socket, dind
+  SHELLM_DOCKER_BROKER_TRANSPORT  Broker transport: auto, socket, filesystem
+  SHELLM_DOCKER_SOCKET    Docker socket for socket mode (default: /var/run/docker.sock)
+  SHELLM_ALLOW_NESTED_DOCKER  Set to 1 to allow shellm-in-Docker to use Docker
   SHELLM_ENV              Named env (execution environment)
   SHELLM_TEMP_DOCKER      Set to 1 to teardown Docker container on exit
   SHELLM_INACTIVITY_TIMEOUT  Seconds before killing idle execution (default: 30)
@@ -297,8 +308,8 @@ build_inactivity_feedback() {
 # ---------------------------------------------------------------------------
 
 should_use_docker() {
-    # Already inside Docker — never nest
-    if [[ -f /.dockerenv ]]; then
+    # Already inside Docker — never nest unless explicitly requested.
+    if [[ -f /.dockerenv && "$SHELLM_ALLOW_NESTED_DOCKER" != "1" ]]; then
         debug "Inside Docker container, using local execution"
         return 1
     fi
@@ -312,13 +323,191 @@ should_use_docker() {
     fi
 }
 
+validate_docker_config() {
+    case "$SHELLM_DOCKER_ACCESS" in
+        none|broker|socket|dind) ;;
+        *) die "Invalid --docker-access: $SHELLM_DOCKER_ACCESS (expected none, broker, socket, or dind)" ;;
+    esac
+    case "$SHELLM_DOCKER_BROKER_TRANSPORT" in
+        auto|socket|filesystem) ;;
+        *) die "Invalid SHELLM_DOCKER_BROKER_TRANSPORT: $SHELLM_DOCKER_BROKER_TRANSPORT (expected auto, socket, or filesystem)" ;;
+    esac
+    case "$SHELLM_ALLOW_NESTED_DOCKER" in
+        0|1) ;;
+        *) die "Invalid SHELLM_ALLOW_NESTED_DOCKER: $SHELLM_ALLOW_NESTED_DOCKER (expected 0 or 1)" ;;
+    esac
+}
+
+docker_socket_path() {
+    local socket="$SHELLM_DOCKER_SOCKET"
+    if [[ -S "$socket" ]]; then
+        printf '%s\n' "$socket"
+        return 0
+    fi
+    if [[ -L "$socket" ]]; then
+        local resolved
+        resolved=$(realpath "$socket" 2>/dev/null || true)
+        if [[ -n "$resolved" && -S "$resolved" ]]; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+docker_socket_gid() {
+    local socket="$1"
+    stat -c '%g' "$socket" 2>/dev/null || stat -f '%g' "$socket" 2>/dev/null || true
+}
+
+docker_broker_select_transport() {
+    case "$SHELLM_DOCKER_BROKER_TRANSPORT" in
+        socket)
+            command -v socat >/dev/null 2>&1 || die "Broker socket transport requires socat on the host"
+            printf 'socket\n'
+            ;;
+        filesystem)
+            printf 'filesystem\n'
+            ;;
+        auto)
+            if [[ "$(uname -s)" == "Linux" ]] && command -v socat >/dev/null 2>&1; then
+                printf 'socket\n'
+            else
+                printf 'filesystem\n'
+            fi
+            ;;
+    esac
+}
+
+tool_sibling_path() {
+    local shellm_path="$1"
+    local tool="$2"
+    local dir
+    dir=$(dirname "$shellm_path")
+    printf '%s/%s\n' "$dir" "$tool"
+}
+
+docker_broker_start() {
+    local env_name="$1"
+    local workspace="$2"
+    local shellm_path="$3"
+
+    [[ "$SHELLM_DOCKER_ACCESS" == "broker" ]] || return 0
+
+    local broker_path
+    broker_path=$(tool_sibling_path "$shellm_path" "shellm-docker-broker")
+    [[ -x "$broker_path" ]] || die "Broker mode requires shellm-docker-broker next to shellm: $broker_path"
+
+    local broker_dir="$HOME/.shellm/docker-broker/$env_name"
+    local env_dir="$SHELLM_ENVS_DIR/$env_name"
+    mkdir -p "$broker_dir" "$env_dir"
+
+    "$broker_path" start \
+        --env "$env_name" \
+        --workdir "$workspace" \
+        --dir "$broker_dir" \
+        --transport "$_SHELLM_DOCKER_BROKER_TRANSPORT" \
+        --pid-file "$env_dir/broker_pid" \
+        --log "$broker_dir/broker.log"
+
+    _SHELLM_DOCKER_BROKER_DIR="$broker_dir"
+    progress "Docker broker ready ($_SHELLM_DOCKER_BROKER_TRANSPORT transport)"
+}
+
+docker_broker_stop() {
+    local env_name="$1"
+    local shellm_path="${2:-}"
+    local env_dir="$SHELLM_ENVS_DIR/$env_name"
+    local broker_path=""
+
+    if [[ -n "$shellm_path" ]]; then
+        broker_path=$(tool_sibling_path "$shellm_path" "shellm-docker-broker")
+    elif command -v shellm-docker-broker >/dev/null 2>&1; then
+        broker_path=$(command -v shellm-docker-broker)
+    fi
+
+    if [[ -x "$broker_path" ]]; then
+        "$broker_path" stop --pid-file "$env_dir/broker_pid" >/dev/null 2>&1 || true
+    elif [[ -f "$env_dir/broker_pid" ]]; then
+        local pid
+        pid=$(cat "$env_dir/broker_pid" 2>/dev/null || true)
+        [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
+        rm -f "$env_dir/broker_pid"
+    fi
+}
+
+docker_metadata_value() {
+    local env_name="$1"
+    local key="$2"
+    local file="$SHELLM_ENVS_DIR/$env_name/$key"
+    [[ -f "$file" ]] && cat "$file" || true
+}
+
+env_metadata_matches() {
+    local env_name="$1"
+    local stored_access
+    stored_access=$(docker_metadata_value "$env_name" docker_access)
+    stored_access="${stored_access:-none}"
+
+    [[ "$stored_access" == "$SHELLM_DOCKER_ACCESS" ]] || return 1
+
+    case "$SHELLM_DOCKER_ACCESS" in
+        broker)
+            local stored_transport
+            stored_transport=$(docker_metadata_value "$env_name" docker_broker_transport)
+            [[ "$stored_transport" == "$_SHELLM_DOCKER_BROKER_TRANSPORT" ]] || return 1
+            ;;
+        socket)
+            local stored_socket
+            stored_socket=$(docker_metadata_value "$env_name" docker_socket)
+            [[ "$stored_socket" == "$SHELLM_DOCKER_SOCKET" ]] || return 1
+            ;;
+        dind)
+            local stored_privileged
+            stored_privileged=$(docker_metadata_value "$env_name" privileged)
+            [[ "$stored_privileged" == "1" ]] || return 1
+            ;;
+    esac
+
+    return 0
+}
+
+env_metadata_mismatch_message() {
+    local env_name="$1"
+    local stored_access
+    stored_access=$(docker_metadata_value "$env_name" docker_access)
+    stored_access="${stored_access:-none}"
+    printf 'Env %s was created with docker_access=%s, but this run requested docker_access=%s. Use a different --env, destroy the env, or request the same access mode.' \
+        "$env_name" "$stored_access" "$SHELLM_DOCKER_ACCESS"
+}
+
+docker_setup_die() {
+    local message="$1"
+    if [[ -n "${_SHELLM_CONTAINER:-}" ]]; then
+        docker rm -f "$_SHELLM_CONTAINER" >/dev/null 2>&1 || true
+        _SHELLM_CONTAINER=""
+    fi
+    die "$message"
+}
+
 docker_setup() {
     local workspace="$1"
     local shellm_path="$2"
-    shift 2
+    local env_name="$3"
+    shift 3
     local context_files=("$@")
 
-    progress "Setting up Docker container (image: $SHELLM_DOCKER_IMAGE)..."
+    if [[ "$SHELLM_DOCKER_ACCESS" == "broker" ]]; then
+        _SHELLM_DOCKER_BROKER_TRANSPORT=$(docker_broker_select_transport)
+    fi
+
+    if [[ "$SHELLM_DOCKER_ACCESS" == "socket" ]]; then
+        local socket_path
+        socket_path=$(docker_socket_path) || die "Docker socket mode requested, but no Unix socket exists at $SHELLM_DOCKER_SOCKET"
+        SHELLM_DOCKER_SOCKET="$socket_path"
+    fi
+
+    progress "Setting up Docker container (image: $SHELLM_DOCKER_IMAGE, access: $SHELLM_DOCKER_ACCESS)..."
 
     # Pull image (quiet unless verbose)
     if [[ "$VERBOSE" -eq 1 ]]; then
@@ -327,46 +516,88 @@ docker_setup() {
         docker pull "$SHELLM_DOCKER_IMAGE" >/dev/null 2>&1
     fi
 
-    # Build mount flags for -f file directories
+    # Mount the runs dir (parent of the default workspace) so containers can be
+    # reused across runs without needing new bind mounts.
+    local runs_mount="$HOME/.shellm"
+    mkdir -p "$runs_mount"
+
+    local -a docker_run_flags=(
+        --name "shellm-$$"
+        --user "$(id -u):$(id -g)"
+        -v "$runs_mount:$runs_mount"
+        -v "$shellm_path:/usr/local/bin/shellm:ro"
+        -w "$workspace"
+        -e "HOME=$workspace"
+    )
     local -a extra_mounts=()
-    local -a seen_dirs=()
+    local -a seen_dirs=("$runs_mount")
+    local -a install_packages=(jq curl python3 tmux sudo)
+
+    # Make custom workdirs visible when they live outside ~/.shellm.
+    if [[ "$workspace" != "$runs_mount"* ]]; then
+        extra_mounts+=(-v "$workspace:$workspace")
+        seen_dirs+=("$workspace")
+    fi
+
+    # Build mount flags for -f file directories.
     for f in "${context_files[@]+"${context_files[@]}"}"; do
         local abs_path abs_dir
         abs_path=$(realpath "$f")
         abs_dir=$(dirname "$abs_path")
-        # Skip if under workspace (already mounted)
+        # Skip if under workspace or an already mounted parent.
         [[ "$abs_dir" == "$workspace"* ]] && continue
-        # Skip duplicates
         local already=0
         for d in "${seen_dirs[@]+"${seen_dirs[@]}"}"; do
-            [[ "$d" == "$abs_dir" ]] && { already=1; break; }
+            [[ "$abs_dir" == "$d"* ]] && { already=1; break; }
         done
         [[ "$already" -eq 1 ]] && continue
         seen_dirs+=("$abs_dir")
         extra_mounts+=(-v "$abs_dir:$abs_dir:ro")
     done
 
-    # Mount the runs dir (parent of workspace) so the container can be reused
-    # across runs without needing new bind mounts.
-    local runs_mount="$HOME/.shellm"
+    case "$SHELLM_DOCKER_ACCESS" in
+        broker)
+            local client_path
+            client_path=$(tool_sibling_path "$shellm_path" "shellm-docker")
+            [[ -x "$client_path" ]] || die "Broker mode requires shellm-docker next to shellm: $client_path"
+            docker_run_flags+=(-v "$client_path:/usr/local/bin/shellm-docker:ro")
+            if [[ "$_SHELLM_DOCKER_BROKER_TRANSPORT" == "socket" ]]; then
+                install_packages+=(socat)
+            fi
+            ;;
+        socket)
+            local socket_gid
+            socket_gid=$(docker_socket_gid "$SHELLM_DOCKER_SOCKET")
+            [[ -n "$socket_gid" ]] && docker_run_flags+=(--group-add "$socket_gid")
+            docker_run_flags+=(
+                -v "$SHELLM_DOCKER_SOCKET:/var/run/docker.sock"
+                -e "DOCKER_HOST=unix:///var/run/docker.sock"
+            )
+            install_packages+=(docker.io)
+            ;;
+        dind)
+            docker_run_flags+=(--privileged -e "DOCKER_HOST=unix:///var/run/docker.sock")
+            install_packages+=(docker.io)
+            ;;
+    esac
+
     _SHELLM_CONTAINER=$(docker run -d \
-        --name "shellm-$$" \
-        --user "$(id -u):$(id -g)" \
-        -v "$runs_mount:$runs_mount" \
-        -v "$shellm_path:/usr/local/bin/shellm:ro" \
+        "${docker_run_flags[@]}" \
         "${extra_mounts[@]+"${extra_mounts[@]}"}" \
-        -w "$workspace" \
-        -e "HOME=$workspace" \
         "$SHELLM_DOCKER_IMAGE" \
         sleep infinity)
 
     # Install essential tools as root and grant passwordless sudo.
     progress_dim "Installing tools in container..."
-    docker exec --user 0:0 -e SHELLM_UID="$(id -u)" -e SHELLM_GID="$(id -g)" \
+    local package_list="${install_packages[*]}"
+    if ! docker exec --user 0:0 \
+        -e SHELLM_UID="$(id -u)" \
+        -e SHELLM_GID="$(id -g)" \
+        -e SHELLM_APT_PACKAGES="$package_list" \
         "$_SHELLM_CONTAINER" \
         bash -c '
         apt-get update -qq >/dev/null 2>&1
-        apt-get install -y -qq jq curl python3 tmux sudo >/dev/null 2>&1
+        apt-get install -y -qq $SHELLM_APT_PACKAGES >/dev/null 2>&1
         # Create user for the mapped UID/GID so sudo works
         if ! getent group "$SHELLM_GID" >/dev/null 2>&1; then
             groupadd -g "$SHELLM_GID" shellm 2>/dev/null || true
@@ -377,13 +608,37 @@ docker_setup() {
         # Grant passwordless sudo to the container user
         echo "ALL ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/shellm
         chmod 0440 /etc/sudoers.d/shellm
-        ' >/dev/null 2>&1 || {
-        progress "Warning: could not install tools in container"
-    }
+        ' >/dev/null 2>&1; then
+        if [[ "$SHELLM_DOCKER_ACCESS" == "none" ]]; then
+            progress "Warning: could not install tools in container"
+        else
+            docker_setup_die "Could not install tools required for Docker access mode '$SHELLM_DOCKER_ACCESS' in container"
+        fi
+    fi
+
+    if [[ "$SHELLM_DOCKER_ACCESS" == "socket" ]]; then
+        docker exec -e DOCKER_HOST=unix:///var/run/docker.sock "$_SHELLM_CONTAINER" \
+            docker info >/dev/null 2>&1 || docker_setup_die "Container could not access Docker through $SHELLM_DOCKER_SOCKET"
+    elif [[ "$SHELLM_DOCKER_ACCESS" == "dind" ]]; then
+        progress_dim "Starting inner Docker daemon..."
+        docker exec --user 0:0 "$_SHELLM_CONTAINER" bash -c '
+            nohup dockerd --host=unix:///var/run/docker.sock >/var/log/shellm-dockerd.log 2>&1 &
+        ' >/dev/null 2>&1 || docker_setup_die "Could not start inner Docker daemon"
+        local i
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if docker exec --user 0:0 -e DOCKER_HOST=unix:///var/run/docker.sock "$_SHELLM_CONTAINER" docker info >/dev/null 2>&1; then
+                docker exec --user 0:0 "$_SHELLM_CONTAINER" chmod 666 /var/run/docker.sock >/dev/null 2>&1 || true
+                break
+            fi
+            sleep 1
+        done
+        docker exec -e DOCKER_HOST=unix:///var/run/docker.sock "$_SHELLM_CONTAINER" \
+            docker info >/dev/null 2>&1 || docker_setup_die "Inner Docker daemon did not become ready"
+    fi
 
     # Verify bash is available
     docker exec "$_SHELLM_CONTAINER" bash --version >/dev/null 2>&1 || \
-        die "Docker image $SHELLM_DOCKER_IMAGE does not have bash"
+        docker_setup_die "Docker image $SHELLM_DOCKER_IMAGE does not have bash"
 
     _SHELLM_DOCKER_MODE=1
 
@@ -425,10 +680,17 @@ SHELLM_ENVS_DIR="$HOME/.shellm/envs"
 # Returns 0 on success.
 env_resolve() {
     local name="$1"
+    local explicit="${2:-0}"
     local ws_dir="$SHELLM_ENVS_DIR/$name"
     mkdir -p "$ws_dir"
 
     if [[ -f "$ws_dir/container_id" ]]; then
+        if ! env_metadata_matches "$name"; then
+            if [[ "$explicit" -eq 1 ]]; then
+                die "$(env_metadata_mismatch_message "$name")"
+            fi
+            return 1
+        fi
         local container_id
         container_id=$(cat "$ws_dir/container_id")
         if [[ -n "$container_id" ]] && docker_attach "$container_id"; then
@@ -448,13 +710,15 @@ env_find_running() {
     local name
     for d in "$SHELLM_ENVS_DIR"/*/; do
         [[ -d "$d" ]] || continue
+        name=$(basename "$d")
+        env_metadata_matches "$name" || continue
         [[ -f "$d/container_id" ]] || continue
         local cid
         cid=$(cat "$d/container_id" 2>/dev/null) || continue
         local state
         state=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null) || continue
         if [[ "$state" == "running" ]]; then
-            basename "$d"
+            printf '%s\n' "$name"
             return 0
         fi
     done
@@ -469,6 +733,14 @@ env_register() {
     printf '%s' "$_SHELLM_CONTAINER" > "$ws_dir/container_id"
     printf 'docker\n' > "$ws_dir/type"
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ws_dir/created"
+    printf '%s\n' "$SHELLM_DOCKER_ACCESS" > "$ws_dir/docker_access"
+    printf '%s\n' "${_SHELLM_DOCKER_BROKER_TRANSPORT:-}" > "$ws_dir/docker_broker_transport"
+    printf '%s\n' "${SHELLM_DOCKER_SOCKET:-}" > "$ws_dir/docker_socket"
+    if [[ "$SHELLM_DOCKER_ACCESS" == "dind" ]]; then
+        printf '1\n' > "$ws_dir/privileged"
+    else
+        printf '0\n' > "$ws_dir/privileged"
+    fi
 
     # Save image metadata for reproducibility
     printf '%s\n' "$SHELLM_DOCKER_IMAGE" > "$ws_dir/image"
@@ -484,6 +756,10 @@ env_register_local() {
     mkdir -p "$ws_dir"
     printf 'local\n' > "$ws_dir/type"
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ws_dir/created"
+    printf 'none\n' > "$ws_dir/docker_access"
+    printf '\n' > "$ws_dir/docker_broker_transport"
+    printf '\n' > "$ws_dir/docker_socket"
+    printf '0\n' > "$ws_dir/privileged"
     rm -f "$ws_dir/container_id"
 }
 
@@ -491,6 +767,7 @@ env_register_local() {
 env_destroy() {
     local name="$1"
     local ws_dir="$SHELLM_ENVS_DIR/$name"
+    docker_broker_stop "$name" >/dev/null 2>&1 || true
     if [[ -f "$ws_dir/container_id" ]]; then
         local container_id
         container_id=$(cat "$ws_dir/container_id" 2>/dev/null || true)
@@ -736,6 +1013,20 @@ SYSPROMPT
         echo "## Execution environment"
         echo "Your code runs inside a Docker container ($SHELLM_DOCKER_IMAGE) with bash, python3, jq, and curl pre-installed."
         echo "Host paths (like \$SHELLM_WORKDIR and run record directories) are bind-mounted at the same paths inside the container — they exist and are accessible."
+        if [[ "$SHELLM_DOCKER_ACCESS" == "broker" ]]; then
+            echo ""
+            echo "## Docker access"
+            echo "Use shellm-docker, not docker. shellm-docker talks to a host-side broker that only allows bounded container operations. The broker manages workspace mounts and rejects privileged containers, arbitrary bind mounts, host namespace sharing, device access, and Docker socket mounts."
+            echo "Broker transport: ${_SHELLM_DOCKER_BROKER_TRANSPORT:-$SHELLM_DOCKER_BROKER_TRANSPORT}."
+        elif [[ "$SHELLM_DOCKER_ACCESS" == "socket" ]]; then
+            echo ""
+            echo "## Docker access"
+            echo "The docker CLI controls the host Docker daemon through /var/run/docker.sock. This is convenient but not a strong sandbox; child bind mounts must use host-visible paths."
+        elif [[ "$SHELLM_DOCKER_ACCESS" == "dind" ]]; then
+            echo ""
+            echo "## Docker access"
+            echo "The docker CLI talks to an inner Docker daemon running inside this shellm container. The outer container is privileged, so this is not a strong sandbox."
+        fi
     fi
 
     # Append context documentation if any context was provided
@@ -1008,16 +1299,31 @@ run_loop() {
     shellm_path=$(realpath "$0")
     local ws_name="${_SHELLM_ENV_NAME:-}"
 
+    if [[ "$SHELLM_DOCKER_ACCESS" == "broker" ]]; then
+        _SHELLM_DOCKER_BROKER_TRANSPORT=$(docker_broker_select_transport)
+    elif [[ "$SHELLM_DOCKER_ACCESS" == "socket" ]]; then
+        local socket_path
+        socket_path=$(docker_socket_path) || die "Docker socket mode requested, but no Unix socket exists at $SHELLM_DOCKER_SOCKET"
+        SHELLM_DOCKER_SOCKET="$socket_path"
+    fi
+
     if [[ "$ws_name" == "local" ]]; then
+        if [[ "$SHELLM_DOCKER_ACCESS" != "none" ]]; then
+            die "--docker-access $SHELLM_DOCKER_ACCESS requires a Docker-backed env, but --env local was requested"
+        fi
         env_register_local "$ws_name"
-    elif [[ -f /.dockerenv ]]; then
-        ws_name="local"
-        env_register_local "$ws_name"
-    elif ! docker info >/dev/null 2>&1; then
-        progress "\033[1;33mWARNING: Docker not found — running on host. Use of Docker is recommended!\033[0m"
+    elif ! should_use_docker; then
+        if [[ "$SHELLM_DOCKER_ACCESS" != "none" ]]; then
+            die "--docker-access $SHELLM_DOCKER_ACCESS requested, but shellm cannot reach a Docker daemon from here"
+        fi
+        if [[ ! -f /.dockerenv || "$SHELLM_ALLOW_NESTED_DOCKER" == "1" ]]; then
+            progress "\033[1;33mWARNING: Docker not found — running on host. Use of Docker is recommended!\033[0m"
+        fi
         ws_name="local"
         env_register_local "$ws_name"
     else
+        local env_explicit=0
+        [[ -n "$ws_name" ]] && env_explicit=1
         if [[ -n "$ws_name" ]]; then
             # Explicit --env: resolve or create
             :
@@ -1034,14 +1340,15 @@ run_loop() {
                 ws_name=$(make_env_name "$prompt")
             fi
         fi
-        if env_resolve "$ws_name"; then
+        if env_resolve "$ws_name" "$env_explicit"; then
             progress "Using env: $ws_name"
         else
-            docker_setup "$workdir" "$shellm_path" "${context_files[@]+"${context_files[@]}"}"
+            docker_setup "$workdir" "$shellm_path" "$ws_name" "${context_files[@]+"${context_files[@]}"}"
             env_register "$ws_name"
             docker_active=1
             progress "Created env: $ws_name"
         fi
+        docker_broker_start "$ws_name" "$workdir" "$shellm_path"
     fi
 
     _SHELLM_ACTIVE_ENV="$ws_name"
@@ -1185,7 +1492,7 @@ exit \$__shellm_rc
         # Build env var array for subprocess
         local -a env_vars=(
             SHELLM_WORKDIR="$workdir"
-            SHELLM_ENV="$(if [[ "${_SHELLM_DOCKER_MODE:-0}" -eq 1 ]]; then echo "local"; else echo "${_SHELLM_ACTIVE_ENV:-}"; fi)"
+            SHELLM_ENV="$(if [[ "${_SHELLM_DOCKER_MODE:-0}" -eq 1 && "$SHELLM_ALLOW_NESTED_DOCKER" != "1" ]]; then echo "local"; else echo "${_SHELLM_ACTIVE_ENV:-}"; fi)"
             _SHELLM_PARENT_CONTAINER="${_SHELLM_CONTAINER:-}"
             ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
             SHELLM_MODEL="$SHELLM_MODEL"
@@ -1196,6 +1503,10 @@ exit \$__shellm_rc
             SHELLM_API_URL="$SHELLM_API_URL"
             LLM_API_URL="$SHELLM_API_URL"
             SHELLM_DOCKER_IMAGE="$SHELLM_DOCKER_IMAGE"
+            SHELLM_DOCKER_ACCESS="$SHELLM_DOCKER_ACCESS"
+            SHELLM_DOCKER_BROKER_TRANSPORT="${_SHELLM_DOCKER_BROKER_TRANSPORT:-$SHELLM_DOCKER_BROKER_TRANSPORT}"
+            SHELLM_DOCKER_SOCKET="$SHELLM_DOCKER_SOCKET"
+            SHELLM_ALLOW_NESTED_DOCKER="$SHELLM_ALLOW_NESTED_DOCKER"
             SHELLM_MAX_DEPTH="$SHELLM_MAX_DEPTH"
             _SHELLM_PARENT_RUN="$run_name"
             _SHELLM_PARENT_RUNDIR="$rundir"
@@ -1203,6 +1514,13 @@ exit \$__shellm_rc
             _SHELLM_ROOT_RUNDIR="$_SHELLM_ROOT_RUNDIR"
             PATH="$(dirname "$shellm_path"):$PATH"
         )
+        if [[ "$SHELLM_DOCKER_ACCESS" == "broker" && -n "${_SHELLM_DOCKER_BROKER_DIR:-}" ]]; then
+            env_vars+=(SHELLM_DOCKER_BROKER="$_SHELLM_DOCKER_BROKER_DIR")
+            env_vars+=(SHELLM_DOCKER_TRANSPORT="$_SHELLM_DOCKER_BROKER_TRANSPORT")
+        elif [[ "$SHELLM_DOCKER_ACCESS" == "socket" || "$SHELLM_DOCKER_ACCESS" == "dind" ]]; then
+            env_vars+=(DOCKER_HOST="unix:///var/run/docker.sock")
+            env_vars+=(DOCKER_BUILDKIT=1)
+        fi
         if [[ -n "$stdin_context" ]]; then
             env_vars+=(CONTEXT="$stdin_context")
         fi
@@ -1479,6 +1797,10 @@ main() {
                 SHELLM_DOCKER_IMAGE="${2:?--docker-image requires a value}"
                 shift 2
                 ;;
+            --docker-access)
+                SHELLM_DOCKER_ACCESS="${2:?--docker-access requires a value}"
+                shift 2
+                ;;
             -*)
                 die "Unknown option: $1 (try shellm --help)"
                 ;;
@@ -1493,6 +1815,8 @@ main() {
     if [[ "$_new_env" -eq 1 && -n "$_SHELLM_ENV_NAME" ]]; then
         die "--new-env and --env cannot be used together"
     fi
+
+    validate_docker_config
 
     if [[ "$print_prompt" -eq 1 ]]; then
         build_system_prompt "" 0
