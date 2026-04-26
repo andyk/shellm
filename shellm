@@ -1622,6 +1622,9 @@ run_loop() {
         [[ -n "$reasoning" ]] && emit_event "reasoning" "$reasoning"
 
         if [[ -z "$response" ]]; then
+            if [[ -n "$thinking" ]]; then
+                die "Empty response from Claude API: $(truncate_output "$thinking")"
+            fi
             die "Empty response from Claude API"
         fi
 
