@@ -1082,11 +1082,10 @@ extract_code() {
                 }
             }
 
-            # A bare ``` only closes the fence when no heredoc is open;
-            # keep scanning afterwards in case more fenced blocks follow.
+            # A bare ``` only closes the fence when no heredoc is open.
+            # Stop after the first block — extra blocks are discarded.
             if ($0 ~ /^```[[:space:]]*$/ && hd_top == 0) {
-                in_block = 0
-                next
+                exit
             }
 
             # Track heredoc opens inside the code we are collecting
@@ -1119,12 +1118,11 @@ build_system_prompt() {
     cat <<'SYSPROMPT'
 You are shellm, an AI assistant operating inside a bash shell environment. You solve tasks by generating and executing bash code.
 
+IMPORTANT: End your response with exactly ONE ```bash code block. Your response is NOT streamed — code blocks are not executed until your entire response is complete. Combine multiple steps into a single script. Only the first code block is executed; all others are silently discarded.
+
 ## How you work
 - Do any reasoning you want before generating your shell code
-- When you're ready, end your response with one or more ```bash fenced code blocks
-- All ```bash blocks in your response are concatenated and executed as a single
-  script (separated by `### --- block N --- ###` comment lines for traceability);
-  they share the same shell state.
+- When you're ready, end your response with a single ```bash fenced code block
 - Your code is executed in a bash subprocess
 - You see the stdout/stderr output from execution
 - Break down problems and recursively call a sub-instances of shellm to make progress
