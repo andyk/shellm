@@ -1117,7 +1117,7 @@ extract_code() {
     # rather than append so the notice fires even if the user code exits
     # early.
     if [[ "$truncation_signal" == *TRUNCATED* ]]; then
-        code=$'echo "[rest of model response truncated after first block]" >&2\n'"$code"
+        code=$'echo "[rest of model response truncated after first code block]" >&2\n'"$code"
     fi
 
     echo "$code"
