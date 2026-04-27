@@ -32,7 +32,6 @@ SHELLM_API_URL="${SHELLM_API_URL:-https://api.anthropic.com/v1/messages}"
 export LLM_API_URL="$SHELLM_API_URL"
 SHELLM_MAX_TOKENS="${SHELLM_MAX_TOKENS:-}"
 SHELLM_EFFORT="${SHELLM_EFFORT:-high}"
-SHELLM_MAX_DEPTH="${SHELLM_MAX_DEPTH:-}"
 SHELLM_DOCKER_IMAGE="${SHELLM_DOCKER_IMAGE:-ubuntu:latest}"
 SHELLM_DOCKER_ACCESS="${SHELLM_DOCKER_ACCESS:-none}"
 SHELLM_DOCKER_BROKER_TRANSPORT="${SHELLM_DOCKER_BROKER_TRANSPORT:-auto}"
@@ -123,7 +122,6 @@ Options:
   --max-iterations N   Max loop iterations (default: unlimited)
   --max-tokens N       Max tokens per response (default: model's max output cap)
   --effort LEVEL       Thinking effort: low, medium, high, xhigh, max (default: high)
-  --max-depth N        Max recursion depth for nested shellm calls (default: unlimited)
   --workdir DIR        Use specific working directory (preserved after run)
   --env NAME           Use/create a named env (Docker container or local)
   --new-env            Force creation of a new env (cannot combine with --env)
@@ -141,7 +139,6 @@ Environment:
   SHELLM_MAX_ITERATIONS   Max loop iterations
   SHELLM_MAX_TOKENS       Max tokens per response
   SHELLM_EFFORT           Thinking effort level (low/medium/high/xhigh/max)
-  SHELLM_MAX_DEPTH        Max recursion depth for nested shellm calls
   SHELLM_SYSTEM_PROMPT    Override the default system prompt text
   SHELLM_DOCKER_IMAGE     Docker image to use
   SHELLM_DOCKER_ACCESS    Docker access mode: none, broker, socket, dind
@@ -1688,7 +1685,6 @@ exit \$__shellm_rc
             SHELLM_DOCKER_BROKER_TRANSPORT="${_SHELLM_DOCKER_BROKER_TRANSPORT:-$SHELLM_DOCKER_BROKER_TRANSPORT}"
             SHELLM_DOCKER_SOCKET="$SHELLM_DOCKER_SOCKET"
             SHELLM_ALLOW_NESTED_DOCKER="$SHELLM_ALLOW_NESTED_DOCKER"
-            SHELLM_MAX_DEPTH="$SHELLM_MAX_DEPTH"
             _SHELLM_PARENT_RUN="$run_name"
             _SHELLM_PARENT_RUNDIR="$rundir"
             SHELLM_RUNDIR="$rundir"
@@ -1948,10 +1944,6 @@ main() {
                 ;;
             --effort)
                 SHELLM_EFFORT="${2:?--effort requires a value}"
-                shift 2
-                ;;
-            --max-depth)
-                SHELLM_MAX_DEPTH="${2:?--max-depth requires a value}"
                 shift 2
                 ;;
             --workdir)
