@@ -1018,7 +1018,8 @@ call_llm() {
 extract_code() {
     local response="$1"
 
-    # Extract the FIRST fenced code block (```bash, ```sh, or bare ```).
+    # Concatenate ALL fenced code blocks (```bash, ```sh, or bare ```) into
+    # one script, separated by `### --- block N --- ###` comment lines.
     # Heredoc-aware: lines like ``` inside an open heredoc do NOT close the
     # outer code fence.  We track heredoc opens (<<[-]DELIM) and closes
     # (delimiter alone on a line) so nested markdown fences pass through.
@@ -1055,17 +1056,22 @@ extract_code() {
             }
         }
 
-        BEGIN { found = 0; hd_top = 0 }
+        BEGIN { in_block = 0; hd_top = 0; block_num = 0 }
 
-        # Before the opening fence — look for ```bash, ```sh, or bare ```
-        !found {
-            if ($0 ~ /^```bash/ || $0 ~ /^```sh/) { found = 1; next }
-            if ($0 ~ /^```/)                       { found = 1; next }
+        # Outside a block — look for an opening fence
+        !in_block {
+            if ($0 ~ /^```bash/ || $0 ~ /^```sh/ || $0 ~ /^```/) {
+                in_block = 1
+                block_num++
+                if (block_num > 1) {
+                    print "### --- block " block_num " --- ###"
+                }
+            }
             next
         }
 
-        # Inside the code block
-        found {
+        # Inside a code block
+        in_block {
             # Check for heredoc close (delimiter alone on its own line)
             if (hd_top > 0) {
                 stripped = $0
@@ -1076,8 +1082,12 @@ extract_code() {
                 }
             }
 
-            # A bare ``` only closes the fence when no heredoc is open
-            if ($0 ~ /^```[[:space:]]*$/ && hd_top == 0) { exit }
+            # A bare ``` only closes the fence when no heredoc is open;
+            # keep scanning afterwards in case more fenced blocks follow.
+            if ($0 ~ /^```[[:space:]]*$/ && hd_top == 0) {
+                in_block = 0
+                next
+            }
 
             # Track heredoc opens inside the code we are collecting
             try_open_heredoc($0)
