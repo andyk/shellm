@@ -1018,11 +1018,14 @@ call_llm() {
 extract_code() {
     local response="$1"
 
-    # Concatenate ALL fenced code blocks (```bash, ```sh, or bare ```) into
-    # one script, separated by `### --- block N --- ###` comment lines.
+    # Extract the FIRST fenced code block (```bash, ```sh, or bare ```).
     # Heredoc-aware: lines like ``` inside an open heredoc do NOT close the
     # outer code fence.  We track heredoc opens (<<[-]DELIM) and closes
     # (delimiter alone on a line) so nested markdown fences pass through.
+    # If extra fenced blocks follow the first, awk writes a "TRUNCATED" line
+    # to stderr so we can prepend a notice that the model can see next turn.
+    local truncation_file
+    truncation_file=$(mktemp)
     local code
     code=$(printf '%s\n' "$response" | awk -v sq="'" '
         # ── try_open_heredoc: inspect a line for <<[-]DELIM and push delimiter
@@ -1056,21 +1059,24 @@ extract_code() {
             }
         }
 
-        BEGIN { in_block = 0; hd_top = 0; block_num = 0 }
+        BEGIN { in_block = 0; hd_top = 0; first_block_closed = 0 }
 
-        # Outside a block — look for an opening fence
-        !in_block {
-            if ($0 ~ /^```bash/ || $0 ~ /^```sh/ || $0 ~ /^```/) {
-                in_block = 1
-                block_num++
-                if (block_num > 1) {
-                    print "### --- block " block_num " --- ###"
-                }
+        # After first block closed: look for another opening fence
+        first_block_closed && !in_block {
+            if ($0 ~ /^```/) {
+                print "TRUNCATED" > "/dev/stderr"
+                exit
             }
             next
         }
 
-        # Inside a code block
+        # Before the opening fence — look for ```bash, ```sh, or bare ```
+        !in_block {
+            if ($0 ~ /^```bash/ || $0 ~ /^```sh/ || $0 ~ /^```/) { in_block = 1 }
+            next
+        }
+
+        # Inside the code block
         in_block {
             # Check for heredoc close (delimiter alone on its own line)
             if (hd_top > 0) {
@@ -1082,10 +1088,10 @@ extract_code() {
                 }
             }
 
-            # A bare ``` only closes the fence when no heredoc is open;
-            # keep scanning afterwards in case more fenced blocks follow.
+            # A bare ``` only closes the fence when no heredoc is open
             if ($0 ~ /^```[[:space:]]*$/ && hd_top == 0) {
                 in_block = 0
+                first_block_closed = 1
                 next
             }
 
@@ -1094,11 +1100,24 @@ extract_code() {
 
             print
         }
-    ')
+    ' 2>"$truncation_file")
+
+    local truncation_signal
+    truncation_signal=$(cat "$truncation_file" 2>/dev/null || true)
+    rm -f "$truncation_file"
 
     # If no fenced blocks at all, use the whole response as code
     if [[ -z "$code" ]]; then
         code="$response"
+    fi
+
+    # If the model emitted extra blocks past the first, prepend a notice
+    # echoed to stderr.  Stderr is captured and shown back to the model on
+    # its next turn, so it learns its trailing blocks were dropped.  Prepend
+    # rather than append so the notice fires even if the user code exits
+    # early.
+    if [[ "$truncation_signal" == *TRUNCATED* ]]; then
+        code=$'echo "[rest of model response truncated after first code block]" >&2\n'"$code"
     fi
 
     echo "$code"
@@ -1119,12 +1138,11 @@ build_system_prompt() {
     cat <<'SYSPROMPT'
 You are shellm, an AI assistant operating inside a bash shell environment. You solve tasks by generating and executing bash code.
 
+IMPORTANT: End your response with exactly ONE ```bash code block. Your response is NOT streamed — code blocks are not executed until your entire response is complete. Combine multiple steps into a single script. Only the first code block is executed; all others are silently discarded.
+
 ## How you work
 - Do any reasoning you want before generating your shell code
-- When you're ready, end your response with one or more ```bash fenced code blocks
-- All ```bash blocks in your response are concatenated and executed as a single
-  script (separated by `### --- block N --- ###` comment lines for traceability);
-  they share the same shell state.
+- When you're ready, end your response with a single ```bash fenced code block
 - Your code is executed in a bash subprocess
 - You see the stdout/stderr output from execution
 - Break down problems and recursively call a sub-instances of shellm to make progress
