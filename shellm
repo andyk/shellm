@@ -529,6 +529,16 @@ docker_metadata_value() {
     [[ -f "$file" ]] && cat "$file" || true
 }
 
+_compute_var_mounts() {
+    for _ev in "${_SHELLM_EXTRA_VARS[@]+"${_SHELLM_EXTRA_VARS[@]}"}"; do
+        local _val="${_ev#*=}"
+        [[ -d "$_val" ]] || continue
+        local _abs
+        _abs=$(cd "$_val" && pwd) || continue
+        printf '%s\n' "$_abs"
+    done | sort
+}
+
 env_metadata_matches() {
     local env_name="$1"
     local stored_access
@@ -563,6 +573,16 @@ env_metadata_matches() {
         [[ "$stored_tool_mounts_version" == "$_SHELLM_TOOL_MOUNTS_VERSION" ]] || return 1
     fi
 
+    # Compare --var directory mounts
+    local _expected_var_mounts
+    _expected_var_mounts=$(_compute_var_mounts)
+    local _stored_var_mounts
+    _stored_var_mounts=$(docker_metadata_value "$env_name" var_mounts)
+    # Normalize: trim trailing newlines for comparison
+    _expected_var_mounts="${_expected_var_mounts%%$'\n'}"
+    _stored_var_mounts="${_stored_var_mounts%%$'\n'}"
+    [[ "$_expected_var_mounts" == "$_stored_var_mounts" ]] || return 1
+
     return 0
 }
 
@@ -581,6 +601,18 @@ env_metadata_mismatch_message() {
                 "$env_name" "$env_name"
             return
         fi
+    fi
+    # Check --var directory mounts mismatch
+    local _expected_var_mounts
+    _expected_var_mounts=$(_compute_var_mounts)
+    local _stored_var_mounts
+    _stored_var_mounts=$(docker_metadata_value "$env_name" var_mounts)
+    _expected_var_mounts="${_expected_var_mounts%%$'\n'}"
+    _stored_var_mounts="${_stored_var_mounts%%$'\n'}"
+    if [[ "$_expected_var_mounts" != "$_stored_var_mounts" ]]; then
+        printf 'Env %s has different --var directory mounts than this run requires. Use a different --env or remove ~/.shellm/envs/%s so shellm can recreate it with the correct mounts.' \
+            "$env_name" "$env_name"
+        return
     fi
     printf 'Env %s was created with docker_access=%s, but this run requested docker_access=%s. Use a different --env, destroy the env, or request the same access mode.' \
         "$env_name" "$stored_access" "$SHELLM_DOCKER_ACCESS"
@@ -781,6 +813,29 @@ docker_setup() {
 
     debug "Docker container started: $_SHELLM_CONTAINER"
     progress "Docker container ready (${_SHELLM_CONTAINER:0:12})"
+
+    # Write reproducible docker-create.sh script
+    local env_dir="$SHELLM_ENVS_DIR/$env_name"
+    mkdir -p "$env_dir"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf '# shellm env: %s\n' "$env_name"
+        printf '# Created: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '# Image: %s\n' "$SHELLM_DOCKER_IMAGE"
+        printf '# Access: %s\n\n' "$SHELLM_DOCKER_ACCESS"
+        printf 'set -euo pipefail\n\n'
+        printf 'CONTAINER=$(docker run -d \\\n'
+        for flag in "${docker_run_flags[@]}"; do
+            printf '  %q \\\n' "$flag"
+        done
+        for flag in "${extra_mounts[@]+"${extra_mounts[@]}"}"; do
+            printf '  %q \\\n' "$flag"
+        done
+        printf '  %q \\\n' "$SHELLM_DOCKER_IMAGE"
+        printf '  sleep infinity)\n\n'
+        printf 'echo "Container: $CONTAINER"\n'
+    } > "$env_dir/docker-create.sh"
+    chmod +x "$env_dir/docker-create.sh"
 }
 
 docker_teardown() {
@@ -885,6 +940,9 @@ env_register() {
     local digest
     digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$SHELLM_DOCKER_IMAGE" 2>/dev/null || true)
     [[ -n "$digest" ]] && printf '%s\n' "$digest" > "$ws_dir/image_digest"
+
+    # Save --var directory mounts for reattach validation
+    _compute_var_mounts > "$ws_dir/var_mounts"
 }
 
 # Register a local (non-docker) env.
@@ -899,6 +957,7 @@ env_register_local() {
     printf '\n' > "$ws_dir/docker_socket"
     printf '0\n' > "$ws_dir/privileged"
     rm -f "$ws_dir/container_id" "$ws_dir/tool_mounts_version"
+    : > "$ws_dir/var_mounts"
 }
 
 # Tear down an env's Docker container and remove its metadata.
