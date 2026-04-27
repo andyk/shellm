@@ -1621,16 +1621,52 @@ run_loop() {
         rm -f "$thinking_file"
 
         [[ -n "$thinking" ]] && emit_event "thinking" "$thinking"
-        local reasoning
-        reasoning=$(extract_reasoning "$response")
-        [[ -n "$reasoning" ]] && emit_event "reasoning" "$reasoning"
+
+        # Retry on empty response: feed captured thinking back as assistant
+        # context so the model continues from where it left off (max_tokens
+        # gets hit during thinking before any visible output is emitted).
+        # Default: unlimited retries; set SHELLM_EMPTY_RESPONSE_RETRIES to cap.
+        local empty_retries=0
+        local max_empty_retries="${SHELLM_EMPTY_RESPONSE_RETRIES:-}"
+        local retry_messages_json="$messages_json"
+        while [[ -z "$response" ]]; do
+            if [[ -n "$max_empty_retries" && "$empty_retries" -ge "$max_empty_retries" ]]; then
+                break
+            fi
+            empty_retries=$((empty_retries + 1))
+            if [[ -n "$thinking" ]]; then
+                progress "Empty response — feeding thinking back to continue (retry $empty_retries${max_empty_retries:+/$max_empty_retries})..."
+                emit_event "empty_response_retry" "fed back ${#thinking} chars of thinking"
+                retry_messages_json=$(printf '%s' "$retry_messages_json" | jq \
+                    --arg t "$thinking" \
+                    '. + [{"role":"assistant","content":$t},{"role":"user","content":"Your previous response ran out of output tokens during the reasoning above before you could emit any visible text. Continue from where you left off and produce the bash code for the next step now."}]')
+            else
+                progress "Empty response from API (retry $empty_retries${max_empty_retries:+/$max_empty_retries})..."
+                sleep 1
+            fi
+
+            : > "$thinking_file"
+            response=$(call_llm "$system_prompt" "$retry_messages_json" "$thinking_file")
+
+            thinking=""
+            if [[ -s "$thinking_file" ]]; then
+                thinking=$(cat "$thinking_file")
+            fi
+            rm -f "$thinking_file"
+
+            [[ -n "$thinking" ]] && emit_event "thinking" "$thinking"
+        done
 
         if [[ -z "$response" ]]; then
             if [[ -n "$thinking" ]]; then
-                die "Empty response from Claude API: $(truncate_output "$thinking")"
+                die "Empty response from Claude API after $empty_retries retries: $(truncate_output "$thinking")"
             fi
-            die "Empty response from Claude API"
+            die "Empty response from Claude API after $empty_retries retries"
         fi
+
+        local reasoning
+        reasoning=$(extract_reasoning "$response")
+        [[ -n "$reasoning" ]] && emit_event "reasoning" "$reasoning"
 
         debug "Response:\n$response"
 
