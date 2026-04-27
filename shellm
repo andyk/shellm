@@ -26,13 +26,13 @@ _shellm_load_env ".env" || _shellm_load_env "$_SHELLM_SCRIPT_DIR/.env" || true
 # ---------------------------------------------------------------------------
 
 SHELLM_MODEL="${SHELLM_MODEL:-claude-opus-4-7}"
-SHELLM_MAX_ITERATIONS="${SHELLM_MAX_ITERATIONS:-25}"
+SHELLM_MAX_ITERATIONS="${SHELLM_MAX_ITERATIONS:-}"
 SHELLM_TRUNCATE="${SHELLM_TRUNCATE:-2000}"
 SHELLM_API_URL="${SHELLM_API_URL:-https://api.anthropic.com/v1/messages}"
 export LLM_API_URL="$SHELLM_API_URL"
 SHELLM_MAX_TOKENS="${SHELLM_MAX_TOKENS:-}"
 SHELLM_EFFORT="${SHELLM_EFFORT:-high}"
-SHELLM_MAX_DEPTH="${SHELLM_MAX_DEPTH:-5}"
+SHELLM_MAX_DEPTH="${SHELLM_MAX_DEPTH:-}"
 SHELLM_DOCKER_IMAGE="${SHELLM_DOCKER_IMAGE:-ubuntu:latest}"
 SHELLM_DOCKER_ACCESS="${SHELLM_DOCKER_ACCESS:-none}"
 SHELLM_DOCKER_BROKER_TRANSPORT="${SHELLM_DOCKER_BROKER_TRANSPORT:-auto}"
@@ -120,10 +120,10 @@ Options:
   -q, --quiet          Suppress all progress/streaming output (stderr), keep only final answer
   -h, --help           Show this help
   --model MODEL        Model to use (default: claude-opus-4-7)
-  --max-iterations N   Max loop iterations (default: 25)
+  --max-iterations N   Max loop iterations (default: unlimited)
   --max-tokens N       Max tokens per response (default: model's max output cap)
   --effort LEVEL       Thinking effort: low, medium, high, xhigh, max (default: high)
-  --max-depth N        Max recursion depth for nested shellm calls (default: 5)
+  --max-depth N        Max recursion depth for nested shellm calls (default: unlimited)
   --workdir DIR        Use specific working directory (preserved after run)
   --env NAME           Use/create a named env (Docker container or local)
   --new-env            Force creation of a new env (cannot combine with --env)
@@ -1591,18 +1591,24 @@ run_loop() {
     local shellm_path
     shellm_path=$(realpath "$0")
 
-    progress "Starting shellm loop (model: $SHELLM_MODEL, max iterations: $SHELLM_MAX_ITERATIONS)"
+    progress "Starting shellm loop (model: $SHELLM_MODEL, max iterations: ${SHELLM_MAX_ITERATIONS:-unlimited})"
 
     SHELLM_CAST_FILE="$rundir/.shellm/session.jsonl"
     emit_cast_header "$SHELLM_MODEL" "$workdir"
     emit_event "command" "$prompt"
 
     local iteration=0
-    while [[ "$iteration" -lt "$SHELLM_MAX_ITERATIONS" ]]; do
+    while [[ -z "$SHELLM_MAX_ITERATIONS" || "$iteration" -lt "$SHELLM_MAX_ITERATIONS" ]]; do
         iteration=$((iteration + 1))
-        debug "=== Iteration $iteration / $SHELLM_MAX_ITERATIONS ==="
+        local iter_label
+        if [[ -n "$SHELLM_MAX_ITERATIONS" ]]; then
+            iter_label="$iteration/$SHELLM_MAX_ITERATIONS"
+        else
+            iter_label="$iteration"
+        fi
+        debug "=== Iteration $iter_label ==="
         [[ "$QUIET" -eq 0 ]] && echo >&2
-        progress "Iteration $iteration/$SHELLM_MAX_ITERATIONS — calling Claude API..."
+        progress "Iteration $iter_label — calling Claude API..."
 
         # Call Claude (capture thinking/reasoning to file)
         local thinking_file="$rundir/.shellm/.last_thinking"
