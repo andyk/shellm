@@ -30,7 +30,7 @@ SHELLM_MAX_ITERATIONS="${SHELLM_MAX_ITERATIONS:-25}"
 SHELLM_TRUNCATE="${SHELLM_TRUNCATE:-2000}"
 SHELLM_API_URL="${SHELLM_API_URL:-https://api.anthropic.com/v1/messages}"
 export LLM_API_URL="$SHELLM_API_URL"
-SHELLM_MAX_TOKENS="${SHELLM_MAX_TOKENS:-16000}"
+SHELLM_MAX_TOKENS="${SHELLM_MAX_TOKENS:-}"
 SHELLM_EFFORT="${SHELLM_EFFORT:-high}"
 SHELLM_MAX_DEPTH="${SHELLM_MAX_DEPTH:-5}"
 SHELLM_DOCKER_IMAGE="${SHELLM_DOCKER_IMAGE:-ubuntu:latest}"
@@ -121,7 +121,7 @@ Options:
   -h, --help           Show this help
   --model MODEL        Model to use (default: claude-opus-4-7)
   --max-iterations N   Max loop iterations (default: 25)
-  --max-tokens N       Max tokens per response (default: 16000)
+  --max-tokens N       Max tokens per response (default: model's max output cap)
   --effort LEVEL       Thinking effort: low, medium, high, xhigh, max (default: high)
   --max-depth N        Max recursion depth for nested shellm calls (default: 5)
   --workdir DIR        Use specific working directory (preserved after run)
@@ -989,8 +989,9 @@ call_llm() {
     local messages_json="$2"
     local thinking_output_file="${3:-}"
 
-    local -a args=(--stream -m "$SHELLM_MODEL" -t "$SHELLM_MAX_TOKENS"
+    local -a args=(--stream -m "$SHELLM_MODEL"
         --effort "$SHELLM_EFFORT" --thinking -s "$system_prompt" -M "$messages_json")
+    [[ -n "$SHELLM_MAX_TOKENS" ]] && args+=(-t "$SHELLM_MAX_TOKENS")
 
     local text_file
     text_file=$(mktemp)

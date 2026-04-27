@@ -426,7 +426,7 @@ All configuration is available as both CLI flags and environment variables. Flag
 |------|---------|---------|-------------|
 | `--model` | `SHELLM_MODEL` | `claude-opus-4-7` | LLM model to use |
 | `--max-iterations` | `SHELLM_MAX_ITERATIONS` | `25` | Max loop iterations before giving up |
-| `--max-tokens` | `SHELLM_MAX_TOKENS` | `16000` | Max tokens per API response |
+| `--max-tokens` | `SHELLM_MAX_TOKENS` | model's max output cap | Max tokens per API response |
 | `--effort` | `SHELLM_EFFORT` | `high` | Thinking effort: low, medium, high, xhigh, max |
 | `--max-depth` | `SHELLM_MAX_DEPTH` | `5` | Max nesting depth for nested shellm calls |
 | — | `SHELLM_INACTIVITY_TIMEOUT` | `30` | Seconds before killing idle execution |

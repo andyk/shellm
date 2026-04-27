@@ -24,7 +24,7 @@ _llm_load_env ".env" || _llm_load_env "$(dirname "$(realpath "$0")")/.env" || tr
 
 LLM_MODEL=""
 LLM_SYSTEM=""
-LLM_MAX_TOKENS=4096
+LLM_MAX_TOKENS=""
 LLM_MESSAGES=""
 LLM_STREAM=0
 LLM_PROVIDER=""
@@ -81,7 +81,7 @@ detect_provider() {
     local model="$1"
     case "$model" in
         claude-*)                        echo "anthropic" ;;
-        gpt-*|o1-*|o3-*|o4-*|chatgpt-*) echo "openai" ;;
+        gpt-*|o1*|o3*|o4*|chatgpt-*) echo "openai" ;;
         gemini-*)                        echo "gemini" ;;
         *)                               die "Cannot detect provider for model '$model'. Use --provider." ;;
     esac
@@ -89,6 +89,39 @@ detect_provider() {
 
 if [[ -z "$LLM_PROVIDER" ]]; then
     LLM_PROVIDER=$(detect_provider "$LLM_MODEL")
+fi
+
+# Per-model max output token caps (synchronous APIs, no beta headers).
+# Used as the default when -t/--max-tokens is not given.
+get_model_max_tokens() {
+    local model="$1"
+    case "$model" in
+        # Anthropic — Claude 4.x family (caps verified via API 400 probing)
+        claude-opus-4-7*|claude-opus-4-6*|claude-opus-4-5*|claude-opus-4-1*|claude-opus-4-0*) echo 128000 ;;
+        claude-sonnet-4-7*|claude-sonnet-4-6*) echo 128000 ;;
+        claude-sonnet-4-5*|claude-sonnet-4-0*) echo 64000 ;;
+        claude-haiku-4-5*|claude-haiku-4-0*)   echo 64000 ;;
+        # Anthropic — Claude 3.x family (legacy)
+        claude-3-5-sonnet*|claude-3-5-haiku*) echo 8192 ;;
+        claude-3-opus*|claude-3-sonnet*|claude-3-haiku*) echo 4096 ;;
+        # OpenAI — reasoning models
+        o1*|o3*|o4*) echo 100000 ;;
+        # OpenAI — chat models
+        gpt-5*)        echo 128000 ;;
+        gpt-4o*)       echo 16384 ;;
+        gpt-4-turbo*)  echo 4096 ;;
+        gpt-4*)        echo 8192 ;;
+        gpt-3.5*)      echo 4096 ;;
+        # Google Gemini (caps from ListModels API; 1.5 family retired in 2026)
+        gemini-2.0-flash*) echo 8192 ;;
+        gemini-*)          echo 65536 ;;
+        # Conservative fallback for unknown models
+        *) echo 4096 ;;
+    esac
+}
+
+if [[ -z "$LLM_MAX_TOKENS" ]]; then
+    LLM_MAX_TOKENS=$(get_model_max_tokens "$LLM_MODEL")
 fi
 
 # ---------------------------------------------------------------------------
@@ -136,12 +169,20 @@ build_payload_openai() {
             '[{"role":"system","content":$s}] + $m')
     fi
 
+    # GPT-5 and o-series reasoning models require max_completion_tokens
+    # instead of the deprecated max_tokens.
+    local tokens_field="max_tokens"
+    case "$LLM_MODEL" in
+        o1*|o3*|o4*|gpt-5*) tokens_field="max_completion_tokens" ;;
+    esac
+
     jq -n \
         --arg model "$LLM_MODEL" \
+        --arg tokens_field "$tokens_field" \
         --argjson max_tokens "$LLM_MAX_TOKENS" \
         --argjson messages "$msgs" \
         --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )" \
-        '{model:$model, max_tokens:$max_tokens, messages:$messages, stream:$stream}'
+        '{model:$model, messages:$messages, stream:$stream} + {($tokens_field): $max_tokens}'
 }
 
 build_payload_gemini() {
