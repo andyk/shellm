@@ -17,6 +17,11 @@ SHELLY_KERNEL_DIR=""
 SHELLY_TRAJ_DIR=""
 VERBOSE=0
 
+# Autonomous mode config
+SHELLY_TICK_INTERVAL="${SHELLY_TICK_INTERVAL:-30}"
+SHELLY_THINK_MODEL="${SHELLY_THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
+SHELLY_CONTEXT_TAIL="${SHELLY_CONTEXT_TAIL:-30}"
+
 # Load .env if present (so skill-declared vars like OBSIDIAN_VAULT are available)
 if [[ -f ".env" ]]; then
     set -a
@@ -97,6 +102,164 @@ _destroy_persona_containers() {
         cid=$(cat "$env_dir/container_id" 2>/dev/null || true)
         [[ -n "$cid" ]] && docker rm -f "$cid" >/dev/null 2>&1 || true
     done
+}
+
+# ---------------------------------------------------------------------------
+# Autonomous mode helpers
+# ---------------------------------------------------------------------------
+
+# Extract goals from persona's memories (looks for type: goal in frontmatter)
+get_goals() {
+    local mem_dir="${1:-$SHELLY_MEMORIES_DIR}"
+    [[ -d "$mem_dir" ]] || return 0
+    local goals=""
+    local f
+    for f in "$mem_dir"/*.md; do
+        [[ -f "$f" ]] || continue
+        # Check YAML frontmatter for type: goal
+        local ftype
+        ftype=$(awk 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f && /^type:/{sub(/^type:[[:space:]]*/, ""); print}' "$f")
+        case "$ftype" in
+            goal|intention)
+                # Extract the body (after frontmatter), strip leading blank lines
+                local body
+                body=$(awk 'NR==1 && /^---$/{f=1; next} f && /^---$/{f=0; next} !f{print}' "$f" | sed '/./,$!d' | head -3)
+                [[ -n "$body" ]] && goals="${goals}- ${body}
+"
+                ;;
+        esac
+    done
+    if [[ -z "$goals" ]]; then
+        printf '%s' "(no goals set)"
+    else
+        printf '%s' "$goals"
+    fi
+}
+
+# Load a prompt template, replacing {{goals}} and {{persona_name}}
+load_prompt() {
+    local prompt_file="$1"
+    local persona_name="$2"
+    local goals="$3"
+    [[ -f "$prompt_file" ]] || return 1
+    local content
+    content=$(cat "$prompt_file")
+    # Replace {{persona_name}} using sed
+    content=$(printf '%s' "$content" | sed "s/{{persona_name}}/$persona_name/g")
+    # Replace {{goals}} — write goals to temp file and use sed with read
+    # (awk -v breaks on embedded newlines)
+    local goals_file
+    goals_file=$(mktemp)
+    printf '%s' "$goals" > "$goals_file"
+    # Use perl if available (handles multiline cleanly), else python, else simple sed
+    if command -v perl >/dev/null 2>&1; then
+        content=$(printf '%s' "$content" | perl -pe "
+            BEGIN { open(F, '<', '$goals_file'); local \$/; \$g = <F>; close(F); chomp \$g; }
+            s/\\{\\{goals\\}\\}/\$g/g;
+        ")
+    else
+        # Fallback: split on {{goals}} and reassemble
+        local before after
+        before="${content%%\{\{goals\}\}*}"
+        after="${content#*\{\{goals\}\}}"
+        if [[ "$before" != "$content" ]]; then
+            content="${before}${goals}${after}"
+        fi
+    fi
+    rm -f "$goals_file"
+    printf '%s' "$content"
+}
+
+# Ensure the think prompt exists for a persona (copy from bundled if missing)
+ensure_think_prompt() {
+    local persona_dir="$1"
+    local prompts_dir="$persona_dir/prompts"
+    mkdir -p "$prompts_dir"
+    if [[ ! -f "$prompts_dir/think.md" ]]; then
+        # Copy from bundled prompts (try repo-relative first, then installed location)
+        local script_dir
+        script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+        local bundled="$script_dir/../prompts/think.md"
+        if [[ ! -f "$bundled" ]]; then
+            bundled="$HOME/.shelly-prompts/think.md"
+        fi
+        if [[ -f "$bundled" ]]; then
+            cp "$bundled" "$prompts_dir/think.md"
+        else
+            die "think prompt not found (checked $script_dir/../prompts/ and ~/.shelly-prompts/)"
+        fi
+    fi
+}
+
+# mkdir-based POSIX lock (bash 3.2 compatible, no flock)
+acquire_lock() {
+    local lock_dir="$1"
+    if mkdir "$lock_dir" 2>/dev/null; then
+        printf '%s' "$$" > "$lock_dir/pid"
+        return 0
+    fi
+    # Check for stale lock
+    if [[ -f "$lock_dir/pid" ]]; then
+        local old_pid
+        old_pid=$(cat "$lock_dir/pid" 2>/dev/null) || old_pid=""
+        if [[ -n "$old_pid" ]] && ! kill -0 "$old_pid" 2>/dev/null; then
+            # Stale lock — remove and retry
+            rm -rf "$lock_dir"
+            if mkdir "$lock_dir" 2>/dev/null; then
+                printf '%s' "$$" > "$lock_dir/pid"
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+release_lock() {
+    local lock_dir="$1"
+    rm -rf "$lock_dir"
+}
+
+# Discover thought processes: scan bundled + persona TP dirs, merge
+discover_thought_processes() {
+    local persona_dir="$1"
+    local script_dir
+    script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+    local bundled_dir="$script_dir/../thought-processes"
+    # Fallback to installed location if repo-relative doesn't exist
+    if [[ ! -d "$bundled_dir" ]]; then
+        bundled_dir="$HOME/.shelly-thought-processes"
+    fi
+    local persona_tp_dir="$persona_dir/thought-processes"
+
+    # Use a delimited string for dedup (bash 3.2 compat)
+    local _seen="" _results=""
+    local f name
+
+    # Persona TPs take precedence
+    if [[ -d "$persona_tp_dir" ]]; then
+        for f in "$persona_tp_dir"/*.md; do
+            [[ -f "$f" ]] || continue
+            name=$(basename "$f" .md)
+            _seen="${_seen}|${name}|"
+            _results="${_results}${name}=${f}
+"
+        done
+    fi
+
+    # Bundled TPs (skip if persona already has override)
+    if [[ -d "$bundled_dir" ]]; then
+        for f in "$bundled_dir"/*.md; do
+            [[ -f "$f" ]] || continue
+            name=$(basename "$f" .md)
+            case "$_seen" in
+                *"|${name}|"*) continue ;;
+            esac
+            _results="${_results}${name}=${f}
+"
+        done
+    fi
+
+    printf '%s' "$_results"
 }
 
 # ---------------------------------------------------------------------------
@@ -288,7 +451,14 @@ $skills_summary"
 # ---------------------------------------------------------------------------
 
 cmd_send() {
-    local message="$*"
+    local message=""
+    local ticks=10
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ticks) ticks="${2:?--ticks requires a number}"; shift 2 ;;
+            *) message="${message:+$message }$1"; shift ;;
+        esac
+    done
 
     # Read from stdin if no args and stdin is piped
     if [[ -z "$message" && ! -t 0 ]]; then
@@ -305,110 +475,17 @@ cmd_send() {
     printf '{"type":"human-msg","content":%s}' "$(printf '%s' "$message" | jq -Rsa .)" \
         | traj append "$traj_dir" >/dev/null
 
-    # Build system prompt (persona + skills + kernel + memories)
-    local system_prompt
-    system_prompt=$(build_shelly_system_prompt "$persona_dir")
-
-    # Build messages from traj via context
-    local messages
-    messages=$(context "$traj_dir" \
-        --assistant-types agent-msg \
-        --user-types human-msg \
-        --exclude-types agent-run 2>/dev/null) || messages='[]'
-
-    # Run shellm in background so Ctrl+C can interrupt it
-    local run_dir="$persona_dir/workdir"
-    local response_file
-    response_file=$(mktemp)
-    local _interrupted=0
-
-    # Resolve absolute paths so mem/skills work from any working directory
-    local abs_mem_dir abs_skills_dir abs_kernel_dir
-    abs_mem_dir=$(cd "$SHELLY_MEMORIES_DIR" 2>/dev/null && pwd) || abs_mem_dir="$SHELLY_MEMORIES_DIR"
-    abs_skills_dir=$(cd "$SHELLY_SKILLS_DIR" 2>/dev/null && pwd) || abs_skills_dir="$SHELLY_SKILLS_DIR"
-    abs_kernel_dir=$(cd "$SHELLY_KERNEL_DIR" 2>/dev/null && pwd) || abs_kernel_dir="$SHELLY_KERNEL_DIR"
-
-    local persona_name
-    persona_name=$(basename "$(readlink "$SHELLY_DIR/personas/current")")
-
-    # Collect --var flags from skill-declared vars
-    local -a skill_var_flags=()
-    while IFS= read -r vname; do
-        [[ -z "$vname" ]] && continue
-        local vval="${!vname:-}"
-        [[ -n "$vval" ]] && skill_var_flags+=(--var "$vname=$vval")
-    done < <(collect_skill_vars "$persona_dir")
-
-    # Build the prompt for shellm: system context + conversation history + current message.
-    # shellm is unaware of shelly — it just receives this as its prompt string.
-    # Prior conversation turns come from shelly's persistent trajectory via context.
-    local chat_history=""
-    local turn_count
-    turn_count=$(printf '%s' "$messages" | jq 'length') || turn_count=0
-    if [[ "$turn_count" -gt 1 ]]; then
-        # All turns except the last (which is the message we're about to send).
-        # Render as simple labeled turns so the model sees the conversation.
-        chat_history=$(printf '%s' "$messages" | jq -r --arg name "$persona_name" '
-            .[:-1][] |
-            if .role == "user" then "Human: " + .content
-            else ($name + ": " + .content) end
-        ')
-    fi
-
-    local full_message="<context>
-$system_prompt
-</context>
-"
-    if [[ -n "$chat_history" ]]; then
-        full_message+="
-<conversation-history>
-$chat_history
-</conversation-history>
-"
-    fi
-    full_message+="$message"
-
-    export SHELLM_HOME="$persona_dir/.shellm"
-
-    SHELLM_NO_BANNER=1 SHELLM_MODEL="$SHELLY_MODEL" \
-        shellm --env "$persona_name" --workdir "$run_dir" \
-        --var "MEM_DIR=$abs_mem_dir" \
-        --var "SKILLS_DIR=$abs_skills_dir" \
-        --var "SKILLS_KERNEL_DIR=$abs_kernel_dir" \
-        ${skill_var_flags[@]+"${skill_var_flags[@]}"} \
-        --bin "$(command -v mem)" \
-        --bin "$(command -v skills)" \
-        "$full_message" > "$response_file" &
-    local shellm_pid=$!
-
-    # Trap SIGINT: kill shellm but don't exit shelly
-    trap '_interrupted=1; kill $shellm_pid 2>/dev/null || true' INT
-    wait "$shellm_pid" 2>/dev/null && true || true
-    trap - INT
-
-    if [[ "$_interrupted" -eq 1 ]]; then
-        # Wait for shellm to fully exit (cleanup trap, Docker teardown, etc.)
-        wait "$shellm_pid" 2>/dev/null || true
-        rm -f "$response_file"
-        printf '\n(interrupted)\n' >&2
-        return 0
-    fi
-
-    local response
-    response=$(cat "$response_file")
-    rm -f "$response_file"
-
-    # Print response
-    if [[ -n "$response" ]]; then
-        printf '%s\n' "$response"
-    fi
-
-    # Record assistant response to traj
-    printf '{"type":"agent-msg","content":%s}' "$(printf '%s' "${response:-}" | jq -Rsa .)" \
-        | traj append "$traj_dir" >/dev/null
+    # Run ticks to process the message (headlong architecture)
+    printf '[shelly] Message received. Running %d ticks...\n' "$ticks" >&2
+    local i
+    for i in $(seq 1 "$ticks"); do
+        printf '[tick %d]\n' "$i" >&2
+        cmd_think || true
+    done
+    printf '[shelly] %d ticks complete. Run `shelly start` to keep the agent going.\n' "$ticks" >&2
 }
 
-cmd_repl() {
+cmd_repl_plain() {
     ensure_persona
 
     local persona_dir
@@ -461,6 +538,30 @@ cmd_repl() {
         case "$input" in
             /quit|/exit|/q)
                 break
+                ;;
+            /start)
+                cmd_start &
+                printf 'Autonomous loop started in background (PID %d). Use /stop to halt.\n' "$!" >&2
+                ;;
+            /stop)
+                cmd_stop
+                ;;
+            /think)
+                cmd_think
+                ;;
+            /focus\ *)
+                local focus_args="${input#/focus }"
+                eval cmd_focus $focus_args
+                ;;
+            /focus)
+                cmd_focus show
+                ;;
+            /log\ *)
+                local log_n="${input#/log }"
+                cmd_log "$log_n"
+                ;;
+            /log)
+                cmd_log
                 ;;
             /personas\ *)
                 local personas_rest="${input#/personas }"
@@ -547,38 +648,387 @@ cmd_repl() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# TUI repl — alternate-screen with scroll region
+# ---------------------------------------------------------------------------
+
+# Global TUI state
+_tui_rows=0
+_tui_cols=0
+_tui_tail_pid=""
+_tui_loop_pid=""
+_tui_active=0
+_tui_stty_saved=""
+_tui_persona_name=""
+_tui_loop_running=0
+
+tui_init() {
+    _tui_stty_saved=$(stty -g 2>/dev/null) || true
+    _tui_rows=$(tput lines)
+    _tui_cols=$(tput cols)
+    # Enter alternate screen
+    printf '\033[?1049h' >/dev/tty
+    # Clear screen
+    printf '\033[2J' >/dev/tty
+    # Set scroll region: rows 1 to (rows-2)
+    local scroll_end=$((_tui_rows - 2))
+    printf '\033[1;%dr' "$scroll_end" >/dev/tty
+    # Draw status bar and input line
+    tui_draw_status
+    tui_draw_input_line
+    _tui_active=1
+}
+
+tui_cleanup() {
+    [[ "$_tui_active" -eq 0 ]] && return 0
+    _tui_active=0
+    # Kill background processes
+    if [[ -n "$_tui_tail_pid" ]]; then
+        kill "$_tui_tail_pid" 2>/dev/null || true
+        wait "$_tui_tail_pid" 2>/dev/null || true
+        _tui_tail_pid=""
+    fi
+    if [[ -n "$_tui_loop_pid" ]]; then
+        kill "$_tui_loop_pid" 2>/dev/null || true
+        wait "$_tui_loop_pid" 2>/dev/null || true
+        _tui_loop_pid=""
+    fi
+    # Reset scroll region
+    printf '\033[r' >/dev/tty
+    # Exit alternate screen
+    printf '\033[?1049l' >/dev/tty
+    # Restore stty
+    if [[ -n "$_tui_stty_saved" ]]; then
+        stty "$_tui_stty_saved" 2>/dev/null || true
+    fi
+}
+
+tui_draw_status() {
+    local status_row=$((_tui_rows - 1))
+    local state="idle"
+    [[ "$_tui_loop_running" -eq 1 ]] && state="running"
+    local tick_info=""
+    if [[ -n "$_tui_persona_name" ]]; then
+        tick_info="$_tui_persona_name | $state"
+    else
+        tick_info="headlong | $state"
+    fi
+    # Pad to full width
+    local padded
+    padded=$(printf "%-${_tui_cols}s" " $tick_info")
+    # DEC save cursor, move to status row, reverse video, print, reset, DEC restore
+    printf '\0337\033[%d;1H\033[7m%s\033[0m\0338' "$status_row" "$padded" >/dev/tty
+}
+
+tui_draw_input_line() {
+    # Position cursor at the input row (last row)
+    printf '\033[%d;1H\033[2K> ' "$_tui_rows" >/dev/tty
+}
+
+tui_scroll_print() {
+    local text="$1"
+    local scroll_end=$((_tui_rows - 2))
+    # DEC save, move to last line of scroll region, newline scrolls region up,
+    # clear line, print text, DEC restore
+    printf '\0337\033[%d;1H\n\033[2K%s\0338' "$scroll_end" "$text" >/dev/tty
+}
+
+tui_stream_entry() {
+    local json_line="$1"
+    local entry_type content source
+    entry_type=$(printf '%s' "$json_line" | jq -r '.type // "unknown"' 2>/dev/null) || return 0
+    content=$(printf '%s' "$json_line" | jq -r '.content // ""' 2>/dev/null) || content=""
+    source=$(printf '%s' "$json_line" | jq -r '.source // ""' 2>/dev/null) || source=""
+
+    # Truncate content to first line, max (cols-20) chars
+    content="${content%%$'\n'*}"
+    local max_len=$((_tui_cols - 20))
+    if [[ ${#content} -gt $max_len ]]; then
+        content="${content:0:$max_len}..."
+    fi
+
+    # Color by type
+    local color="\033[0m"  # default
+    case "$entry_type" in
+        thought)    color="\033[36m" ;;  # cyan
+        action)     color="\033[33m" ;;  # yellow
+        observation) color="\033[32m" ;; # green
+        human-msg)  color="\033[1;37m" ;; # bold white
+        agent-run)  color="\033[35m" ;;  # magenta
+    esac
+    # tp-thought types (tp:*)
+    case "$entry_type" in
+        tp:*|tp-thought) color="\033[34m" ;;  # blue
+    esac
+
+    local source_tag=""
+    [[ -n "$source" ]] && source_tag="($source) "
+
+    tui_scroll_print "$(printf '%b[%s]%b %s%s' "$color" "$entry_type" "\033[0m" "$source_tag" "$content")"
+}
+
+tui_start_watcher() {
+    local traj_dir="$1"
+    local traj_file="$traj_dir/root.jsonl"
+    (
+        # Wait for the traj file to exist
+        while [[ ! -f "$traj_file" ]]; do
+            sleep 0.5
+        done
+        # Tail new lines and stream them
+        tail -n 0 -f "$traj_file" 2>/dev/null | while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            # Re-read dimensions in case of resize
+            local r c entry_type content source color max_len source_tag
+            r=$(tput lines 2>/dev/null) || r=$_tui_rows
+            c=$(tput cols 2>/dev/null) || c=$_tui_cols
+            local scroll_end=$((r - 2))
+
+            entry_type=$(printf '%s' "$line" | jq -r '.type // "unknown"' 2>/dev/null) || continue
+            content=$(printf '%s' "$line" | jq -r '.content // ""' 2>/dev/null) || content=""
+            source=$(printf '%s' "$line" | jq -r '.source // ""' 2>/dev/null) || source=""
+
+            # Truncate
+            content="${content%%$'\n'*}"
+            max_len=$((c - 20))
+            if [[ ${#content} -gt $max_len && $max_len -gt 3 ]]; then
+                content="${content:0:$max_len}..."
+            fi
+
+            color="\033[0m"
+            case "$entry_type" in
+                thought)     color="\033[36m" ;;
+                action)      color="\033[33m" ;;
+                observation) color="\033[32m" ;;
+                human-msg)   color="\033[1;37m" ;;
+                agent-run)   color="\033[35m" ;;
+            esac
+            case "$entry_type" in
+                tp:*|tp-thought) color="\033[34m" ;;
+            esac
+
+            source_tag=""
+            [[ -n "$source" ]] && source_tag="($source) "
+
+            local formatted
+            formatted=$(printf '%b[%s]%b %s%s' "$color" "$entry_type" "\033[0m" "$source_tag" "$content")
+            # DEC save, scroll region print, DEC restore — write to /dev/tty
+            printf '\0337\033[%d;1H\n\033[2K%s\0338' "$scroll_end" "$formatted" >/dev/tty
+        done
+    ) &
+    _tui_tail_pid=$!
+}
+
+tui_show_recent() {
+    local traj_dir="$1"
+    local n="${2:-10}"
+    local traj_file="$traj_dir/root.jsonl"
+    [[ -f "$traj_file" ]] || return 0
+    tail -n "$n" "$traj_file" | while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        tui_stream_entry "$line"
+    done
+}
+
+_tui_handle_winch() {
+    [[ "$_tui_active" -eq 0 ]] && return 0
+    _tui_rows=$(tput lines 2>/dev/null) || true
+    _tui_cols=$(tput cols 2>/dev/null) || true
+    local scroll_end=$((_tui_rows - 2))
+    # Reset and re-set scroll region
+    printf '\033[1;%dr' "$scroll_end" >/dev/tty
+    tui_draw_status
+    tui_draw_input_line
+}
+
+# Simplified think loop for TUI — no lock, no traps, output suppressed.
+# The TUI manages lifecycle via _tui_loop_running and stop flag.
+_tui_run_loop() {
+    local persona_dir="$1"
+    local tick_interval="$SHELLY_TICK_INTERVAL"
+    local stop_flag="$persona_dir/stop.flag"
+    rm -f "$stop_flag"
+
+    local tick_count=0
+    while true; do
+        if [[ -f "$stop_flag" ]]; then
+            break
+        fi
+        tick_count=$((tick_count + 1))
+        cmd_think 2>/dev/null || true
+        if [[ -f "$stop_flag" ]]; then
+            break
+        fi
+        sleep "$tick_interval" || break
+    done
+}
+
+cmd_repl() {
+    # Fall back to plain repl for dumb terminals
+    if [[ -z "${TERM:-}" || "$TERM" == "dumb" ]] || ! test -t 1; then
+        cmd_repl_plain
+        return
+    fi
+
+    ensure_persona
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local persona_name
+    persona_name=$(grep '^name=' "$persona_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$persona_name" ]] && persona_name=$(basename "$persona_dir")
+    _tui_persona_name="$persona_name"
+
+    local traj_dir="$persona_dir/traj"
+    local history_file="$persona_dir/repl_history"
+    touch "$history_file"
+
+    # Load readline history
+    if [[ -f "$history_file" ]]; then
+        history -r "$history_file" 2>/dev/null || true
+    fi
+
+    # Initialize TUI
+    tui_init
+    trap 'tui_cleanup' EXIT
+    trap '_tui_handle_winch' WINCH
+
+    # Show recent traj entries
+    tui_show_recent "$traj_dir" 10
+
+    # Start background traj watcher
+    tui_start_watcher "$traj_dir"
+
+    # Start autonomous loop in background (stdout suppressed — watcher handles display)
+    _tui_loop_running=1
+    tui_draw_status
+    _tui_run_loop "$persona_dir" >/dev/null &
+    _tui_loop_pid=$!
+
+    # Main input loop
+    while true; do
+        local input=""
+        local _sigint=0
+
+        trap '_sigint=1' INT
+        local read_rc=0
+        # Position cursor at input row before reading
+        printf '\033[%d;1H\033[2K' "$_tui_rows" >/dev/tty
+        IFS= read -e -r -p "> " input || read_rc=$?
+        trap - INT
+
+        if [[ "$_sigint" -eq 1 ]]; then
+            # Ctrl+C: redraw input line
+            tui_draw_input_line
+            continue
+        fi
+
+        if [[ "$read_rc" -ne 0 ]]; then
+            # EOF (Ctrl-D)
+            break
+        fi
+
+        # Save to readline history
+        history -s "$input" 2>/dev/null || true
+        history -w "$history_file" 2>/dev/null || true
+
+        # Skip empty input
+        [[ -z "$input" ]] && continue
+
+        case "$input" in
+            /quit|/exit|/q)
+                break
+                ;;
+            /start)
+                if [[ "$_tui_loop_running" -eq 1 ]]; then
+                    tui_scroll_print "$(printf '\033[33m[tui]\033[0m Loop is already running')"
+                else
+                    _tui_loop_running=1
+                    tui_draw_status
+                    _tui_run_loop "$persona_dir" >/dev/null &
+                    _tui_loop_pid=$!
+                    tui_scroll_print "$(printf '\033[33m[tui]\033[0m Autonomous loop started')"
+                fi
+                ;;
+            /stop)
+                if [[ "$_tui_loop_running" -eq 0 ]]; then
+                    tui_scroll_print "$(printf '\033[33m[tui]\033[0m Loop is not running')"
+                else
+                    touch "$persona_dir/stop.flag"
+                    if [[ -n "$_tui_loop_pid" ]]; then
+                        wait "$_tui_loop_pid" 2>/dev/null || true
+                        _tui_loop_pid=""
+                    fi
+                    _tui_loop_running=0
+                    tui_draw_status
+                    tui_scroll_print "$(printf '\033[33m[tui]\033[0m Loop stopped')"
+                fi
+                ;;
+            /think)
+                tui_scroll_print "$(printf '\033[33m[tui]\033[0m Running one think cycle...')"
+                cmd_think >/dev/null 2>&1 || true
+                ;;
+            /focus\ *)
+                local focus_args="${input#/focus }"
+                eval cmd_focus $focus_args 2>&1 | while IFS= read -r line; do
+                    tui_scroll_print "$line"
+                done
+                ;;
+            /focus)
+                cmd_focus show 2>&1 | while IFS= read -r line; do
+                    tui_scroll_print "$line"
+                done
+                ;;
+            /log\ *)
+                local log_n="${input#/log }"
+                cmd_log "$log_n" 2>&1 | while IFS= read -r line; do
+                    tui_scroll_print "$line"
+                done
+                ;;
+            /log)
+                cmd_log 2>&1 | while IFS= read -r line; do
+                    tui_scroll_print "$line"
+                done
+                ;;
+            /help)
+                repl_help 2>&1 | while IFS= read -r line; do
+                    tui_scroll_print "$line"
+                done
+                ;;
+            /*)
+                tui_scroll_print "$(printf '\033[31mUnknown command: %s (type /help)\033[0m' "$input")"
+                ;;
+            *)
+                # Inject as human message (non-blocking)
+                cmd_append "$input"
+                tui_scroll_print "$(printf '\033[1;37m[human-msg]\033[0m %s' "$input")"
+                ;;
+        esac
+    done
+
+    # Cleanup: stop loop, kill watcher
+    if [[ "$_tui_loop_running" -eq 1 ]]; then
+        touch "$persona_dir/stop.flag"
+        [[ -n "$_tui_loop_pid" ]] && { kill "$_tui_loop_pid" 2>/dev/null || true; wait "$_tui_loop_pid" 2>/dev/null || true; }
+    fi
+    tui_cleanup
+    trap - EXIT WINCH
+}
+
 repl_help() {
     cat >&2 <<'EOF'
+TUI repl — autonomous loop runs in background, thoughts stream above.
+Type text and press Enter to inject a message into the thought stream.
+
 Slash commands:
-  /history        Show conversation history
-  /reset          Reset current persona
-  /context        Show assembled system prompt
-  /personas              List all personas
-  /personas list [-a]    List all personas (-a: show directories)
-  /personas info         Show detailed info about current persona
-  /personas new <name>   Create a new persona
-  /personas switch <name> Switch to a persona (prefix match)
-  /personas delete <name> Delete a persona
-  /envs               List Docker envs for current persona
-  /envs rm <name>     Destroy a specific env
-  /mem add <text>       Add a memory
-  /mem search <query>   Search memories
-  /mem list             List memories (dates + slugs)
-  /mem dump             Print all memory summaries
-  /mem forget <name>    Delete a memory
-  /mem edit <name> <text> Update a memory
-  /skills               List installed skills
-  /skills <query>       Search installed + remote skills
-  /skills show <name>   Print a skill's SKILL.md
-  /skills install <name|src> Install a skill
-  /skills remove <name> Remove a skill
-  /skills init [name]   Scaffold a new skill
-  /skills promote <name> Promote skill to kernel
-  /skills demote <name>  Demote kernel skill
-  /skills remote        List configured remotes
-  /skills remote add <url|path>    Add a remote
-  /skills remote remove <url|path> Remove a remote
-  /quit           Exit the repl
+  /start              Start autonomous loop (auto-started on launch)
+  /stop               Stop autonomous loop
+  /think              Run one think cycle manually
+  /focus set <goal>   Set a goal
+  /focus show         Show current goals
+  /focus done <query> Mark goal as done
+  /log [N]            Show last N steps from thought stream
+  /help               Show this help
+  /quit               Exit the repl (Ctrl+D also works)
 EOF
 }
 
@@ -939,6 +1389,443 @@ cmd_envs() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# Autonomous mode commands
+# ---------------------------------------------------------------------------
+
+cmd_think() {
+    local dry_run=0
+    local model="$SHELLY_THINK_MODEL"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=1; shift ;;
+            --model)   model="${2:?--model requires a value}"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    ensure_persona
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local traj_dir="$persona_dir/traj"
+    local persona_name
+    persona_name=$(grep '^name=' "$persona_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$persona_name" ]] && persona_name=$(basename "$persona_dir")
+
+    # Ensure think prompt exists
+    ensure_think_prompt "$persona_dir"
+
+    # Build goals and load think prompt
+    local goals
+    goals=$(get_goals "$SHELLY_MEMORIES_DIR")
+    local think_prompt
+    think_prompt=$(load_prompt "$persona_dir/prompts/think.md" "$persona_name" "$goals")
+
+    # Build recent context for the think prompt input
+    local recent_context=""
+    if [[ -f "$traj_dir/root.jsonl" ]]; then
+        recent_context=$(traj tail "$traj_dir" -n "$SHELLY_CONTEXT_TAIL" 2>/dev/null) || recent_context=""
+    fi
+
+    local full_message="<context>
+$think_prompt
+</context>
+
+Recent stream (last $SHELLY_CONTEXT_TAIL steps):
+$recent_context"
+
+    if [[ "$dry_run" -eq 1 ]]; then
+        printf '[think dry-run] Would call shellm with think prompt (%d bytes)\n' "${#think_prompt}" >&2
+        printf '[think dry-run] Goals:\n%s\n' "$goals" >&2
+        printf '[think dry-run] Recent context: %d bytes\n' "${#recent_context}" >&2
+        return 0
+    fi
+
+    # Resolve paths
+    local abs_mem_dir abs_skills_dir abs_kernel_dir abs_traj_dir run_dir
+    abs_mem_dir=$(cd "$SHELLY_MEMORIES_DIR" 2>/dev/null && pwd) || abs_mem_dir="$SHELLY_MEMORIES_DIR"
+    abs_skills_dir=$(cd "$SHELLY_SKILLS_DIR" 2>/dev/null && pwd) || abs_skills_dir="$SHELLY_SKILLS_DIR"
+    abs_kernel_dir=$(cd "$SHELLY_KERNEL_DIR" 2>/dev/null && pwd) || abs_kernel_dir="$SHELLY_KERNEL_DIR"
+    abs_traj_dir=$(cd "$traj_dir" 2>/dev/null && pwd) || abs_traj_dir="$traj_dir"
+    run_dir="$persona_dir/workdir"
+    mkdir -p "$run_dir"
+
+    # Collect --var flags from skill-declared vars
+    local skill_var_flags=()
+    while IFS= read -r vname; do
+        [[ -z "$vname" ]] && continue
+        local vval="${!vname:-}"
+        [[ -n "$vval" ]] && skill_var_flags+=(--var "$vname=$vval")
+    done < <(collect_skill_vars "$persona_dir")
+
+    export SHELLM_HOME="$persona_dir/.shellm"
+
+    # Call shellm with think prompt
+    local response shellm_stderr_file
+    shellm_stderr_file=$(mktemp)
+    response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$model" \
+        shellm --env "$persona_name" --workdir "$run_dir" \
+        --var "MEM_DIR=$abs_mem_dir" \
+        --var "SKILLS_DIR=$abs_skills_dir" \
+        --var "SKILLS_KERNEL_DIR=$abs_kernel_dir" \
+        --var "TRAJ_DIR=$abs_traj_dir" \
+        ${skill_var_flags[@]+"${skill_var_flags[@]}"} \
+        --bin "$(command -v mem)" \
+        --bin "$(command -v traj)" \
+        --bin "$(command -v skills)" \
+        --bin "$(command -v context)" \
+        --bin "$(command -v llm)" \
+        --bin "$(command -v shellm)" \
+        "$full_message" 2>"$shellm_stderr_file") || true
+    if [[ "$VERBOSE" -eq 1 && -s "$shellm_stderr_file" ]]; then
+        debug "shellm stderr: $(cat "$shellm_stderr_file")"
+    fi
+    rm -f "$shellm_stderr_file"
+
+    [[ -z "$response" ]] && { debug "think: empty response from shellm"; return 1; }
+
+    # Determine step type: action if starts with "action: "
+    local step_type="thought"
+    case "$response" in
+        "action: "*|"action:"*)
+            step_type="action"
+            ;;
+    esac
+
+    # Write thought to traj (unless shellm already did via the prompt instructions)
+    # Check if the traj's last entry already contains this thought (shellm may have written it in stage 5)
+    local last_content=""
+    if [[ -f "$traj_dir/root.jsonl" ]]; then
+        last_content=$(tail -1 "$traj_dir/root.jsonl" 2>/dev/null | jq -r '.content // empty' 2>/dev/null) || true
+    fi
+
+    if [[ "$last_content" != "$response" ]]; then
+        printf '{"type":"%s","content":%s,"source":"think"}' \
+            "$step_type" "$(printf '%s' "$response" | jq -Rsa .)" \
+            | traj append "$traj_dir" >/dev/null
+    fi
+
+    # Print the thought
+    printf '[%s] %s\n' "$step_type" "$response"
+
+    # If action, execute it
+    if [[ "$step_type" == "action" ]]; then
+        local action_body="${response#action: }"
+        [[ "$action_body" == "$response" ]] && action_body="${response#action:}"
+        _do_act "$action_body" "$persona_dir" "$traj_dir" "$persona_name" "$model"
+    fi
+
+    # Dispatch thought processes
+    _dispatch_thought_processes "$persona_dir" "$traj_dir" "$persona_name" "$model"
+}
+
+_do_act() {
+    local action_body="$1"
+    local persona_dir="$2"
+    local traj_dir="$3"
+    local persona_name="$4"
+    local model="$5"
+
+    [[ -z "$action_body" ]] && return 0
+
+    debug "act: executing action: $action_body"
+
+    # Record agent-run step (metadata)
+    local run_id
+    run_id=$(printf '%s' "act-$(date +%s)-$$")
+    printf '{"type":"agent-run","content":%s,"run_id":"%s"}' \
+        "$(printf '%s' "$action_body" | jq -Rsa .)" "$run_id" \
+        | traj append "$traj_dir" >/dev/null
+
+    # Build the full system prompt (same as cmd_send uses)
+    local system_prompt
+    system_prompt=$(build_shelly_system_prompt "$persona_dir")
+
+    local abs_mem_dir abs_skills_dir abs_kernel_dir abs_traj_dir run_dir
+    abs_mem_dir=$(cd "$SHELLY_MEMORIES_DIR" 2>/dev/null && pwd) || abs_mem_dir="$SHELLY_MEMORIES_DIR"
+    abs_skills_dir=$(cd "$SHELLY_SKILLS_DIR" 2>/dev/null && pwd) || abs_skills_dir="$SHELLY_SKILLS_DIR"
+    abs_kernel_dir=$(cd "$SHELLY_KERNEL_DIR" 2>/dev/null && pwd) || abs_kernel_dir="$SHELLY_KERNEL_DIR"
+    abs_traj_dir=$(cd "$traj_dir" 2>/dev/null && pwd) || abs_traj_dir="$traj_dir"
+    run_dir="$persona_dir/workdir"
+
+    # Collect skill vars
+    local skill_var_flags=()
+    while IFS= read -r vname; do
+        [[ -z "$vname" ]] && continue
+        local vval="${!vname:-}"
+        [[ -n "$vval" ]] && skill_var_flags+=(--var "$vname=$vval")
+    done < <(collect_skill_vars "$persona_dir")
+
+    local act_prompt="<context>
+$system_prompt
+</context>
+
+You are executing an action from your thought stream. Do the work described below.
+When you are done, if there is a meaningful observation or result to record, write it to your trajectory:
+  printf '{\"type\":\"observation\",\"content\":<json-escaped result>}' | traj append \$TRAJ_DIR
+Then set FINAL to signal completion (FINAL content is not important, only traj matters).
+If there is nothing meaningful to observe, just set FINAL.
+
+ACTION: $action_body"
+
+    export SHELLM_HOME="$persona_dir/.shellm"
+
+    local act_response
+    act_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$model" \
+        shellm --env "$persona_name" --workdir "$run_dir" \
+        --var "MEM_DIR=$abs_mem_dir" \
+        --var "SKILLS_DIR=$abs_skills_dir" \
+        --var "SKILLS_KERNEL_DIR=$abs_kernel_dir" \
+        --var "TRAJ_DIR=$abs_traj_dir" \
+        ${skill_var_flags[@]+"${skill_var_flags[@]}"} \
+        --bin "$(command -v mem)" \
+        --bin "$(command -v skills)" \
+        --bin "$(command -v traj)" \
+        --bin "$(command -v context)" \
+        --bin "$(command -v llm)" \
+        --bin "$(command -v shellm)" \
+        "$act_prompt" 2>/dev/null) || true
+
+    if [[ -n "$act_response" ]]; then
+        debug "act: completed (response: ${#act_response} bytes)"
+        printf '  [observation] %s\n' "$(printf '%s' "$act_response" | head -1)"
+    fi
+}
+
+_dispatch_thought_processes() {
+    local persona_dir="$1"
+    local traj_dir="$2"
+    local persona_name="$3"
+    local model="$4"
+
+    local tp_list
+    tp_list=$(discover_thought_processes "$persona_dir")
+    [[ -z "$tp_list" ]] && return 0
+
+    # Build recent thoughts for injection
+    local recent_thoughts=""
+    if [[ -f "$traj_dir/root.jsonl" ]]; then
+        recent_thoughts=$(traj tail "$traj_dir" -n 15 2>/dev/null) || recent_thoughts=""
+    fi
+
+    local goals
+    goals=$(get_goals "$SHELLY_MEMORIES_DIR")
+
+    local abs_mem_dir abs_traj_dir run_dir persona_tp_dir
+    abs_mem_dir=$(cd "$SHELLY_MEMORIES_DIR" 2>/dev/null && pwd) || abs_mem_dir="$SHELLY_MEMORIES_DIR"
+    abs_traj_dir=$(cd "$traj_dir" 2>/dev/null && pwd) || abs_traj_dir="$traj_dir"
+    run_dir="$persona_dir/workdir"
+    persona_tp_dir="$persona_dir/thought-processes"
+    mkdir -p "$persona_tp_dir"
+
+    export SHELLM_HOME="$persona_dir/.shellm"
+
+    local line
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local tp_name="${line%%=*}"
+        local tp_file="${line#*=}"
+        [[ -f "$tp_file" ]] || continue
+
+        debug "tp: triaging $tp_name"
+
+        # Load and prepare TP prompt
+        local tp_prompt
+        tp_prompt=$(load_prompt "$tp_file" "$persona_name" "$goals")
+
+        local tp_message="<context>
+$tp_prompt
+</context>
+
+Recent thoughts from the stream:
+$recent_thoughts"
+
+        # Call shellm for this TP
+        local tp_response
+        tp_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$model" \
+            shellm --env "$persona_name" --workdir "$run_dir" \
+            --var "MEM_DIR=$abs_mem_dir" \
+            --var "TRAJ_DIR=$abs_traj_dir" \
+            --var "PERSONA_TP_DIR=$persona_tp_dir" \
+            --bin "$(command -v mem)" \
+            --bin "$(command -v traj)" \
+            --bin "$(command -v llm)" \
+            "$tp_message" 2>/dev/null) || true
+
+        if [[ -n "$tp_response" ]]; then
+            debug "tp: $tp_name ran (response: ${#tp_response} bytes)"
+            printf '  [tp:%s] %s\n' "$tp_name" "$(printf '%s' "$tp_response" | head -1)"
+        fi
+    done <<< "$tp_list"
+}
+
+cmd_start() {
+    local tick_interval="$SHELLY_TICK_INTERVAL"
+    local max_ticks=0
+    local model="$SHELLY_THINK_MODEL"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tick-interval) tick_interval="${2:?--tick-interval requires seconds}"; shift 2 ;;
+            --max-ticks)     max_ticks="${2:?--max-ticks requires a number}"; shift 2 ;;
+            --model)         model="${2:?--model requires a value}"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    ensure_persona
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local lock_dir="$persona_dir/run.lock"
+
+    # Acquire lock (only start locks — prevents two loops for same persona)
+    if ! acquire_lock "$lock_dir"; then
+        die "Another loop is already running for this persona (lock: $lock_dir)"
+    fi
+
+    # Set up cleanup
+    local stop_flag="$persona_dir/stop.flag"
+    rm -f "$stop_flag"
+
+    trap 'release_lock "$lock_dir"; rm -f "$stop_flag"' EXIT
+    trap 'release_lock "$lock_dir"; rm -f "$stop_flag"; exit 130' INT TERM
+
+    printf '[shelly] Autonomous loop started (interval: %ss)\n' "$tick_interval" >&2
+
+    local tick_count=0
+    while true; do
+        # Check stop flag
+        if [[ -f "$stop_flag" ]]; then
+            printf '[shelly] Stop flag detected. Shutting down.\n' >&2
+            break
+        fi
+
+        tick_count=$((tick_count + 1))
+        printf '[tick %d]\n' "$tick_count" >&2
+
+        # Run one think cycle
+        cmd_think --model "$model" || true
+
+        # Check max ticks
+        if [[ "$max_ticks" -gt 0 && "$tick_count" -ge "$max_ticks" ]]; then
+            printf '[shelly] Reached max ticks (%d). Stopping.\n' "$max_ticks" >&2
+            break
+        fi
+
+        # Sleep between ticks (interruptible)
+        sleep "$tick_interval" &
+        local sleep_pid=$!
+        wait "$sleep_pid" 2>/dev/null || break
+    done
+
+    release_lock "$lock_dir"
+    rm -f "$stop_flag"
+    trap - EXIT INT TERM
+    printf '[shelly] Autonomous loop stopped.\n' >&2
+}
+
+cmd_stop() {
+    ensure_persona
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local stop_flag="$persona_dir/stop.flag"
+    touch "$stop_flag"
+    printf '[shelly] Stop flag set. Loop will exit after current tick.\n' >&2
+}
+
+cmd_focus() {
+    ensure_persona
+    local sub="${1:-show}"
+    [[ -n "${1:-}" ]] && shift
+
+    case "$sub" in
+        set)
+            local goal_text="$*"
+            [[ -z "$goal_text" ]] && die "Usage: shelly focus set <goal text>"
+            MEM_DIR="$SHELLY_MEMORIES_DIR" mem add --type goal "$goal_text"
+            printf 'Goal set: %s\n' "$goal_text" >&2
+            ;;
+        show)
+            local goals
+            goals=$(get_goals "$SHELLY_MEMORIES_DIR")
+            printf 'Current goals:\n%s\n' "$goals"
+            ;;
+        done)
+            local query="$*"
+            [[ -z "$query" ]] && die "Usage: shelly focus done <goal query>"
+            # Find and remove the matching goal memory
+            MEM_DIR="$SHELLY_MEMORIES_DIR" mem forget "$query" 2>/dev/null || \
+                die "No goal matching: $query"
+            printf 'Goal removed: %s\n' "$query" >&2
+            ;;
+        *)
+            die "Unknown focus subcommand: $sub (try: set, show, done)"
+            ;;
+    esac
+}
+
+cmd_log() {
+    ensure_persona
+    local n="${1:-20}"
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local traj_dir="$persona_dir/traj"
+    if [[ -f "$traj_dir/root.jsonl" ]]; then
+        traj tail "$traj_dir" -n "$n" | jq -r '
+            "[" + .type + "] " +
+            (if .source then "(" + .source + ") " else "" end) +
+            (.content // "(no content)" | split("\n")[0])
+        '
+    else
+        printf '(empty log)\n' >&2
+    fi
+}
+
+cmd_append() {
+    local step_type="human-msg"
+    local text=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type) step_type="${2:?--type requires a value}"; shift 2 ;;
+            *)
+                if [[ -z "$text" ]]; then
+                    text="$*"
+                    break
+                fi
+                ;;
+        esac
+    done
+
+    # Read from stdin if no args
+    if [[ -z "$text" && ! -t 0 ]]; then
+        text=$(cat)
+    fi
+    [[ -z "$text" ]] && die "Usage: shelly append [--type TYPE] <text>"
+
+    ensure_persona
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local traj_dir="$persona_dir/traj"
+
+    printf '{"type":"%s","content":%s}' "$step_type" "$(printf '%s' "$text" | jq -Rsa .)" \
+        | traj append "$traj_dir" >/dev/null
+    debug "Appended $step_type step to traj"
+}
+
+cmd_triage_tps() {
+    ensure_persona
+    local persona_dir
+    persona_dir=$(resolve_persona)
+    local traj_dir="$persona_dir/traj"
+    local persona_name
+    persona_name=$(grep '^name=' "$persona_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$persona_name" ]] && persona_name=$(basename "$persona_dir")
+    _dispatch_thought_processes "$persona_dir" "$traj_dir" "$persona_name" "$SHELLY_THINK_MODEL"
+}
+
+# ---------------------------------------------------------------------------
+# Original subcommands
+# ---------------------------------------------------------------------------
+
 cmd_whoami() {
     ensure_persona
     local persona_dir
@@ -962,11 +1849,20 @@ cmd_context() {
 
 cmd_help() {
     cat <<'EOF'
-shelly — Interactive conversational agent built on top of shellm
+shelly — Autonomous agent with stream-of-consciousness thought generation
 
 Usage:
-  shelly send <message>        Send a message (or pipe via stdin)
-  shelly repl                  Start interactive REPL
+  shelly send <message>        Inject a message and run 10 ticks
+  shelly start                 Start the autonomous thought loop
+  shelly stop                  Stop the autonomous loop
+  shelly think [--dry-run]     Run one think cycle (generate + act + TPs)
+  shelly log [N]               Show last N steps from the thought stream
+  shelly append [--type T] <text>  Inject a step into the stream
+  shelly focus set <goal>      Set a goal
+  shelly focus show            Show current goals
+  shelly focus done <query>    Mark a goal as done
+
+  shelly repl                  Interactive mode (loop + live stream)
   shelly history               Show conversation history
   shelly reset                 Reset current persona
   shelly whoami [-a]           Print current persona name (-a: also print persona dir)
@@ -1015,6 +1911,9 @@ Options:
 Environment:
   SHELLY_DIR              Override .shelly directory
   SHELLY_MODEL            Model to use
+  SHELLY_TICK_INTERVAL    Seconds between ticks (default: 30)
+  SHELLY_THINK_MODEL      Model for think/TP calls (default: claude-opus-4-7)
+  SHELLY_CONTEXT_TAIL     Number of recent steps to include in think context (default: 30)
 EOF
     exit 0
 }
@@ -1059,6 +1958,27 @@ main() {
     case "$cmd" in
         send)
             cmd_send "$@"
+            ;;
+        start)
+            cmd_start "$@"
+            ;;
+        stop)
+            cmd_stop
+            ;;
+        think)
+            cmd_think "$@"
+            ;;
+        focus)
+            cmd_focus "$@"
+            ;;
+        log)
+            cmd_log "$@"
+            ;;
+        append)
+            cmd_append "$@"
+            ;;
+        triage)
+            cmd_triage_tps
             ;;
         repl)
             cmd_repl

@@ -24,16 +24,19 @@ fi
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-RUNS_DIR="$HOME/.shellm/runs"
+RUNS_DIR="${SHELLM_RUNS_DIR:-$HOME/.shellm/runs}"
 RUN_ID=""
 REPORT=0
+LIST_MODE=0
 REPORT_MODEL="${SHELLM_MODEL:-claude-opus-4-7}"
 LIST_LIMIT=20
 SUMMARY_WIDTH=85
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --list|-l) LIST_MODE=1; shift ;;
         --report) REPORT=1; shift ;;
+        --runs-dir) RUNS_DIR="${2:?--runs-dir requires a path}"; shift 2 ;;
         --model)  REPORT_MODEL="${2:?--model requires a value}"; shift 2 ;;
         -n)       LIST_LIMIT="${2:?-n requires a number}"; shift 2 ;;
         -w)       SUMMARY_WIDTH="${2:?-w requires a number}"; shift 2 ;;
@@ -47,11 +50,16 @@ Arguments:
   RUN_ID              Run directory path, name prefix, or hex ID portion
 
 Options:
+  -l, --list          List recent runs (default when no RUN_ID given)
+  --runs-dir DIR      Runs directory (default: $SHELLM_RUNS_DIR or ~/.shellm/runs)
   -n N                Number of runs to list (default: 20, 0 for all)
   -w N                Truncate summaries to N characters (default: 70, 0 for no limit)
   --report            Generate an LLM-powered analysis of the run tree
   --model MODEL       Model for report generation (default: $SHELLM_MODEL or claude-opus-4-7)
   -h, --help          Show this help
+
+Environment variables:
+  SHELLM_RUNS_DIR     Same as --runs-dir
 
 Examples:
   shellm-explore                           # list recent runs
@@ -203,8 +211,8 @@ resolve_run_id() {
     return 1
 }
 
-# If no RUN_ID, list runs and exit
-if [[ -z "$RUN_ID" ]]; then
+# If no RUN_ID or explicit --list/-l, list runs and exit
+if [[ -z "$RUN_ID" || "$LIST_MODE" -eq 1 ]]; then
     list_runs "$LIST_LIMIT"
     exit 0
 fi

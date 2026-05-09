@@ -64,6 +64,33 @@ for skill_dir in skills/*/; do
 done
 echo "Installed core skills → $SKILLS_PREFIX"
 
+# Install bundled prompts to ~/.shelly-prompts (think.md, etc.)
+PROMPTS_PREFIX="${HOME}/.shelly-prompts"
+if [[ -d "prompts" ]]; then
+    mkdir -p "$PROMPTS_PREFIX"
+    if [[ "$SYMLINKS" -eq 1 ]]; then
+        ln -sfn "$(pwd)/prompts" "$PROMPTS_PREFIX"
+    else
+        cp -R prompts/* "$PROMPTS_PREFIX/" 2>/dev/null || true
+    fi
+    echo "Installed prompts → $PROMPTS_PREFIX"
+fi
+
+# Install bundled thought-processes
+TP_PREFIX="${HOME}/.shelly-thought-processes"
+if [[ -d "thought-processes" ]]; then
+    mkdir -p "$TP_PREFIX"
+    if [[ "$SYMLINKS" -eq 1 ]]; then
+        for tp_file in thought-processes/*.md; do
+            [[ -f "$tp_file" ]] || continue
+            ln -sf "$(pwd)/$tp_file" "$TP_PREFIX/$(basename "$tp_file")"
+        done
+    else
+        cp thought-processes/*.md "$TP_PREFIX/" 2>/dev/null || true
+    fi
+    echo "Installed thought-processes → $TP_PREFIX"
+fi
+
 case ":$PATH:" in
     *":$PREFIX:"*) ;;
     *)
