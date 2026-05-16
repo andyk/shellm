@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# chat — Send messages to an activated identity's thought stream
+# Reads TRAJ_DIR + TRAJ_ID from environment (set by `identity shell`).
+
+die() { printf 'chat: error: %s\n' "$*" >&2; exit 1; }
+
+# Handle --help before env var check
+case "${1:-}" in -h|--help|help) ;; *)
+    [[ -n "${TRAJ_DIR:-}" ]] || die "TRAJ_DIR not set. Run: identity shell <name>"
+    [[ -n "${TRAJ_ID:-}" ]] || die "TRAJ_ID not set. Run: identity shell <name>"
+    ;; esac
+
+cmd_send() {
+    local message=""
+    while [[ $# -gt 0 ]]; do
+        message="${message:+$message }$1"; shift
+    done
+
+    # Read from stdin if no args and stdin is piped
+    if [[ -z "$message" && ! -t 0 ]]; then
+        message=$(cat)
+    fi
+    [[ -z "$message" ]] && die "No message provided. Usage: chat send <message>"
+
+    # Append human-msg step to trajectory
+    printf '{"type":"human-msg","content":%s}' "$(printf '%s' "$message" | jq -Rsa .)" \
+        | traj append >/dev/null
+
+    printf 'Message sent.\n' >&2
+}
+
+cmd_reply() {
+    local message=""
+    while [[ $# -gt 0 ]]; do
+        message="${message:+$message }$1"; shift
+    done
+    if [[ -z "$message" && ! -t 0 ]]; then
+        message=$(cat)
+    fi
+    [[ -z "$message" ]] && die "No message provided. Usage: chat reply <message>"
+
+    printf '{"type":"agent-msg","content":%s}' \
+        "$(printf '%s' "$message" | jq -Rsa .)" \
+        | traj append >/dev/null
+
+    printf 'Reply sent.\n' >&2
+}
+
+cmd_history() {
+    local n=20
+    [[ -n "${1:-}" ]] && n="$1"
+
+    local identity_name="${IDENTITY_NAME:-agent}"
+
+    traj tail -n "$n" --type human-msg,agent-msg --raw 2>/dev/null \
+    | while IFS= read -r line; do
+        local step_type content
+        step_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
+        content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)
+        [[ -z "$content" ]] && continue
+        case "$step_type" in
+            human-msg)  printf 'you: %s\n' "$content" ;;
+            agent-msg)  printf '%s: %s\n' "$identity_name" "$content" ;;
+        esac
+    done
+}
+
+cmd_repl() {
+    local identity_name="${IDENTITY_NAME:-unknown}"
+    printf 'Chat with %s. Ctrl+D to exit.\n' "$identity_name" >&2
+
+    # Background watcher for agent replies
+    local watcher_pid=""
+    _start_reply_watcher() {
+        traj tail -f --type agent-msg -n 0 --raw 2>/dev/null \
+        | while IFS= read -r line; do
+            local content
+            content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)
+            [[ -n "$content" ]] && printf '\n%s: %s\n> ' "$identity_name" "$content" >&2
+        done &
+        watcher_pid=$!
+    }
+    _start_reply_watcher
+    trap 'kill "$watcher_pid" 2>/dev/null; wait "$watcher_pid" 2>/dev/null' EXIT
+
+    # Readline history
+    local history_file="${IDENTITY_DIR:-.}/repl_history"
+    touch "$history_file"
+    history -r "$history_file" 2>/dev/null || true
+
+    while true; do
+        local input="" _sigint=0 read_rc=0
+
+        trap '_sigint=1; kill "$watcher_pid" 2>/dev/null; wait "$watcher_pid" 2>/dev/null' INT
+        IFS= read -e -r -p "> " input || read_rc=$?
+        trap 'kill "$watcher_pid" 2>/dev/null; wait "$watcher_pid" 2>/dev/null' EXIT
+
+        if [[ "$_sigint" -eq 1 ]]; then
+            printf '\n' >&2
+            continue
+        fi
+
+        if [[ "$read_rc" -ne 0 ]]; then
+            printf '\n' >&2
+            break
+        fi
+
+        # Save to readline history
+        history -s "$input" 2>/dev/null || true
+        history -w "$history_file" 2>/dev/null || true
+
+        [[ -z "$input" ]] && continue
+
+        # Sanitize
+        input="${input%$'\r'}"
+        input="${input%"${input##*[![:space:]]}"}"
+
+        # Handle /exit
+        case "$input" in
+            /exit|/q) break ;;
+        esac
+
+        cmd_send "$input"
+    done
+}
+
+usage() {
+    cat <<'EOF'
+chat — Messaging for an activated identity
+
+Usage:
+  chat send <message>      Human sends a message to the agent
+  chat reply <message>     Agent sends a message to the human
+  chat history [N]         Show last N messages (default 20)
+  chat repl                Interactive chat (shows agent replies inline)
+
+Environment:
+  TRAJ_DIR + TRAJ_ID  Trajectory (set by `identity shell`)
+  IDENTITY_NAME       Identity name (for display)
+  IDENTITY_DIR        Identity directory (for repl history)
+EOF
+    exit 0
+}
+
+# Dispatch
+case "${1:-}" in
+    send)    shift; cmd_send "$@" ;;
+    reply)   shift; cmd_reply "$@" ;;
+    history) shift; cmd_history "$@" ;;
+    repl)    cmd_repl ;;
+    -h|--help|help) usage ;;
+    "")     usage ;;
+    *)      die "Unknown command: $1 (try chat --help)" ;;
+esac

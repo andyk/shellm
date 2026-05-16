@@ -3,7 +3,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 SYMLINKS="${SYMLINKS:-0}"
-TOOLS=(shellm shellm-docker shellm-docker-broker shelly skills mem llm shellm-explore context traj)
+TOOLS=(shellm shellm-docker shellm-docker-broker skills mem llm shellm-explore context traj identity think chat focus)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

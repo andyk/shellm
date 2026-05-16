@@ -1,0 +1,892 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# identity — Standalone identity management CLI for shelly
+# Manages identities (create, list, default, delete, inspect).
+# Each identity has its own memories, skills, kernel, and trajectory.
+
+# ---------------------------------------------------------------------------
+# Config & defaults
+# ---------------------------------------------------------------------------
+
+IDENTITY_VERSION="0.1.0"
+VERBOSE=0
+
+# Inside an identity shell, IDENTITY_DIR points to the specific identity
+# (e.g., .identities/andy). This CLI needs the root (e.g., .identities).
+# Detect this and fix up, saving the active identity dir for commands like `info`.
+_ACTIVE_IDENTITY_DIR=""
+if [[ -n "${IDENTITY_NAME:-}" && -n "${IDENTITY_DIR:-}" && -f "${IDENTITY_DIR}/info.txt" ]]; then
+    _ACTIVE_IDENTITY_DIR="$IDENTITY_DIR"
+    IDENTITY_DIR="$(dirname "$IDENTITY_DIR")"
+else
+    IDENTITY_DIR="${IDENTITY_DIR:-.identities}"
+fi
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+die() { echo "identity: error: $*" >&2; exit 1; }
+
+debug() {
+    if [[ "$VERBOSE" -eq 1 ]]; then
+        printf '[identity debug] %s\n' "$*" >&2
+    fi
+}
+
+iso_timestamp() {
+    date +%Y-%m-%dT%H:%M:%S
+}
+
+# Kill Docker containers managed by an identity's shellm envs.
+_destroy_containers() {
+    local identity_dir="$1"
+    local envs_dir="$identity_dir/.shellm/envs"
+    [[ -d "$envs_dir" ]] || return 0
+    local env_dir
+    for env_dir in "$envs_dir"/*/; do
+        [[ -f "$env_dir/container_id" ]] || continue
+        local cid
+        cid=$(cat "$env_dir/container_id" 2>/dev/null || true)
+        [[ -n "$cid" ]] && docker rm -f "$cid" >/dev/null 2>&1 || true
+    done
+}
+
+# Bootstrap the kernel directory (mem + chat SKILL.md)
+_ensure_kernel() {
+    local kernel_dir="$1"
+    local script_dir
+    script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+    # mem
+    mkdir -p "$kernel_dir/mem"
+    if [[ ! -f "$kernel_dir/mem/SKILL.md" ]]; then
+        local bundled_mem="$script_dir/../skills/mem/SKILL.md"
+        if [[ -f "$bundled_mem" ]]; then
+            cp "$bundled_mem" "$kernel_dir/mem/SKILL.md"
+        else
+            debug "Warning: bundled mem skill not found at $bundled_mem; creating minimal bootstrap"
+            cat > "$kernel_dir/mem/SKILL.md" << 'MEMSKILL'
+---
+name: mem
+description: Life context and memory system
+---
+# mem — Life context system
+Commands: mem add --type TYPE <text> | mem search <query> | mem list | mem show <name> | mem forget <name> | mem edit <name> <text>
+MEMSKILL
+        fi
+        debug "Bootstrapped mem kernel skill"
+    fi
+
+    # chat
+    mkdir -p "$kernel_dir/chat"
+    if [[ ! -f "$kernel_dir/chat/SKILL.md" ]]; then
+        local bundled_chat="$script_dir/../skills/chat/SKILL.md"
+        if [[ -f "$bundled_chat" ]]; then
+            cp "$bundled_chat" "$kernel_dir/chat/SKILL.md"
+        fi
+    fi
+}
+
+# Write the source-able activate script into an identity directory.
+_write_activate_script() {
+    local identity_dir="$1"
+    cat > "$identity_dir/activate" <<'ACTIVATE'
+# Identity activate script — source this file, don't run it.
+# Usage: source .identities/<name>/activate
+
+# Guard: must be sourced, not executed (bash only; zsh can't easily detect)
+if [[ -n "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" == "$0" ]]; then
+    echo "error: This script must be sourced, not run." >&2
+    echo "Usage: source $0" >&2
+    exit 1
+fi
+
+# Guard: refuse to activate inside an identity shell (use `exit` first)
+if [[ -n "${IDENTITY_NAME:-}" ]] && ! type deactivate_identity >/dev/null 2>&1; then
+    echo "error: Already inside identity shell ($IDENTITY_NAME). Exit first with: exit" >&2
+    return 1
+fi
+
+# Deactivate previous identity if one is active
+if [[ -n "${IDENTITY_NAME:-}" ]] && type deactivate_identity >/dev/null 2>&1; then
+    deactivate_identity
+fi
+
+# Determine identity dir from this script's location
+if [[ -n "${BASH_SOURCE+x}" ]]; then
+    _id_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    _id_dir="$(cd "$(dirname "$0")" && pwd)"
+fi
+
+# Read identity name
+_id_name=$(grep '^name=' "$_id_dir/info.txt" 2>/dev/null | cut -d= -f2-)
+[[ -z "$_id_name" ]] && _id_name=$(basename "$_id_dir")
+
+# Read model defaults
+_id_model=$(grep '^think_model=' "$_id_dir/info.txt" 2>/dev/null | cut -d= -f2-)
+[[ -z "$_id_model" ]] && _id_model="${SHELLM_MODEL:-claude-opus-4-7}"
+_id_interval=$(grep '^interval=' "$_id_dir/info.txt" 2>/dev/null | cut -d= -f2-)
+[[ -z "$_id_interval" ]] && _id_interval="0"
+
+# Save PS1 for deactivate
+_IDENTITY_OLD_PS1="${PS1:-}"
+
+# Export identity environment
+export IDENTITY_NAME="$_id_name"
+export IDENTITY_DIR="$_id_dir"
+export MEM_DIR="$_id_dir/memories"
+export SKILLS_DIR="$_id_dir/skills"
+export SKILLS_KERNEL_DIR="$_id_dir/kernel"
+export TRAJ_DIR="$_id_dir/trajectories"
+
+# Resolve TRAJ_ID from info.txt root_trajectory
+_root_traj=$(grep '^root_trajectory=' "$_id_dir/info.txt" 2>/dev/null | cut -d= -f2-)
+[[ -z "$_root_traj" ]] && _root_traj="root.jsonl"
+export TRAJ_ID="$_root_traj"
+
+export SKILLSRC="$_id_dir/skills/.skillsrc"
+export SHELLM_HOME="$_id_dir/.shellm"
+export THINK_MODEL="$_id_model"
+export THINK_TICK_INTERVAL="$_id_interval"
+export THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
+
+# Source identity .env if present
+if [[ -f "$_id_dir/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$_id_dir/.env"
+    set +a
+fi
+
+# Update prompt
+PS1="($_id_name) ${PS1:-\$ }"
+
+# Define deactivate function
+deactivate_identity() {
+    PS1="${_IDENTITY_OLD_PS1}"
+    unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR
+    unset TRAJ_DIR TRAJ_ID SKILLSRC SHELLM_HOME THINK_MODEL THINK_TICK_INTERVAL THINK_CONTEXT_TAIL
+    unset _IDENTITY_OLD_PS1
+    unset -f deactivate_identity 2>/dev/null
+}
+
+# Clean up temp vars
+unset _id_dir _id_name _id_model _id_interval _root_traj
+
+
+printf 'Activated identity: %s\n' "$IDENTITY_NAME" >&2
+ACTIVATE
+}
+
+# Guard: die with a helpful message if already inside an identity shell.
+# Resolves the target name to show the exact `source` command.
+_guard_identity_shell() {
+    [[ -n "${IDENTITY_NAME:-}" ]] || return 0
+
+    local target="${1:-}"
+    local resolved_dir=""
+
+    if [[ -n "$target" ]]; then
+        if [[ -d "$IDENTITY_DIR/$target" ]]; then
+            resolved_dir=$(cd "$IDENTITY_DIR/$target" && pwd) 2>/dev/null || true
+        else
+            local match
+            match=$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$' | grep "$target" | head -1) || true
+            [[ -n "$match" ]] && resolved_dir=$(cd "$IDENTITY_DIR/$match" 2>/dev/null && pwd) || true
+        fi
+    fi
+
+    if [[ -n "$resolved_dir" ]]; then
+        # Ensure activate script exists
+        [[ -f "$resolved_dir/activate" ]] || _write_activate_script "$resolved_dir"
+        die "Already inside identity shell ($IDENTITY_NAME). To activate a different identity, run:
+  source $resolved_dir/activate"
+    else
+        die "Already inside identity shell ($IDENTITY_NAME).
+Exit this shell first with: exit"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_new() {
+    local set_default=0
+    local name=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --default) set_default=1; shift ;;
+            -*) die "Unknown option: $1" ;;
+            *)
+                [[ -n "$name" ]] && die "Usage: identity new [--default] <name>"
+                name="$1"; shift
+                ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && die "Usage: identity new [--default] <name>"
+
+    # Validate name: lowercase alphanumeric + hyphens
+    if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        die "Invalid identity name: '$name' (use lowercase alphanumeric + hyphens)"
+    fi
+
+    local identity_dir="$IDENTITY_DIR/$name"
+    if [[ -d "$identity_dir" ]]; then
+        die "Identity '$name' already exists"
+    fi
+
+    mkdir -p "$identity_dir"
+
+    # Create per-identity dirs
+    mkdir -p "$identity_dir/memories" "$identity_dir/skills" "$identity_dir/kernel" "$identity_dir/trajectories"
+
+    # Create root trajectory via traj new
+    local _new_output _root_traj_id _root_traj_basename
+    _new_output=$(traj new --traj_dir "$identity_dir/trajectories" --slug "root")
+    _root_traj_id=$(head -1 <<< "$_new_output")
+    _root_traj_basename=$(tail -1 <<< "$_new_output")
+
+    # Create info.txt with root trajectory UUID
+    printf 'name=%s\ncreated=%s\nroot_trajectory=%s\n' "$name" "$(iso_timestamp)" "$_root_traj_id" > "$identity_dir/info.txt"
+
+    # Seed core-skills remote if installed
+    local core_skills="$HOME/.skills/core-skills"
+    if [[ -d "$core_skills" ]]; then
+        printf 'SKILLS_REMOTES="%s"\n' "$core_skills" > "$identity_dir/skills/.skillsrc"
+    fi
+
+    # Bootstrap kernel (mem SKILL.md)
+    _ensure_kernel "$identity_dir/kernel"
+
+    # Write source-able activate script
+    _write_activate_script "$identity_dir"
+
+    # Set default symlink if --default was passed or this is the first identity
+    if [[ "$set_default" -eq 1 ]] || [[ ! -L "$IDENTITY_DIR/default" ]]; then
+        ln -sfn "$name" "$IDENTITY_DIR/default"
+        debug "Created identity: $name (set as default)"
+        printf 'Created identity: %s\n' "$name" >&2
+        printf 'Set as default.\n' >&2
+    else
+        debug "Created identity: $name"
+        printf 'Created identity: %s\n' "$name" >&2
+    fi
+}
+
+cmd_list() {
+    local show_dir=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -a|--all) show_dir=1; shift ;;
+            *) break ;;
+        esac
+    done
+
+    if [[ ! -d "$IDENTITY_DIR" ]]; then
+        echo "No identities." >&2
+        return
+    fi
+
+    local dirs
+    dirs=$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$') || true
+    if [[ -z "$dirs" ]]; then
+        echo "No identities." >&2
+        return
+    fi
+
+    # Find default identity for marking
+    local current_name=""
+    if [[ -L "$IDENTITY_DIR/default" ]]; then
+        local cur_target
+        cur_target=$(readlink "$IDENTITY_DIR/default")
+        current_name=$(basename "$cur_target")
+    fi
+
+    local d
+    while IFS= read -r d; do
+        local marker=" "
+        [[ "$d" == "$current_name" ]] && marker="*"
+
+        # Get created date from info.txt
+        local created=""
+        local info="$IDENTITY_DIR/$d/info.txt"
+        if [[ -f "$info" ]]; then
+            created=$(grep '^created=' "$info" 2>/dev/null | cut -d= -f2-) || true
+            [[ -z "$created" ]] && created=$(grep '^started=' "$info" 2>/dev/null | cut -d= -f2-) || true
+        fi
+
+        if [[ "$show_dir" -eq 1 ]]; then
+            local abs_dir
+            abs_dir=$(cd "$IDENTITY_DIR/$d" 2>/dev/null && pwd) || abs_dir="$IDENTITY_DIR/$d"
+            printf '%s %-20s %s  %s\n' "$marker" "$d" "$created" "$abs_dir"
+        else
+            printf '%s %-20s %s\n' "$marker" "$d" "$created"
+        fi
+    done <<< "$dirs"
+}
+
+cmd_info() {
+    local mode="full"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--name) mode="name"; shift ;;
+            -p|--path) mode="path"; shift ;;
+            *) break ;;
+        esac
+    done
+
+    local target="${1:-}"
+    local identity_dir
+    if [[ -n "$target" ]]; then
+        # Resolve by name: exact match, then prefix/substring
+        if [[ -d "$IDENTITY_DIR/$target" ]]; then
+            identity_dir=$(cd "$IDENTITY_DIR/$target" && pwd)
+        else
+            local matches
+            matches=$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$' | grep "$target" || true)
+            local count
+            count=$(printf '%s' "$matches" | grep -c . 2>/dev/null) || count=0
+            if [[ "$count" -eq 1 ]]; then
+                identity_dir=$(cd "$IDENTITY_DIR/$matches" && pwd)
+            elif [[ "$count" -gt 1 ]]; then
+                die "Ambiguous: '$target' matches multiple identities:
+$matches"
+            else
+                die "No identity matching: $target"
+            fi
+        fi
+    elif [[ -n "$_ACTIVE_IDENTITY_DIR" ]]; then
+        identity_dir="$_ACTIVE_IDENTITY_DIR"
+    else
+        identity_dir=$(_resolve_default)
+    fi
+
+    if [[ "$mode" == "path" ]]; then
+        printf '%s\n' "$identity_dir"
+        return
+    fi
+
+    local identity_name
+    identity_name=$(grep '^name=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$identity_name" ]] && identity_name=$(basename "$identity_dir")
+
+    if [[ "$mode" == "name" ]]; then
+        printf '%s\n' "$identity_name"
+        return
+    fi
+
+    local created
+    created=$(grep '^created=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$created" ]] && created=$(grep '^started=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+
+    printf 'Name:     %s\n' "$identity_name"
+    printf 'Created:  %s\n' "${created:-(unknown)}"
+    printf 'Dir:      %s\n' "$identity_dir"
+
+    # Kernel skills
+    local kernel_count=0
+    local kernel_names=""
+    if [[ -d "$identity_dir/kernel" ]]; then
+        local skill_dir
+        for skill_dir in "$identity_dir/kernel"/*/; do
+            [[ -f "${skill_dir}SKILL.md" ]] || continue
+            kernel_count=$((kernel_count + 1))
+            local sname
+            sname=$(basename "$skill_dir")
+            kernel_names="${kernel_names}${kernel_names:+, }${sname}"
+        done
+    fi
+    printf 'Kernel:   %d (%s)\n' "$kernel_count" "${kernel_names:--}"
+
+    # Installed skills
+    local skills_count=0
+    local skills_names=""
+    if [[ -d "$identity_dir/skills" ]]; then
+        local skill_dir
+        for skill_dir in "$identity_dir/skills"/*/; do
+            [[ -f "${skill_dir}SKILL.md" ]] || continue
+            skills_count=$((skills_count + 1))
+            local sname
+            sname=$(basename "$skill_dir")
+            skills_names="${skills_names}${skills_names:+, }${sname}"
+        done
+    fi
+    printf 'Skills:   %d (%s)\n' "$skills_count" "${skills_names:--}"
+
+    # Memory count
+    local mem_count=0
+    if [[ -d "$identity_dir/memories" ]]; then
+        mem_count=$(find "$identity_dir/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    printf 'Memories: %d\n' "$mem_count"
+
+    # Traj turns — resolve root traj via TRAJ_DIR + TRAJ_ID
+    local traj_count=0
+    local _info_root_traj
+    _info_root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$_info_root_traj" ]] && _info_root_traj="root.jsonl"
+    if [[ -d "$identity_dir/trajectories" ]]; then
+        traj_count=$(TRAJ_DIR="$identity_dir/trajectories" TRAJ_ID="$_info_root_traj" traj count 2>/dev/null) || traj_count=0
+    fi
+    printf 'Traj:     %d steps\n' "$traj_count"
+}
+
+cmd_default() {
+    local target="${1:-}"
+
+    # No argument: print current default
+    if [[ -z "$target" ]]; then
+        if [[ -L "$IDENTITY_DIR/default" ]]; then
+            basename "$(readlink "$IDENTITY_DIR/default")"
+        else
+            die "No default identity. Set one with: identity default <name>"
+        fi
+        return
+    fi
+
+    [[ ! -d "$IDENTITY_DIR" ]] && die "No identities found"
+
+    # Try exact match first
+    if [[ -d "$IDENTITY_DIR/$target" ]]; then
+        ln -sfn "$target" "$IDENTITY_DIR/default"
+        printf 'Default set to: %s\n' "$target" >&2
+        return
+    fi
+
+    # Prefix/substring match
+    local matches
+    matches=$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$' | grep "$target" || true)
+    local count
+    count=$(printf '%s' "$matches" | grep -c . 2>/dev/null) || count=0
+
+    if [[ "$count" -eq 1 ]]; then
+        ln -sfn "$matches" "$IDENTITY_DIR/default"
+        printf 'Default set to: %s\n' "$matches" >&2
+    elif [[ "$count" -gt 1 ]]; then
+        die "Ambiguous: '$target' matches multiple identities:
+$matches"
+    else
+        die "No identity matching: $target"
+    fi
+}
+
+cmd_delete() {
+    local target="${1:-}"
+    [[ -z "$target" ]] && die "Usage: identity delete <name>"
+
+    [[ ! -d "$IDENTITY_DIR/$target" ]] && die "No identity named: $target"
+
+    # Don't allow deleting the default identity
+    local current_name=""
+    if [[ -L "$IDENTITY_DIR/default" ]]; then
+        current_name=$(basename "$(readlink "$IDENTITY_DIR/default")")
+    fi
+    if [[ "$target" == "$current_name" ]]; then
+        die "Cannot delete the active identity. Switch to another first."
+    fi
+
+    # Destroy Docker containers for this identity
+    _destroy_containers "$IDENTITY_DIR/$target"
+
+    rm -rf "$IDENTITY_DIR/$target"
+    printf 'Deleted identity: %s\n' "$target" >&2
+}
+
+cmd_shell() {
+    case "${1:-}" in
+        -h|--help)
+            cat <<'EOF'
+Usage: identity shell [name]
+
+Start a subshell with identity environment variables set.
+Type `exit` to leave and return to your original shell.
+
+If no name is given, uses the default identity.
+EOF
+            return 0
+            ;;
+    esac
+
+    local target="${1:-}"
+
+    # Guard: already inside an identity shell
+    _guard_identity_shell "$target"
+
+    # Resolve which identity to use
+    local identity_dir identity_name
+    if [[ -n "$target" ]]; then
+        # Try exact match first, then prefix/substring
+        if [[ -d "$IDENTITY_DIR/$target" ]]; then
+            identity_dir=$(cd "$IDENTITY_DIR/$target" && pwd)
+        else
+            local matches
+            matches=$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$' | grep "$target" || true)
+            local count
+            count=$(printf '%s' "$matches" | grep -c . 2>/dev/null) || count=0
+            if [[ "$count" -eq 1 ]]; then
+                identity_dir=$(cd "$IDENTITY_DIR/$matches" && pwd)
+            elif [[ "$count" -gt 1 ]]; then
+                die "Ambiguous: '$target' matches multiple identities:
+$matches"
+            else
+                die "No identity matching: $target"
+            fi
+        fi
+    else
+        identity_dir=$(_resolve_default)
+    fi
+
+    identity_name=$(grep '^name=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$identity_name" ]] && identity_name=$(basename "$identity_dir")
+
+    # Ensure activate script exists (for identities created before this feature)
+    [[ -f "$identity_dir/activate" ]] || _write_activate_script "$identity_dir"
+
+    # Read model defaults from info.txt
+    local think_model think_tick_interval
+    think_model=$(grep '^think_model=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$think_model" ]] && think_model="${SHELLM_MODEL:-claude-opus-4-7}"
+    think_tick_interval=$(grep '^interval=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$think_tick_interval" ]] && think_tick_interval="0"
+
+    # Set env vars for the subshell
+    export IDENTITY_NAME="$identity_name"
+    export IDENTITY_DIR="$identity_dir"
+    export MEM_DIR="$identity_dir/memories"
+    export SKILLS_DIR="$identity_dir/skills"
+    export SKILLS_KERNEL_DIR="$identity_dir/kernel"
+    export TRAJ_DIR="$identity_dir/trajectories"
+
+    # Resolve TRAJ_ID from info.txt
+    local root_traj
+    root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$root_traj" ]] && root_traj="root.jsonl"
+    export TRAJ_ID="$root_traj"
+
+    export SKILLSRC="$identity_dir/skills/.skillsrc"
+    export SHELLM_HOME="$identity_dir/.shellm"
+    export THINK_MODEL="$think_model"
+    export THINK_TICK_INTERVAL="$think_tick_interval"
+    export THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
+
+    # Source identity .env if present
+    if [[ -f "$identity_dir/.env" ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        source "$identity_dir/.env"
+        set +a
+    fi
+
+    # Determine the user's shell
+    local user_shell="${SHELL:-/bin/bash}"
+
+    printf 'Starting shell for identity: %s\n' "$identity_name" >&2
+    printf 'Type `exit` to leave.\n' >&2
+
+    # Write a temp rc file that sources the user's existing rc and sets PS1
+    local rc_file
+    rc_file=$(mktemp)
+    local shell_name
+    shell_name=$(basename "$user_shell")
+
+    case "$shell_name" in
+        zsh)
+            local zdot_dir
+            zdot_dir=$(mktemp -d)
+            cat > "$zdot_dir/.zshenv" <<RCEOF
+# Restore original ZDOTDIR so .zprofile/.zlogin work normally
+if [[ -n "\$_IDENTITY_ORIG_ZDOTDIR" ]]; then
+    ZDOTDIR="\$_IDENTITY_ORIG_ZDOTDIR"
+else
+    unset ZDOTDIR
+fi
+unset _IDENTITY_ORIG_ZDOTDIR
+RCEOF
+            cat > "$zdot_dir/.zshrc" <<RCEOF
+# Source user's original zshrc
+_old_zdotdir="\${ZDOTDIR:-\$HOME}"
+[[ -f "\$_old_zdotdir/.zshrc" ]] && source "\$_old_zdotdir/.zshrc"
+unset _old_zdotdir
+PS1="<$identity_name> \${PS1:-\$ }"
+# Clean up temp dir
+rm -rf $(printf '%q' "$zdot_dir")
+RCEOF
+            exec env _IDENTITY_ORIG_ZDOTDIR="${ZDOTDIR:-}" ZDOTDIR="$zdot_dir" "$user_shell"
+            ;;
+        *)
+            cat > "$rc_file" <<RCEOF
+# Source user's bashrc if it exists
+[[ -f "\$HOME/.bashrc" ]] && source "\$HOME/.bashrc"
+PS1="<$identity_name> \${PS1:-\$ }"
+rm -f $(printf '%q' "$rc_file")
+RCEOF
+            exec "$user_shell" --rcfile "$rc_file"
+            ;;
+    esac
+}
+
+cmd_prompt() {
+    # Reads env vars set by `identity shell` to assemble the system prompt.
+    # Can also be called with --identity-dir to bypass env vars.
+    local identity_dir="${IDENTITY_DIR:-}"
+    local identity_name="${IDENTITY_NAME:-}"
+    local mem_dir="${MEM_DIR:-}"
+    local skills_dir="${SKILLS_DIR:-}"
+    local kernel_dir="${SKILLS_KERNEL_DIR:-}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --identity-dir) identity_dir="${2:?--identity-dir requires a path}"; shift 2 ;;
+            *) die "prompt: unknown option: $1" ;;
+        esac
+    done
+
+    [[ -n "$identity_dir" ]] || die "IDENTITY_DIR not set. Run: identity shell <name>"
+
+    # Resolve defaults from identity_dir if env vars not set
+    [[ -z "$identity_name" ]] && {
+        identity_name=$(grep '^name=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+        [[ -z "$identity_name" ]] && identity_name=$(basename "$identity_dir")
+    }
+    [[ -z "$mem_dir" ]] && mem_dir="$identity_dir/memories"
+    [[ -z "$skills_dir" ]] && skills_dir="$identity_dir/skills"
+    [[ -z "$kernel_dir" ]] && kernel_dir="$identity_dir/kernel"
+
+    local context=""
+
+    # 1. Core identity — personality/self-description
+    if [[ -f "$identity_dir/system_prompt.txt" ]]; then
+        context=$(cat "$identity_dir/system_prompt.txt")
+    else
+        context="I am $identity_name, I am an AI with an identity, life context (e.g., memory), and skills. I am concise, smart, ambitious, and empathetic.
+
+## How I work
+I am driven by standalone commands (think, chat, focus, mem, skills, traj) that read my identity from environment variables. I run inside shellm, which executes my bash code blocks in a loop until I set FINAL with my answer.
+
+IMPORTANT: When setting FINAL, I MUST use a heredoc to avoid bash interpreting backticks or special characters in my response:
+\`\`\`bash
+FINAL=\$(cat <<'ENDOFRESPONSE'
+My response with \`backticks\` and \$pecial characters safely here.
+ENDOFRESPONSE
+)
+\`\`\`"
+    fi
+
+    # 2. Skills CLI knowledge
+    context="$context
+
+## My skills system
+My skills are learned abilities that let me do specific things well. They are how I grow and become more capable over time. Each skill is a set of instructions I can follow to accomplish a particular type of task — like a recipe or a playbook. I can install new skills from GitHub or create my own, and they persist as part of me just like my memories. Skills are managed via \`skills\` (SKILLS_DIR is pre-set in my environment).
+
+Commands I can run:
+  skills                                    List all my installed skills
+  skills <query>                            Search installed + remote skills
+  skills show <name>                        Print a skill's full SKILL.md
+  skills install <name|owner/repo|url|path> Install a skill (by name from remotes, GitHub, or local path)
+  skills remove <name>                      Remove an installed skill
+  skills init [name]                        Scaffold a new skill
+  skills list-json                          List skills as JSON
+  skills promote <name>                     Promote a skill to my kernel (always loaded)
+  skills demote <name>                      Demote a kernel skill back to on-demand
+  skills kernel                             Show kernel skills with token counts
+  skills remote                             List configured skill remotes
+  skills remote add <url|path>              Add a skill remote
+  skills remote remove <url|path>           Remove a skill remote
+
+My kernel skills are always loaded into my context. Regular skills are on-demand — I load them with \`skills show <name>\` when needed.
+When the user asks me to use a skill, I read it with \`skills show <name>\` and follow its instructions."
+
+    # 3. Kernel skills — full content from each SKILL.md in kernel/
+    local kernel_content=""
+    if [[ -d "$kernel_dir" ]]; then
+        local skill_dir
+        for skill_dir in "$kernel_dir"/*/; do
+            [[ -f "${skill_dir}SKILL.md" ]] || continue
+            local skill_body
+            skill_body=$(sed '/^---$/,/^---$/d' "${skill_dir}SKILL.md")
+            if [[ -n "$skill_body" ]]; then
+                kernel_content="${kernel_content}
+${skill_body}"
+            fi
+        done
+    fi
+    if [[ -n "$kernel_content" ]]; then
+        context="$context
+$kernel_content"
+    fi
+
+    # 4. Memories — mem list --short output
+    local memories=""
+    if command -v mem >/dev/null 2>&1; then
+        memories=$(MEM_DIR="$mem_dir" mem list --short 2>/dev/null) || true
+    fi
+    if [[ -n "$memories" && "$memories" != "No memories stored." ]]; then
+        context="$context
+
+## Memories
+$memories"
+    fi
+
+    # 5. Available skills — summary list
+    local skills_summary=""
+    if [[ -d "$skills_dir" ]]; then
+        local skill_dir
+        for skill_dir in "$skills_dir"/*/; do
+            [[ -f "${skill_dir}SKILL.md" ]] || continue
+            local sname sdesc
+            sname=$(sed -n '/^---$/,/^---$/p' "${skill_dir}SKILL.md" | grep '^name:' | sed 's/^name:[[:space:]]*//' | sed "s/^[\"']\(.*\)[\"']$/\1/")
+            sdesc=$(sed -n '/^---$/,/^---$/p' "${skill_dir}SKILL.md" | grep '^description:' | sed 's/^description:[[:space:]]*//' | sed "s/^[\"']\(.*\)[\"']$/\1/")
+            [[ -z "$sname" ]] && sname=$(basename "$skill_dir")
+            skills_summary="${skills_summary}  - ${sname}: ${sdesc}
+"
+        done
+    fi
+    if [[ -n "$skills_summary" ]]; then
+        context="$context
+
+## Available skills (use \`skills show <name>\` to load)
+$skills_summary"
+    fi
+
+    printf '%s' "$context"
+}
+
+_resolve_default() {
+    if [[ ! -L "$IDENTITY_DIR/default" ]]; then
+        die "No default identity. Set one with: identity default <name>"
+    fi
+    local target
+    target=$(readlink "$IDENTITY_DIR/default")
+    # Handle relative symlinks
+    if [[ "$target" != /* ]]; then
+        target="$IDENTITY_DIR/$target"
+    fi
+    if [[ ! -d "$target" ]]; then
+        die "Current identity directory missing: $target"
+    fi
+    # Return absolute path
+    (cd "$target" && pwd)
+}
+
+# Check that at least one identity exists. Called before commands that need one.
+_require_identity() {
+    if [[ ! -d "$IDENTITY_DIR" ]] || [[ -z "$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$')" ]]; then
+        die "No identities yet. Create one with: identity new <name>"
+    fi
+    if [[ ! -L "$IDENTITY_DIR/default" ]] || [[ ! -d "$IDENTITY_DIR/default" ]]; then
+        die "No default identity. Set one with: identity default <name>"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<'EOF'
+identity — Identity management
+
+Usage:
+  identity new <name> [--default]  Create a new identity
+  identity list [-a]         List all identities (-a: show directories)
+  identity info [name] [-n|-p]  Show identity info (default: default; -n: name, -p: dir)
+  identity default [name]     Show or set the default identity
+  identity delete <name>     Delete an identity
+  identity shell [name]      Start a subshell with identity env vars set
+  identity prompt            Assemble and print the system prompt
+
+Options:
+  --dir DIR          Override identities directory (default: .identities)
+  -v, --verbose      Verbose/debug mode
+  -h, --help         Show help
+  --version          Show version
+
+Environment:
+  IDENTITY_DIR   Override identities directory (default: .identities)
+
+Activation:
+  identity shell headlong               # start a subshell with env vars set
+  exit                                   # leave the subshell
+  source .identities/headlong/activate   # activate in current shell (no subshell)
+  deactivate_identity                    # undo (when using source activate)
+EOF
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing & dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+    # Parse global flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                ;;
+            --version)
+                echo "identity $IDENTITY_VERSION"
+                exit 0
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            --dir)
+                IDENTITY_DIR="${2:?--dir requires a path}"
+                shift 2
+                ;;
+            -*)
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] && shift
+
+    case "$cmd" in
+        new)
+            mkdir -p "$IDENTITY_DIR"
+            cmd_new "$@"
+            ;;
+        list)
+            cmd_list "$@"
+            ;;
+        info)
+            cmd_info "$@"
+            ;;
+        default)
+            cmd_default "$@"
+            ;;
+        delete)
+            _require_identity
+            cmd_delete "$@"
+            ;;
+        shell)
+            _require_identity
+            cmd_shell "$@"
+            ;;
+        prompt)
+            cmd_prompt "$@"
+            ;;
+        "")
+            usage
+            ;;
+        *)
+            die "Unknown command: $cmd (try identity --help)"
+            ;;
+    esac
+}
+
+main "$@"

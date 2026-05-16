@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# focus — Goal management for an activated identity
+# Reads MEM_DIR from environment (set by `identity shell`).
+
+die() { printf 'focus: error: %s\n' "$*" >&2; exit 1; }
+
+# Handle --help before env var check
+case "${1:-}" in -h|--help|help) ;; *)
+    MEM_DIR="${MEM_DIR:-}"
+    [[ -n "$MEM_DIR" ]] || die "MEM_DIR not set. Run: identity shell <name>"
+    ;; esac
+
+# Read a frontmatter field from a file
+_fm_field() {
+    awk -v field="$2" 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f && $0 ~ "^"field":"{sub("^"field":[[:space:]]*", ""); print}' "$1"
+}
+
+# Collect goal files sorted by priority (lower first), then filename.
+# Outputs one "priority\tfile" per line.
+_sorted_goals() {
+    local mem_dir="$1"
+    [[ -d "$mem_dir" ]] || return 0
+    local entries=""
+    local f
+    for f in "$mem_dir"/*.md; do
+        [[ -f "$f" ]] || continue
+        local ftype
+        ftype=$(_fm_field "$f" "type")
+        case "$ftype" in
+            goal|intention) ;;
+            *) continue ;;
+        esac
+        local pri
+        pri=$(_fm_field "$f" "priority")
+        [[ -z "$pri" ]] && pri=1000
+        entries="${entries}${pri}\t${f}
+"
+    done
+    # Sort numerically by priority, then lexically by path (stable)
+    printf '%b' "$entries" | sort -t$'\t' -k1,1n -k2,2
+}
+
+# Extract goals from memories (looks for type: goal in frontmatter)
+get_goals() {
+    local mem_dir="$1"
+    [[ -d "$mem_dir" ]] || return 0
+    local goals=""
+    while IFS=$'\t' read -r _pri f; do
+        [[ -z "$f" ]] && continue
+        local body
+        body=$(awk 'NR==1 && /^---$/{f=1; next} f && /^---$/{f=0; next} !f{print}' "$f" | sed '/./,$!d' | head -3)
+        [[ -n "$body" ]] && goals="${goals}- ${body}
+"
+    done < <(_sorted_goals "$mem_dir")
+    if [[ -z "$goals" ]]; then
+        printf '%s' "(no goals set)"
+    else
+        printf '%s' "$goals"
+    fi
+}
+
+cmd_list() {
+    [[ -d "$MEM_DIR" ]] || { printf 'No goals.\n'; return; }
+
+    # Color setup (auto-detect TTY)
+    local c_reset="" c_id="" c_type="" c_date="" c_text=""
+    if [[ -t 1 ]]; then
+        c_reset=$'\033[0m'
+        c_id=$'\033[2m'          # dim
+        c_type=$'\033[33m'       # yellow
+        c_date=$'\033[2m'        # dim
+        c_text=$'\033[1;37m'     # bold white
+    fi
+
+    local found=0
+    while IFS=$'\t' read -r _pri f; do
+        [[ -z "$f" ]] && continue
+
+        local ftype fid fsummary fcreated
+        ftype=$(_fm_field "$f" "type")
+        fid=$(_fm_field "$f" "id")
+        fsummary=$(_fm_field "$f" "summary")
+        fcreated=$(_fm_field "$f" "created")
+
+        # Fall back to body text if no summary
+        if [[ -z "$fsummary" ]]; then
+            fsummary=$(awk 'NR==1 && /^---$/{fm=1; next} fm && /^---$/{fm=0; next} !fm && /\S/{print; exit}' "$f")
+        fi
+
+        printf '%s%s%s  %s%-9s%s  %s%s%s  %s%s%s\n' \
+            "$c_id" "${fid:--}" "$c_reset" \
+            "$c_type" "$ftype" "$c_reset" \
+            "$c_date" "${fcreated:--}" "$c_reset" \
+            "$c_text" "${fsummary:-(empty)}" "$c_reset"
+        found=$((found + 1))
+    done < <(_sorted_goals "$MEM_DIR")
+
+    if [[ "$found" -eq 0 ]]; then
+        printf 'No goals.\n'
+    fi
+}
+
+cmd_set() {
+    local goal_text="$*"
+    [[ -z "$goal_text" ]] && die "Usage: focus set <goal text>"
+    MEM_DIR="$MEM_DIR" mem add --type goal "$goal_text"
+    printf 'Goal set: %s\n' "$goal_text" >&2
+}
+
+cmd_show() {
+    local goals
+    goals=$(get_goals "$MEM_DIR")
+    printf 'Current goals:\n%s\n' "$goals"
+}
+
+# Write or update a priority field in a mem file's frontmatter.
+_set_priority() {
+    local file="$1" new_pri="$2"
+    local existing
+    existing=$(_fm_field "$file" "priority")
+    if [[ -n "$existing" ]]; then
+        # Replace existing priority line
+        sed -i '' "s/^priority:.*/priority: $new_pri/" "$file"
+    else
+        # Insert after the opening --- line
+        sed -i '' "1,/^---$/ { /^---$/a\\
+priority: $new_pri
+}" "$file"
+        # The above inserts after the FIRST --- only (opening fence)
+    fi
+}
+
+cmd_move() {
+    local task_id="${1:-}"
+    local direction="${2:-}"
+    local n="${3:-1}"
+
+    [[ -z "$task_id" || -z "$direction" ]] && die "Usage: focus move <task_id> <up|down> [N]"
+    [[ "$direction" == "up" || "$direction" == "down" ]] || die "Direction must be 'up' or 'down'"
+    [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || die "N must be a positive integer"
+
+    # Collect sorted goals into arrays
+    local -a files=() pris=()
+    while IFS=$'\t' read -r pri f; do
+        [[ -z "$f" ]] && continue
+        files+=("$f")
+        pris+=("$pri")
+    done < <(_sorted_goals "$MEM_DIR")
+
+    [[ ${#files[@]} -eq 0 ]] && die "No goals to move"
+
+    # Find the target by ID (prefix match)
+    local target_idx=-1
+    local i
+    for i in "${!files[@]}"; do
+        local fid
+        fid=$(_fm_field "${files[$i]}" "id")
+        if [[ "$fid" == "$task_id"* ]]; then
+            [[ "$target_idx" -ne -1 ]] && die "Ambiguous ID: '$task_id' matches multiple goals"
+            target_idx=$i
+        fi
+    done
+    [[ "$target_idx" -eq -1 ]] && die "No goal matching ID: $task_id"
+
+    # Compute new position
+    local new_idx
+    if [[ "$direction" == "up" ]]; then
+        new_idx=$((target_idx - n))
+        [[ "$new_idx" -lt 0 ]] && new_idx=0
+    else
+        new_idx=$((target_idx + n))
+        local max_idx=$(( ${#files[@]} - 1 ))
+        [[ "$new_idx" -gt "$max_idx" ]] && new_idx=$max_idx
+    fi
+
+    if [[ "$new_idx" -eq "$target_idx" ]]; then
+        return 0  # already in position
+    fi
+
+    # Build new order: remove target from list, then splice it at new_idx
+    local -a ordered=()
+    for i in "${!files[@]}"; do
+        [[ "$i" -eq "$target_idx" ]] && continue
+        ordered+=("${files[$i]}")
+    done
+
+    # Clamp new_idx to the ordered array bounds (target is removed, so length is len-1)
+    local max_insert=${#ordered[@]}
+    [[ "$new_idx" -gt "$max_insert" ]] && new_idx=$max_insert
+
+    # Splice: ordered[0..new_idx-1] + target + ordered[new_idx..]
+    local -a final=()
+    for (( i=0; i<new_idx; i++ )); do
+        final+=("${ordered[$i]}")
+    done
+    final+=("${files[$target_idx]}")
+    for (( i=new_idx; i<${#ordered[@]}; i++ )); do
+        final+=("${ordered[$i]}")
+    done
+
+    # Write sequential priorities
+    for i in "${!final[@]}"; do
+        _set_priority "${final[$i]}" "$((i + 1))"
+    done
+
+    local moved_name
+    moved_name=$(_fm_field "${files[$target_idx]}" "summary")
+    [[ -z "$moved_name" ]] && moved_name=$(_fm_field "${files[$target_idx]}" "id")
+    printf 'Moved %s %s%s\n' "$moved_name" "$direction" "$( [[ "$n" -gt 1 ]] && printf ' %d' "$n" )" >&2
+}
+
+cmd_done() {
+    local query="$*"
+    [[ -z "$query" ]] && die "Usage: focus done <goal query>"
+    MEM_DIR="$MEM_DIR" mem forget "$query" 2>/dev/null || \
+        die "No goal matching: $query"
+    printf 'Goal removed: %s\n' "$query" >&2
+}
+
+usage() {
+    cat <<'EOF'
+focus — Goal management
+
+Usage:
+  focus list                          List goals with IDs and color
+  focus set <goal text>               Set a goal
+  focus show                          Show current goals (plain text)
+  focus move <id> <up|down> [N]       Reorder a goal (default N=1)
+  focus done <query>                  Mark a goal as done (remove it)
+
+Environment:
+  MEM_DIR   Memories directory (set by `identity shell`)
+EOF
+    exit 0
+}
+
+# Dispatch
+case "${1:-}" in
+    list)   cmd_list ;;
+    set)    shift; cmd_set "$@" ;;
+    show)   cmd_show ;;
+    move)   shift; cmd_move "$@" ;;
+    done)   shift; cmd_done "$@" ;;
+    -h|--help|help) usage ;;
+    "")     cmd_list ;;
+    *)      die "Unknown command: $1 (try focus --help)" ;;
+esac

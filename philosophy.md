@@ -135,17 +135,17 @@ Skills are to an agent what recipes are to a cook. They're reusable instruction 
 
 ### shellm-explore: seeing what the agent did
 
-When shellm runs a complex task, it often spawns nested sub-runs — child shellm processes that each handle a subtask. The result is a tree of run directories, each with its own conversation history, generated code, and output. This is powerful, but it's also opaque if you can't see the tree.
+When shellm runs a complex task, it often spawns nested sub-runs — child shellm processes that each handle a subtask. The result is a tree of trajectory files linked by fork/merge steps, each with its own conversation history, generated code, and output. This is powerful, but it's also opaque if you can't see the tree.
 
-`shellm-explore` solves this. Point it at any run directory and it walks the hierarchy, displaying each run with a one-line summary of what it was doing:
+`shellm-explore` solves this. Point it at any run (by hex ID or slug) and it walks the fork/merge references in the trajectory, displaying each run with a one-line summary:
 
 ```
-research-ai-market: Research the AI coding agent market and write a report
-  gather-pricing: Gather pricing and feature data for top AI coding agents
-  >>> synthesize-report: Synthesize findings into a comparative report <<<
+abc12345: Research the AI coding agent market and write a report
+  ├──── def45678: Gather pricing and feature data for top AI coding agents
+  └──── ghi78901: Synthesize findings into a comparative report
 ```
 
-The summaries come from a `context.md` file that shellm generates at the start of every run. A background process calls a fast model with all the input context — CLI arguments, stdin, file contents — and produces a TLDR, optional full summary, and LLM-generated descriptions of each input file. This runs asynchronously so it doesn't slow down the main loop, and it gives every run a human-readable label.
+The summaries come from a `run-summary` step that shellm appends to each trajectory at the start of every run. A background process calls a fast model with all the input context — CLI arguments, stdin, file contents — and produces a TLDR and optional full summary. This runs asynchronously so it doesn't slow down the main loop, and it gives every run a human-readable label.
 
 With `--report`, shellm-explore goes further: it sends the entire tree — summaries, context, relationships — to an LLM and generates an analysis explaining what the run tree accomplished, why each sub-run exists, and how they connect. It's a post-hoc audit of the agent's reasoning, built from the same primitives as everything else.
 

@@ -24,7 +24,7 @@ fi
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-RUNS_DIR="${SHELLM_RUNS_DIR:-$HOME/.shellm/runs}"
+TRAJ_DIR="${TRAJ_DIR:-$HOME/.shellm/.trajectories}"
 RUN_ID=""
 REPORT=0
 LIST_MODE=0
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --list|-l) LIST_MODE=1; shift ;;
         --report) REPORT=1; shift ;;
-        --runs-dir) RUNS_DIR="${2:?--runs-dir requires a path}"; shift 2 ;;
+        --traj-dir) TRAJ_DIR="${2:?--traj-dir requires a path}"; shift 2 ;;
         --model)  REPORT_MODEL="${2:?--model requires a value}"; shift 2 ;;
         -n)       LIST_LIMIT="${2:?-n requires a number}"; shift 2 ;;
         -w)       SUMMARY_WIDTH="${2:?-w requires a number}"; shift 2 ;;
@@ -47,26 +47,26 @@ Usage: shellm-explore [RUN_ID] [options]
 Explore and visualize shellm run trees. With no arguments, lists recent runs.
 
 Arguments:
-  RUN_ID              Run directory path, name prefix, or hex ID portion
+  RUN_ID              Trajectory filename, hex ID portion, or slug
 
 Options:
   -l, --list          List recent runs (default when no RUN_ID given)
-  --runs-dir DIR      Runs directory (default: $SHELLM_RUNS_DIR or ~/.shellm/runs)
+  --traj-dir DIR      Trajectories directory (default: $TRAJ_DIR or ~/.shellm/.trajectories)
   -n N                Number of runs to list (default: 20, 0 for all)
-  -w N                Truncate summaries to N characters (default: 70, 0 for no limit)
+  -w N                Truncate summaries to N characters (default: 85, 0 for no limit)
   --report            Generate an LLM-powered analysis of the run tree
   --model MODEL       Model for report generation (default: $SHELLM_MODEL or claude-opus-4-7)
   -h, --help          Show this help
 
 Environment variables:
-  SHELLM_RUNS_DIR     Same as --runs-dir
+  TRAJ_DIR            Same as --traj-dir
 
 Examples:
   shellm-explore                           # list recent runs
   shellm-explore -n 5                      # list 5 most recent runs
-  shellm-explore 8cdb3d26                  # show tree for a run
-  shellm-explore 8cdb3d26 -w 60           # tree with short summaries
-  shellm-explore 8cdb3d26 --report         # generate analysis report
+  shellm-explore a1b2c3d4                  # show tree for a run
+  shellm-explore a1b2c3d4 -w 60           # tree with short summaries
+  shellm-explore a1b2c3d4 --report         # generate analysis report
 EOF
             exit 0
             ;;
@@ -76,19 +76,38 @@ EOF
 done
 
 # ---------------------------------------------------------------------------
-# Get summary line for a run directory
+# Get summary line for a trajectory file
 # ---------------------------------------------------------------------------
 
 get_summary() {
-    local dir="$1"
-    local raw
-    if [[ -f "$dir/.shellm/context.md" ]]; then
-        raw=$(sed -n '2p' "$dir/.shellm/context.md")
-    elif [[ -f "$dir/.shellm/command" ]]; then
-        raw=$(cut -c1-200 "$dir/.shellm/command")
-    else
-        raw="(no summary)"
+    local traj_file="$1"
+    local raw=""
+
+    # Try to find a run-summary step
+    local summary_line
+    summary_line=$(jq -c 'select(.type == "run-summary")' "$traj_file" 2>/dev/null | head -1)
+    if [[ -n "$summary_line" ]]; then
+        raw=$(printf '%s' "$summary_line" | jq -r '.tldr // empty')
     fi
+
+    # Fallback: try the prompt step
+    if [[ -z "$raw" ]]; then
+        local prompt_line
+        prompt_line=$(jq -c 'select(.type == "prompt")' "$traj_file" 2>/dev/null | head -1)
+        if [[ -n "$prompt_line" ]]; then
+            raw=$(printf '%s' "$prompt_line" | jq -r '.content // empty' | head -c 200)
+        fi
+    fi
+
+    # Fallback: try the shellm-run command
+    if [[ -z "$raw" ]]; then
+        local run_line
+        run_line=$(head -1 "$traj_file")
+        raw=$(printf '%s' "$run_line" | jq -r '.command // empty' 2>/dev/null | head -c 200)
+    fi
+
+    [[ -z "$raw" ]] && raw="(no summary)"
+
     if [[ "$SUMMARY_WIDTH" -gt 0 && ${#raw} -gt "$SUMMARY_WIDTH" ]]; then
         raw="${raw:0:$(( SUMMARY_WIDTH - 3 ))}..."
     fi
@@ -101,63 +120,59 @@ get_summary() {
 
 list_runs() {
     local limit="$1"
-    [[ -d "$RUNS_DIR" ]] || die "No runs directory: $RUNS_DIR"
+    [[ -d "$TRAJ_DIR" ]] || die "No trajectories directory: $TRAJ_DIR"
 
-    # Top-level runs only (direct children of runs_dir), newest first
-    local dirs
-    dirs=$(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d | sort -r)
-    [[ -z "$dirs" ]] && { echo "No runs found."; return; }
+    # Find all .jsonl files, sorted newest first by filename (timestamp prefix)
+    local -a traj_files=()
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        # Only show root trajectories with shellm-run as first step
+        local first_type
+        first_type=$(head -1 "$f" | jq -r '.type // empty' 2>/dev/null)
+        [[ "$first_type" == "shellm-run" ]] || continue
+        traj_files+=("$f")
+    done < <(find "$TRAJ_DIR" -name '*.jsonl' -not -path '*/blobs/*' 2>/dev/null | sort -r)
+
+    [[ ${#traj_files[@]} -gt 0 ]] || { echo "No runs found."; return; }
 
     local count=0
-    while IFS= read -r run_dir; do
-        [[ -f "$run_dir/.shellm/command" ]] || continue
+    for traj_file in "${traj_files[@]}"; do
         if [[ "$limit" -gt 0 && "$count" -ge "$limit" ]]; then break; fi
 
-        local name
-        name="$(basename "$run_dir")"
+        local basename_noext
+        basename_noext=$(basename "$traj_file" .jsonl)
 
         # Parse timestamp and hex from name: YYYY-MM-DD-HH-MM-SS_HEXID_slug
-        local ts hex slug
-        ts="${name:0:19}"                          # 2026-04-23-23-15-50
-        hex="${name:20:8}"                         # 8cdb3d26
-        slug="${name:29}"                          # the-rest-of-the-name
-        # Format timestamp for display: YYYY-MM-DD HH:MM
-        ts="${ts:0:10} ${ts:11:2}:${ts:14:2}"
-
-        # Count sub-runs and measure max depth
-        local sub_count max_depth
-        sub_count=$(find "$run_dir" -mindepth 3 -name command -path '*/.shellm/command' 2>/dev/null | wc -l | tr -d ' ')
-        if [[ "$sub_count" -gt 0 ]]; then
-            local root_components
-            root_components=$(echo "$run_dir" | tr '/' '\n' | wc -l | tr -d ' ')
-            max_depth=$(find "$run_dir" -mindepth 3 -name command -path '*/.shellm/command' 2>/dev/null \
-                | while IFS= read -r f; do
-                    d=$(dirname "$(dirname "$f")")
-                    echo "$d" | tr '/' '\n' | wc -l | tr -d ' '
-                done | sort -rn | head -1)
-            max_depth=$(( max_depth - root_components ))
+        local ts="" hex="" slug=""
+        if [[ "$basename_noext" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2})_([0-9a-f]{8})_(.+)$ ]]; then
+            ts="${BASH_REMATCH[1]}"
+            hex="${BASH_REMATCH[2]}"
+            slug="${BASH_REMATCH[3]}"
+            # Format timestamp for display: YYYY-MM-DD HH:MM
+            ts="${ts:0:10} ${ts:11:2}:${ts:14:2}"
+        else
+            hex="$basename_noext"
         fi
 
+        # Count sub-runs (fork steps in this trajectory)
+        local sub_count
+        sub_count=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null | wc -l | tr -d ' ')
+
         local summary
-        summary="$(get_summary "$run_dir")"
+        summary="$(get_summary "$traj_file")"
 
         local tree_indicator=""
         if [[ "$sub_count" -gt 0 ]]; then
-            if [[ "$max_depth" -gt 1 ]]; then
-                tree_indicator=" ${_c_tree}[${sub_count} sub, depth ${max_depth}]${_c_reset}"
-            else
-                tree_indicator=" ${_c_tree}[${sub_count} sub]${_c_reset}"
-            fi
+            tree_indicator=" ${_c_tree}[${sub_count} sub]${_c_reset}"
         fi
 
         printf "${_c_hi}%s${_c_reset}  %s%s\n" "$hex" "$ts" "$tree_indicator"
         printf "    %s\n" "$summary"
 
         count=$(( count + 1 ))
-    done <<< "$dirs"
+    done
 
-    local total
-    total=$(echo "$dirs" | grep -c . || true)
+    local total=${#traj_files[@]}
     if [[ "$limit" -gt 0 && "$total" -gt "$limit" ]]; then
         printf "\n(%d of %d runs shown, use -n 0 for all)\n" "$limit" "$total"
     fi
@@ -167,35 +182,29 @@ list_runs() {
 # Resolve & explore a specific run
 # ---------------------------------------------------------------------------
 
-# Resolve RUN_ID: absolute/relative path, name prefix match, or hex portion match
+# Resolve RUN_ID: match against trajectory filenames (hex ID or slug)
 resolve_run_id() {
     local input="$1"
-    local runs_dir="$RUNS_DIR"
+    [[ -d "$TRAJ_DIR" ]] || return 1
 
-    # 1. Direct path (absolute or relative)
-    if [[ -d "$input" && -f "$input/.shellm/command" ]]; then
-        (cd "$input" && pwd)
-        return
-    fi
+    local -a matches=()
+    local f basename_noext
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        basename_noext=$(basename "$f" .jsonl)
 
-    # 2. Search all run records (including sub-runs) for matches
-    [[ -d "$runs_dir" ]] || return 1
-    local all_runs
-    all_runs=$(find "$runs_dir" -name command -path '*/.shellm/command' 2>/dev/null | sort)
-    [[ -z "$all_runs" ]] && return 1
+        # Check if first step is shellm-run (it's a run, not a consciousness stream)
+        local first_type
+        first_type=$(head -1 "$f" | jq -r '.type // empty' 2>/dev/null)
+        [[ "$first_type" == "shellm-run" ]] || continue
 
-    local matches=()
-    while IFS= read -r cmd_file; do
-        local run_dir
-        run_dir="$(dirname "$(dirname "$cmd_file")")"
-        local name
-        name="$(basename "$run_dir")"
-
-        # Match by name prefix or hex portion (the 8-char hex after the timestamp)
-        if [[ "$name" == "$input"* ]] || [[ "$name" == *"_${input}_"* || "$name" == *"_${input}" ]]; then
-            matches+=("$run_dir")
+        # Match by hex ID portion, slug, or full name prefix
+        if [[ "$basename_noext" == *"_${input}_"* || "$basename_noext" == *"_${input}" ]]; then
+            matches+=("$f")
+        elif [[ "$basename_noext" == "$input"* ]]; then
+            matches+=("$f")
         fi
-    done <<< "$all_runs"
+    done < <(find "$TRAJ_DIR" -name '*.jsonl' -not -path '*/blobs/*' 2>/dev/null | sort)
 
     if [[ ${#matches[@]} -eq 1 ]]; then
         echo "${matches[0]}"
@@ -203,7 +212,7 @@ resolve_run_id() {
     elif [[ ${#matches[@]} -gt 1 ]]; then
         echo "Ambiguous run ID '$input' matches ${#matches[@]} runs:" >&2
         for m in "${matches[@]}"; do
-            echo "  $(basename "$m")" >&2
+            echo "  $(basename "$m" .jsonl)" >&2
         done
         return 1
     fi
@@ -218,60 +227,96 @@ if [[ -z "$RUN_ID" || "$LIST_MODE" -eq 1 ]]; then
 fi
 
 _run_input="$RUN_ID"
-RUN_ID="$(resolve_run_id "$RUN_ID")" || die "No matching run found: $_run_input"
+RUN_TRAJ="$(resolve_run_id "$RUN_ID")" || die "No matching run found: $_run_input"
 
 # ---------------------------------------------------------------------------
-# Find root of the run tree
+# Find root of the run tree by following trajectory parent references
 # ---------------------------------------------------------------------------
 
 find_root() {
-    local dir="$1"
-    while [[ -f "$(dirname "$dir")/.shellm/command" ]]; do
-        dir="$(dirname "$dir")"
-    done
-    echo "$dir"
+    local traj_file="$1"
+
+    # Check if the first step is trajectory with parent (meaning this is a child/sub-run)
+    local first_line
+    first_line=$(head -1 "$traj_file")
+    local first_type
+    first_type=$(printf '%s' "$first_line" | jq -r '.type // empty')
+
+    if [[ "$first_type" == "trajectory" ]]; then
+        # Get the parent filename
+        local parent_name
+        parent_name=$(printf '%s' "$first_line" | jq -r '.parent // empty')
+        if [[ -n "$parent_name" ]]; then
+            local parent_file="$TRAJ_DIR/$parent_name"
+            if [[ -f "$parent_file" ]]; then
+                find_root "$parent_file"
+                return
+            fi
+        fi
+    fi
+
+    echo "$traj_file"
 }
 
-ROOT="$(find_root "$RUN_ID")"
+ROOT_TRAJ="$(find_root "$RUN_TRAJ")"
 
 # ---------------------------------------------------------------------------
 # Tree visualization
 # ---------------------------------------------------------------------------
 
 print_tree() {
-    local root="$1"
-    local target="$2"
+    local root_traj="$1"
+    local target_traj="$2"
 
-    # Find all run records under root (directories containing .shellm/command)
-    local runs
-    runs=$(find "$root" -name command -path '*/.shellm/command' | sort)
+    # Build tree by walking fork references starting from root
+    local -a depths=() files=() names=() sums=()
 
-    local root_depth
-    root_depth=$(echo "$root" | tr '/' '\n' | wc -l | tr -d ' ')
+    _collect_tree() {
+        local traj_file="$1"
+        local depth="$2"
 
-    # Collect all entries into parallel arrays
-    local -a depths=() dirs=() names=() sums=()
-    while IFS= read -r cmd_file; do
-        local run_dir
-        run_dir="$(dirname "$(dirname "$cmd_file")")"
-        local run_depth
-        run_depth=$(echo "$run_dir" | tr '/' '\n' | wc -l | tr -d ' ')
+        [[ -f "$traj_file" ]] || return
 
         local bn
-        bn="$(basename "$run_dir")"
-        # Extract hex ID from name: YYYY-MM-DD-HH-MM-SS_HEXID_slug
-        local hex="${bn:20:8}"
+        bn=$(basename "$traj_file" .jsonl)
+        local hex=""
+        if [[ "$bn" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}_([0-9a-f]{8})_ ]]; then
+            hex="${BASH_REMATCH[1]}"
+        else
+            hex="$bn"
+        fi
 
-        depths+=("$(( run_depth - root_depth ))")
-        dirs+=("$run_dir")
+        depths+=("$depth")
+        files+=("$traj_file")
         names+=("$hex")
-        sums+=("$(get_summary "$run_dir")")
-    done <<< "$runs"
+        sums+=("$(get_summary "$traj_file")")
+
+        # Find fork steps in this trajectory → child branches
+        local fork_lines
+        fork_lines=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null || true)
+        [[ -z "$fork_lines" ]] && return
+
+        while IFS= read -r fork_line; do
+            local child_ref
+            child_ref=$(printf '%s' "$fork_line" | jq -r '.child // empty')
+            [[ -n "$child_ref" ]] || continue
+
+            # Resolve child file
+            local child_file
+            local child_path="$child_ref"
+            [[ "$child_path" == *.jsonl ]] || child_path="${child_path}.jsonl"
+            child_file="$TRAJ_DIR/$child_path"
+
+            [[ -f "$child_file" ]] && _collect_tree "$child_file" $((depth + 1))
+        done <<< "$fork_lines"
+    }
+
+    _collect_tree "$root_traj" 0
 
     local count=${#depths[@]}
+    [[ "$count" -gt 0 ]] || { echo "(empty tree)"; return; }
 
     # Determine which nodes are the last child at their depth.
-    # A node at depth d is "last" if the next node at depth <= d has depth < d (or doesn't exist).
     local -a is_last=()
     local i j
     for (( i=0; i<count; i++ )); do
@@ -286,7 +331,6 @@ print_tree() {
     done
 
     # Print with ASCII tree connectors.
-    # has_more[lvl]=1 means there are still siblings coming at that depth level.
     local -a has_more=()
     for (( i=0; i<count; i++ )); do
         local d=${depths[$i]}
@@ -294,7 +338,6 @@ print_tree() {
 
         if [[ $d -gt 0 ]]; then
             prefix+="  "  # 2-space left margin
-            # Vertical bars for ancestor levels
             local lvl
             for (( lvl=1; lvl<d; lvl++ )); do
                 if [[ "${has_more[$lvl]:-0}" -eq 1 ]]; then
@@ -303,7 +346,6 @@ print_tree() {
                     prefix+="      "
                 fi
             done
-            # Connector for this node
             if [[ ${is_last[$i]} -eq 1 ]]; then
                 prefix+="${_c_tree}└────${_c_reset} "
             else
@@ -311,14 +353,13 @@ print_tree() {
             fi
         fi
 
-        # Update sibling tracking for this depth
         if [[ ${is_last[$i]} -eq 1 ]]; then
             has_more[$d]=0
         else
             has_more[$d]=1
         fi
 
-        if [[ "${dirs[$i]}" == "$target" ]]; then
+        if [[ "${files[$i]}" == "$target_traj" ]]; then
             echo "${_c_hi}>>>${_c_reset} ${prefix}${_c_hi}${names[$i]}${_c_reset}: ${sums[$i]}"
         else
             echo "    ${prefix}${_c_hi}${names[$i]}${_c_reset}: ${sums[$i]}"
@@ -331,35 +372,60 @@ print_tree() {
 # ---------------------------------------------------------------------------
 
 generate_report() {
-    local root="$1"
-    local target="$2"
+    local root_traj="$1"
+    local target_traj="$2"
 
     # Build the tree visualization
     local tree_output
-    tree_output="$(print_tree "$root" "$target")"
+    tree_output="$(print_tree "$root_traj" "$target_traj")"
 
     # Collect context for every run in the tree
     local all_contexts=""
-    local runs
-    runs=$(find "$root" -name command -path '*/.shellm/command' | sort)
 
-    while IFS= read -r cmd_file; do
-        local run_dir
-        run_dir="$(dirname "$(dirname "$cmd_file")")"
-        local run_basename
-        run_basename="$(basename "$run_dir")"
+    _collect_contexts() {
+        local traj_file="$1"
+        [[ -f "$traj_file" ]] || return
 
+        local bn
+        bn=$(basename "$traj_file" .jsonl)
         all_contexts+="
-## ${run_basename}
+## ${bn}
 "
-        if [[ -f "$run_dir/.shellm/context.md" ]]; then
-            all_contexts+="$(cat "$run_dir/.shellm/context.md")"
-        else
-            all_contexts+="Command: $(cat "$run_dir/.shellm/command")"
+        # Get summary
+        local summary
+        summary=$(get_summary "$traj_file")
+        all_contexts+="Summary: $summary"
+
+        # Get command from shellm-run step
+        local first_line
+        first_line=$(head -1 "$traj_file")
+        local first_type
+        first_type=$(printf '%s' "$first_line" | jq -r '.type // empty')
+        if [[ "$first_type" == "shellm-run" ]]; then
+            local cmd
+            cmd=$(printf '%s' "$first_line" | jq -r '.command // empty')
+            all_contexts+=$'\n'"Command: $cmd"
         fi
-        all_contexts+="
-"
-    done <<< "$runs"
+        all_contexts+=$'\n'
+
+        # Recurse into fork children
+        local fork_lines
+        fork_lines=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null || true)
+        [[ -z "$fork_lines" ]] && return
+
+        while IFS= read -r fork_line; do
+            local child_ref
+            child_ref=$(printf '%s' "$fork_line" | jq -r '.child // empty')
+            [[ -n "$child_ref" ]] || continue
+            local child_file
+            local child_path="$child_ref"
+            [[ "$child_path" == *.jsonl ]] || child_path="${child_path}.jsonl"
+            child_file="$TRAJ_DIR/$child_path"
+            [[ -f "$child_file" ]] && _collect_contexts "$child_file"
+        done <<< "$fork_lines"
+    }
+
+    _collect_contexts "$root_traj"
 
     # Build the prompt
     local user_prompt="Here is a shellm run tree visualization:
@@ -368,8 +434,7 @@ generate_report() {
 ${tree_output}
 \`\`\`
 
-The target run being analyzed is: $(basename "$target")
-Full path: ${target}
+The target run being analyzed is: $(basename "$target_traj" .jsonl)
 
 Below is the detailed context for every run in the tree:
 ${all_contexts}
@@ -401,7 +466,7 @@ Please provide a detailed report explaining:
 # ---------------------------------------------------------------------------
 
 if [[ "$REPORT" -eq 1 ]]; then
-    generate_report "$ROOT" "$RUN_ID"
+    generate_report "$ROOT_TRAJ" "$RUN_TRAJ"
 else
-    print_tree "$ROOT" "$RUN_ID"
+    print_tree "$ROOT_TRAJ" "$RUN_TRAJ"
 fi

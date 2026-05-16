@@ -19,14 +19,20 @@ CTX_PINS=()
 CTX_ASSISTANT_TYPES=""
 CTX_USER_TYPES=""
 CTX_EXCLUDE_TYPES=""
-CTX_BRANCH="root"
+CTX_TRAJ_DIR_OPT=""
+CTX_TRAJ_ID_OPT=""
 
 die() { printf 'context: error: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
-Usage: context <traj_dir> [options]
+Usage: context [options]
 
-Reads a trajectory branch and outputs a JSON messages array to stdout.
+Reads a trajectory and outputs a JSON messages array to stdout.
+
+Trajectory targeting:
+  --traj_dir DIR        Trajectory directory.
+  --traj_id ID          Trajectory ID (UUID or hex prefix).
+                        Falls back to $TRAJ_DIR + $TRAJ_ID env vars.
 
 Role assignment:
   --assistant-types LIST  Step types that become {"role":"assistant"}.
@@ -48,12 +54,12 @@ Elision:
 Budget:
   --max-bytes BYTES     Cap total output. Default: unset.
 
-Branch:
-  --branch NAME         Which branch to render. Default: root.
-
 Output:
   A JSON array: [{"role":"user","content":"..."},{"role":"assistant","content":"..."},...]
   Consecutive messages with the same role are merged (Anthropic API requires alternation).
+
+Environment:
+  TRAJ_DIR + TRAJ_ID    Default trajectory if no flags given.
 
 EOF
     exit "${1:-0}"
@@ -63,7 +69,6 @@ EOF
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-TRAJ_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --head)             CTX_HEAD="${2:?--head requires N}"; shift 2 ;;
@@ -75,34 +80,67 @@ while [[ $# -gt 0 ]]; do
         --assistant-types)  CTX_ASSISTANT_TYPES="${2:?--assistant-types requires LIST}"; shift 2 ;;
         --user-types)       CTX_USER_TYPES="${2:?--user-types requires LIST}"; shift 2 ;;
         --exclude-types)    CTX_EXCLUDE_TYPES="${2:?--exclude-types requires LIST}"; shift 2 ;;
-        --branch)           CTX_BRANCH="${2:?--branch requires NAME}"; shift 2 ;;
+        --traj_dir)         CTX_TRAJ_DIR_OPT="${2:?--traj_dir requires DIR}"; shift 2 ;;
+        --traj_id)          CTX_TRAJ_ID_OPT="${2:?--traj_id requires ID}"; shift 2 ;;
         -h|--help)          usage 0 ;;
         -*)                 die "unknown option: $1" ;;
-        *)
-            if [[ -z "$TRAJ_DIR" ]]; then
-                TRAJ_DIR="$1"
-            else
-                die "unexpected argument: $1"
-            fi
-            shift
-            ;;
+        *)                  die "unexpected argument: $1" ;;
     esac
 done
 
-[[ -n "$TRAJ_DIR" ]] || die "traj_dir is required"
-
 # ---------------------------------------------------------------------------
-# Resolve trajectory file (with backward compat)
+# Resolve trajectory file
 # ---------------------------------------------------------------------------
 
-TRAJ_FILE="$TRAJ_DIR/${CTX_BRANCH}.jsonl"
-if [[ "$CTX_BRANCH" == "root" && ! -f "$TRAJ_FILE" ]]; then
-    if [[ -f "$TRAJ_DIR/trajectory.jsonl" ]]; then
-        TRAJ_FILE="$TRAJ_DIR/trajectory.jsonl"
+# Priority: --traj_dir + --traj_id flags > $TRAJ_DIR + $TRAJ_ID env vars
+RESOLVED_TRAJ_FILE=""
+RESOLVED_TRAJ_DIR=""
+
+# Resolve traj_id within traj_dir (inline version matching traj's _resolve_traj_id)
+_ctx_resolve_traj_id() {
+    local traj_dir="$1" traj_id="$2"
+    if [[ -f "$traj_dir/$traj_id" ]]; then
+        printf '%s\n' "$traj_dir/$traj_id"; return
     fi
+    if [[ "$traj_id" != *.jsonl && -f "$traj_dir/${traj_id}.jsonl" ]]; then
+        printf '%s\n' "$traj_dir/${traj_id}.jsonl"; return
+    fi
+    local hex_prefix="$traj_id"
+    if [[ "$traj_id" == *-*-*-*-* ]]; then
+        hex_prefix="${traj_id%%-*}"
+    fi
+    local match
+    match=$(find "$traj_dir" -name "*_${hex_prefix}_*.jsonl" -not -path '*/blobs/*' 2>/dev/null | head -1)
+    if [[ -n "$match" ]]; then
+        printf '%s\n' "$match"; return
+    fi
+    return 1
+}
+
+if [[ -n "$CTX_TRAJ_DIR_OPT" && -n "$CTX_TRAJ_ID_OPT" ]]; then
+    RESOLVED_TRAJ_DIR="$CTX_TRAJ_DIR_OPT"
+    RESOLVED_TRAJ_FILE=$(_ctx_resolve_traj_id "$CTX_TRAJ_DIR_OPT" "$CTX_TRAJ_ID_OPT") \
+        || die "cannot resolve --traj_id '$CTX_TRAJ_ID_OPT' in '$CTX_TRAJ_DIR_OPT'"
+elif [[ -n "${TRAJ_DIR:-}" && -n "${TRAJ_ID:-}" ]]; then
+    RESOLVED_TRAJ_DIR="$TRAJ_DIR"
+    RESOLVED_TRAJ_FILE=$(_ctx_resolve_traj_id "$TRAJ_DIR" "$TRAJ_ID") \
+        || die "cannot resolve TRAJ_ID '$TRAJ_ID' in TRAJ_DIR '$TRAJ_DIR'"
+else
+    die "No trajectory specified. Use --traj_dir + --traj_id, or set TRAJ_DIR + TRAJ_ID env vars."
 fi
 
-[[ -f "$TRAJ_FILE" ]] || die "trajectory not found: $TRAJ_FILE"
+[[ -f "$RESOLVED_TRAJ_FILE" ]] || die "trajectory not found: $RESOLVED_TRAJ_FILE"
+
+# ---------------------------------------------------------------------------
+# Always exclude shellm-run and run-summary from context rendering
+# ---------------------------------------------------------------------------
+
+# Append to exclude types (don't override user's --exclude-types)
+if [[ -n "$CTX_EXCLUDE_TYPES" ]]; then
+    CTX_EXCLUDE_TYPES="${CTX_EXCLUDE_TYPES},shellm-run,run-summary"
+else
+    CTX_EXCLUDE_TYPES="shellm-run,run-summary"
+fi
 
 # ---------------------------------------------------------------------------
 # Build type sets for role assignment (pipe-delimited for bash 3.2 compat)
@@ -165,7 +203,7 @@ pin_match() {
 # Metadata keys to skip when rendering step content
 # ---------------------------------------------------------------------------
 
-_META_KEYS="|step_id|ts|type|"
+_META_KEYS="|step_id|ts|type|fork_parent|"
 is_meta_key() {
     local key="$1"
     # Skip step_id, ts, type, and any key ending in _ref, _bytes, _truncated
@@ -177,20 +215,21 @@ is_meta_key() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 1: Load trajectory rows
+# Phase 1: Load trajectory rows via traj dump
 # ---------------------------------------------------------------------------
 
 ALL_ROWS=()
 ALL_IDS=()
 ALL_TYPES=()
 while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
     local_id=$(printf '%s' "$line" | jq -r '.step_id // empty' 2>/dev/null)
     [[ -n "$local_id" ]] || continue
     local_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
     ALL_ROWS+=("$line")
     ALL_IDS+=("$local_id")
     ALL_TYPES+=("$local_type")
-done < "$TRAJ_FILE"
+done < <(traj dump --traj_dir "$RESOLVED_TRAJ_DIR" --traj_id "$(basename "$RESOLVED_TRAJ_FILE")" 2>/dev/null)
 
 TOTAL=${#ALL_ROWS[@]}
 
@@ -238,8 +277,8 @@ truncate_field() {
     fi
 
     if [[ "$limit" -le 1 ]]; then
-        printf '[... truncated: %s bytes total. read with: traj show %s %s --full]' \
-            "$val_bytes" "$TRAJ_DIR" "$step_id"
+        printf '[... truncated: %s bytes total. read with: traj show %s --full]' \
+            "$val_bytes" "$step_id"
         return
     fi
 
@@ -250,8 +289,8 @@ truncate_field() {
     tail_part=$(printf '%s' "$value" | tail -c "$half")
 
     printf '%s' "$head_part"
-    printf '\n[... truncated: %s bytes total. read with: traj show %s %s --full]\n' \
-        "$val_bytes" "$TRAJ_DIR" "$step_id"
+    printf '\n[... truncated: %s bytes total. read with: traj show %s --full]\n' \
+        "$val_bytes" "$step_id"
     printf '%s' "$tail_part"
 }
 
@@ -264,6 +303,33 @@ render_step() {
     local row="$1" prompt_limit="$2"
     local step_id
     step_id=$(printf '%s' "$row" | jq -r '.step_id')
+    local step_type
+    step_type=$(printf '%s' "$row" | jq -r '.type')
+
+    # Handle fork/merge/trajectory step types.
+    case "$step_type" in
+        fork)
+            local fork_child
+            fork_child=$(printf '%s' "$row" | jq -r '.child // empty')
+            printf '[Forked child: %s]' "$fork_child"
+            return
+            ;;
+        trajectory)
+            # Internal bookkeeping — skip entirely.
+            return
+            ;;
+        merge)
+            local merge_branch merge_content
+            merge_branch=$(printf '%s' "$row" | jq -r '.from_branch // empty')
+            merge_content=$(printf '%s' "$row" | jq -r '.content // empty')
+            if [[ -n "$merge_content" ]]; then
+                printf '[Merged from %s: %s]' "$merge_branch" "$merge_content"
+            else
+                printf '[Merged from %s]' "$merge_branch"
+            fi
+            return
+            ;;
+    esac
 
     # Get all non-metadata keys and their values.
     local keys

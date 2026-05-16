@@ -205,15 +205,6 @@ _shellm_time() {
     date +%s
 }
 
-# Append a step record to the trajectory via the `traj` tool.
-# Reads the record from a JSON string argument (not stdin, for convenience).
-# traj_dir is <rundir>/.shellm/traj
-traj_append_step() {
-    local traj_dir="$1"
-    local json="$2"
-    printf '%s' "$json" | traj append "$traj_dir"
-}
-
 extract_reasoning() {
     local response="$1"
     printf '%s\n' "$response" | awk '
@@ -1223,10 +1214,10 @@ Pass context to sub-runs with `-f FILE` or via stdin. Always give sub-runs a cle
 
 Monitor running sub-runs via their trajectory:
 ```bash
-# List child run directories
-ls "$SHELLM_RUNDIR"/*/
+# List child trajectories
+traj list --children all
 # Inspect a sub-run's progress
-context "$SHELLM_RUNDIR/<child-run>/.shellm/traj" --tail 5
+traj tail --traj_dir "$TRAJ_DIR" --traj_id "<child-traj-id>" -n 5
 ```
 
 ## Never block — background long-running work
@@ -1249,20 +1240,20 @@ Don't wait idle for slow commands. Start them, move on to other work, and check 
 - Recursive self-calling: spawn shellm sub-runs for parallelism and delegation
 
 ## Trajectory and context
-The trajectory is the lossless record of this run stored at `$SHELLM_RUNDIR/.shellm/traj/`. Your conversation history is presented as multi-turn messages (your reasoning as assistant, execution output as user) produced by `context`. Large outputs may be truncated with a stub.
+The trajectory is the lossless record of this run stored in `$TRAJ_DIR` (identified by `$TRAJ_ID`). Your conversation history is presented as multi-turn messages (your reasoning as assistant, execution output as user) produced by `context`. Large outputs may be truncated with a stub.
 
-The trajectory directory is `$SHELLM_RUNDIR/.shellm/traj`. Nested `shellm` calls create child run directories under `$SHELLM_RUNDIR`; use that child's traj directory with `context` or `traj` when you need to inspect a sub-run.
+The trajectory directory is `$TRAJ_DIR`, trajectory ID is `$TRAJ_ID`. Nested `shellm` calls create child trajectory files; use `traj list` to see parents and children.
 
 When you see a truncation stub like `[... truncated: N bytes total. ...]`, you can retrieve the full content:
-- `traj show "$SHELLM_RUNDIR/.shellm/traj" <step_id> --full` — show a step with full untruncated output
-- `traj show "$SHELLM_RUNDIR/.shellm/traj" <step_id> --field stdout` — emit just the stdout bytes (pipe to head/tail/grep)
-- `traj search "$SHELLM_RUNDIR/.shellm/traj" "<pattern>"` — search across all steps (includes spilled blobs)
-- `traj search "$SHELLM_RUNDIR/.shellm/traj" "<pattern>" --field stdout -i` — search stdout only, case-insensitive
-- `traj tail "$SHELLM_RUNDIR/.shellm/traj" -n 5` — show last 5 raw trajectory records
+- `traj show <step_id> --full` — show a step with full untruncated output
+- `traj show <step_id> --field stdout` — emit just the stdout bytes (pipe to head/tail/grep)
+- `traj search "<pattern>"` — search across all steps (includes spilled blobs)
+- `traj search "<pattern>" --field stdout -i` — search stdout only, case-insensitive
+- `traj tail -n 5` — show last 5 raw trajectory records
 
 You can also re-render context with different options:
-- `context "$SHELLM_RUNDIR/.shellm/traj" --tail 100` — see more history
-- `context "$SHELLM_RUNDIR/.shellm/traj" --pin <step_id>` -- ensure a specific step is included
+- `context --tail 100` — see more history
+- `context --pin <step_id>` -- ensure a specific step is included
 
 ## Signaling completion
 When you have the answer, set one of these in your bash code:
@@ -1337,8 +1328,8 @@ SYSPROMPT
     if [[ -n "$rundir" ]]; then
         echo ""
         echo "## Current run"
-        echo "- Run directory: $rundir"
-        echo "- In executed bash, this path is available as \$SHELLM_RUNDIR."
+        echo "- Transient run directory: $rundir (for generated code output; available as \$SHELLM_RUNDIR)"
+        echo "- Trajectory and sub-run monitoring use \$TRAJ_DIR and \$TRAJ_ID."
     fi
 
     # Append context documentation if any context was provided
@@ -1370,14 +1361,14 @@ SYSPROMPT
 # Async context summary generation
 # ---------------------------------------------------------------------------
 
-generate_context_md() {
-    local rundir="$1"
-    local prompt="$2"
-    local stdin_file="$3"  # path to file with stdin content, or ""
-    shift 3
+generate_run_summary() {
+    local traj_dir="$1"
+    local traj_id="$2"
+    local prompt="$3"
+    local stdin_file="$4"  # path to file with stdin content, or ""
+    shift 4
     local file_paths=("$@")
 
-    local context_md_file="$rundir/.shellm/context.md"
     local summary_model="${SHELLM_SUMMARY_MODEL:-claude-haiku-4-5-20251001}"
 
     # Read stdin content if available
@@ -1385,16 +1376,6 @@ generate_context_md() {
     if [[ -n "$stdin_file" && -f "$stdin_file" ]]; then
         stdin_content=$(cat "$stdin_file")
     fi
-
-    # Read file previews (first 500 chars each)
-    local -a file_previews=()
-    for f in "${file_paths[@]+"${file_paths[@]}"}"; do
-        if [[ -f "$f" ]]; then
-            file_previews+=("$(head -c 500 "$f" 2>/dev/null || true)")
-        else
-            file_previews+=("")
-        fi
-    done
 
     # Build combined context for LLM (cap at 20K chars)
     local max_ctx=20000
@@ -1419,18 +1400,6 @@ generate_context_md() {
 
     local total_size=${#combined}
 
-    # Build file path list for LLM prompt
-    local files_json_hint=""
-    local k=1
-    for f in "${file_paths[@]+"${file_paths[@]}"}"; do
-        files_json_hint+="    \"${f}\": \"<one-line description of this file>\""
-        if [[ $k -lt ${#file_paths[@]} ]]; then
-            files_json_hint+=","
-        fi
-        files_json_hint+=$'\n'
-        k=$((k + 1))
-    done
-
     # Determine full_summary instruction
     local full_summary_hint
     if [[ $total_size -gt 1000 ]]; then
@@ -1443,11 +1412,8 @@ generate_context_md() {
     local llm_prompt="Analyze the context and goal of this shellm run. Respond with ONLY valid JSON (no markdown fences, no preamble) matching this schema:
 {
   \"tldr\": \"one-line summary of the context and goal of this shellm run\",
-  \"full_summary\": ${full_summary_hint},
-  \"file_descriptions\": {
-${files_json_hint}  }
+  \"full_summary\": ${full_summary_hint}
 }
-$(if [[ ${#file_paths[@]} -eq 0 ]]; then echo 'The file_descriptions object should be empty ({}) since no files were provided.'; fi)
 
 Inputs to the run:
 ${combined}"
@@ -1463,62 +1429,24 @@ ${combined}"
 
     # Parse JSON response
     local tldr="" full_summary=""
-    local parsed_ok=0
     if [[ -n "$text" ]]; then
         # Strip markdown fences if the model wrapped them anyway
         local cleaned
         cleaned=$(printf '%s\n' "$text" | sed '1s/^```json$//;1s/^```$//;$s/^```$//' | sed '/^$/d')
         if printf '%s' "$cleaned" | jq . >/dev/null 2>&1; then
             text="$cleaned"
-            parsed_ok=1
             tldr=$(printf '%s' "$text" | jq -r '.tldr // empty')
             full_summary=$(printf '%s' "$text" | jq -r 'if .full_summary == null then "" else .full_summary end')
         fi
     fi
 
-    # Write context.md
-    {
-        echo "# TLDR of shellm Run Context"
-        echo "${tldr:-(summary generation failed)}"
-        echo ""
-
-        if [[ -n "$full_summary" ]]; then
-            echo "# Full Summary of shellm Run Context"
-            echo "$full_summary"
-            echo ""
-        fi
-
-        echo "# Context Provided"
-        echo "- context provided as argument to command line: ${prompt}"
-        if [[ -n "$stdin_content" ]]; then
-            echo "- stdin: ${stdin_content:0:500}"
-        fi
-        echo ""
-
-        # File subheaders with LLM descriptions and previews
-        local idx=0
-        for f in "${file_paths[@]+"${file_paths[@]}"}"; do
-            local file_desc=""
-            if [[ "$parsed_ok" -eq 1 ]]; then
-                file_desc=$(printf '%s' "$text" | jq -r --arg path "$f" '.file_descriptions[$path] // empty')
-            fi
-
-            echo "## file$((idx+1)): ${f}"
-            if [[ -n "$file_desc" ]]; then
-                echo "$file_desc"
-            fi
-            echo ""
-            echo '```'
-            if [[ -n "${file_previews[$idx]:-}" ]]; then
-                echo "${file_previews[$idx]}"
-            else
-                echo "(file not readable)"
-            fi
-            echo '```'
-            echo ""
-            idx=$((idx + 1))
-        done
-    } > "$context_md_file"
+    # Write run-summary step to the trajectory
+    local summary_json
+    summary_json=$(jq -nc \
+        --arg tldr "${tldr:-(summary generation failed)}" \
+        --arg full "$full_summary" \
+        '{type:"run-summary", tldr:$tldr, full_summary:$full}')
+    printf '%s' "$summary_json" | traj append --traj_dir "$traj_dir" --traj_id "$traj_id" >/dev/null 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1540,20 +1468,32 @@ run_loop() {
     local -a file_contexts=()
     local _SHELLM_ACTIVE_ENV=""
 
-    # Create run record
-    local run_name
-    run_name=$(make_workspace_name "$prompt")
-    if [[ -n "${_SHELLM_PARENT_RUNDIR:-}" ]]; then
-        # Sub-run: nest inside parent run record (direct child)
-        rundir="${_SHELLM_PARENT_RUNDIR}/$run_name"
+    # Create trajectory for this run
+    # Determine TRAJ_DIR — use existing env var or default to $SHELLM_HOME/.trajectories
+    local _run_traj_dir="${TRAJ_DIR:-$SHELLM_HOME/.trajectories}"
+    mkdir -p "$_run_traj_dir"
+
+    # Create the trajectory via traj new
+    local _run_traj_id _new_output run_name
+    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+        _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt" --field "parent=$_SHELLM_PARENT_TRAJ_ID")
     else
-        rundir="$SHELLM_HOME/runs/$run_name"
+        _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt")
     fi
-    mkdir -p "$rundir/.shellm/traj"
+    _run_traj_id=$(head -1 <<< "$_new_output")
+    run_name=$(tail -1 <<< "$_new_output")
+
+    # If this is a child run, record a fork step in the parent trajectory
+    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+        traj fork "$_run_traj_id" --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>&1 || true
+    fi
+
+    # Create a temp dir for transient state (exec pids, output, watchdog, etc.)
+    rundir=$(mktemp -d "${TMPDIR:-/tmp}/shellm-run.XXXXXX")
 
     # Track root rundir for the run tree
-    if [[ -n "${_SHELLM_PARENT_RUNDIR:-}" ]]; then
-        _SHELLM_ROOT_RUNDIR="${_SHELLM_ROOT_RUNDIR:-$_SHELLM_PARENT_RUNDIR}"
+    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+        _SHELLM_ROOT_RUNDIR="${_SHELLM_ROOT_RUNDIR:-$rundir}"
     else
         _SHELLM_ROOT_RUNDIR="$rundir"
     fi
@@ -1567,11 +1507,10 @@ run_loop() {
     mkdir -p "$workdir"
 
     export SHELLM_WORKDIR="$workdir"
+    export TRAJ_DIR="$_run_traj_dir"
+    export TRAJ_ID="$_run_traj_id"
 
-    # Record metadata
-    printf '%s\n' "$_SHELLM_ORIGINAL_CMD" > "$rundir/.shellm/command"
-    printf '%s\n' "$workdir" > "$rundir/.shellm/workdir"
-    progress "Run: $rundir"
+    progress "Trajectory: $_run_traj_id (dir: $_run_traj_dir)"
     progress "Workdir: $workdir"
 
     # Load context into variables for env var passing
@@ -1667,35 +1606,70 @@ run_loop() {
     fi
 
     _SHELLM_ACTIVE_ENV="$ws_name"
-    printf '%s\n' "$ws_name" > "$rundir/.shellm/env"
 
     # Build system prompt
     system_prompt=$(build_system_prompt "$context_info" "$_SHELLM_DOCKER_MODE" "$rundir")
 
-    # Kick off async context summary generation (background)
+    # Build env metadata for the shellm-run step
+    local _env_json
+    if [[ "$_SHELLM_DOCKER_MODE" -eq 1 ]]; then
+        local _img_digest=""
+        _img_digest=$(docker_metadata_value "$ws_name" image_digest 2>/dev/null) || true
+        _env_json=$(jq -nc \
+            --arg name "$ws_name" \
+            --arg etype "docker" \
+            --arg image "$SHELLM_DOCKER_IMAGE" \
+            --arg digest "$_img_digest" \
+            --arg access "$SHELLM_DOCKER_ACCESS" \
+            --arg broker "${_SHELLM_DOCKER_BROKER_TRANSPORT:-}" \
+            --arg socket "${SHELLM_DOCKER_SOCKET:-}" \
+            '{name:$name, type:$etype, docker_image:$image, docker_image_digest:$digest, docker_access:$access, docker_broker_transport:$broker, docker_socket:$socket, privileged:false, var_mounts:[]}')
+    else
+        _env_json='{"name":"local","type":"local"}'
+    fi
+
+    # Build context_files JSON array
+    local _ctx_files_json="[]"
+    for _cf in "${context_files[@]+"${context_files[@]}"}"; do
+        _ctx_files_json=$(printf '%s' "$_ctx_files_json" | jq --arg f "$_cf" '. + [$f]')
+    done
+
+    # Write shellm-run step as the first step in the trajectory
+    local _shellm_run_json
+    _shellm_run_json=$(jq -nc \
+        --arg cmd "$_SHELLM_ORIGINAL_CMD" \
+        --arg wd "$workdir" \
+        --arg model "$SHELLM_MODEL" \
+        --argjson ctx "$_ctx_files_json" \
+        --argjson env "$_env_json" \
+        '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, context_files:$ctx, env:$env}')
+    printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+
+    # Kick off async run-summary generation (background)
     local _ctx_summary_pid=""
     local stdin_ctx_file=""
     if [[ -n "$stdin_context" ]]; then
-        stdin_ctx_file="$rundir/.shellm/.stdin_context"
+        stdin_ctx_file="$rundir/.stdin_context"
         printf '%s' "$stdin_context" > "$stdin_ctx_file"
     fi
-    generate_context_md "$rundir" "$prompt" "$stdin_ctx_file" \
+    generate_run_summary "$_run_traj_dir" "$_run_traj_id" "$prompt" "$stdin_ctx_file" \
         "${context_files[@]+"${context_files[@]}"}" &
     _ctx_summary_pid=$!
-    debug "Context summary generation started (PID: $_ctx_summary_pid)"
+    debug "Run summary generation started (PID: $_ctx_summary_pid)"
 
-    # Initialize conversation history
     # Write initial prompt to trajectory
-    traj_append_step "$rundir/.shellm/traj" "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" >/dev/null
+    printf '%s' "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" \
+        | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
 
     # --- Cleanup trap ---
     _cleanup_docker="$docker_active"
     _cleanup_rundir="$rundir"
+    _cleanup_workdir="$workdir"
     _cleanup_temp="$SHELLM_TEMP_DOCKER"
     _cleanup_ws_name="${_SHELLM_ACTIVE_ENV:-}"
     _cleanup_ctx_pid="${_ctx_summary_pid:-}"
     cleanup() {
-        # Give context summary background process time to finish
+        # Give run-summary background process time to finish
         if [[ -n "$_cleanup_ctx_pid" ]] && kill -0 "$_cleanup_ctx_pid" 2>/dev/null; then
             local _ctx_wait=0
             while kill -0 "$_cleanup_ctx_pid" 2>/dev/null && [[ $_ctx_wait -lt 30 ]]; do
@@ -1707,7 +1681,7 @@ run_loop() {
         fi
         # Kill lingering exec/watchdog processes
         local pid_file
-        for pid_file in "$_cleanup_rundir/.shellm/.exec_pid" "$_cleanup_rundir/.shellm/.watchdog_pid"; do
+        for pid_file in "$_cleanup_rundir/.exec_pid" "$_cleanup_rundir/.watchdog_pid"; do
             if [[ -f "$pid_file" ]]; then
                 local pid
                 pid=$(cat "$pid_file" 2>/dev/null || true)
@@ -1718,7 +1692,10 @@ run_loop() {
                 rm -f "$pid_file"
             fi
         done
-        rm -f "$_cleanup_rundir/.shellm/.timeout" "$_cleanup_rundir/.shellm/.output"
+        # Clean up temp dir
+        rm -rf "$_cleanup_rundir"
+        # Clean up Docker-mode final file from workdir
+        rm -f "$_cleanup_workdir/.shellm_final" 2>/dev/null
         # Docker teardown: only if --temp-docker was passed
         if [[ "${_cleanup_temp:-0}" -eq 1 ]] && [[ "${_SHELLM_DOCKER_MODE:-0}" -eq 1 ]]; then
             docker_teardown
@@ -1750,13 +1727,13 @@ run_loop() {
         progress "Iteration $iter_label — calling Claude API..."
 
         # Build model context from trajectory as multi-turn messages
-        messages_json=$(context "$rundir/.shellm/traj" \
+        messages_json=$(context --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" \
             --assistant-types reasoning,final \
             --user-types prompt,shell-output,feedback \
-            --exclude-types sub-run 2>/dev/null) || messages_json='[]'
+            --exclude-types sub-run,shellm-run,run-summary 2>/dev/null) || messages_json='[]'
 
         # Call Claude (capture thinking/reasoning to file)
-        local thinking_file="$rundir/.shellm/.last_thinking"
+        local thinking_file="$rundir/.last_thinking"
         : > "$thinking_file"
         local response
         response=$(call_llm "$system_prompt" "$messages_json" "$thinking_file")
@@ -1824,7 +1801,8 @@ run_loop() {
             debug "No code extracted, treating full response as final answer"
             progress "No code block found — returning response as answer"
             # Record as a final step with no cmd
-            traj_append_step "$rundir/.shellm/traj" "$(jq -n --arg t "$reasoning" --arg f "$response" '{type:"final",thought:$t,content:$f}')" >/dev/null
+            printf '%s' "$(jq -n --arg t "$reasoning" --arg f "$response" '{type:"final",thought:$t,content:$f}')" \
+                | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
             echo "$response"
             return 0
         fi
@@ -1837,6 +1815,12 @@ run_loop() {
             progress_dim "  $line"
         done
 
+        # Determine final file path: use workdir (mounted in container) for Docker mode
+        local final_path="$rundir/final"
+        if [[ "${_SHELLM_DOCKER_MODE:-0}" -eq 1 ]]; then
+            final_path="$workdir/.shellm_final"
+        fi
+
         # Build wrapped code that captures FINAL/FINAL_FILE after execution
         local wrapped_code
         wrapped_code="set -x
@@ -1844,8 +1828,8 @@ $code
 set +x"$'\n'"
 __shellm_rc=\$?
 set +e
-[ -n \"\${FINAL+x}\" ] && printf '%s' \"\$FINAL\" > \"$rundir/.shellm/final\"
-[ -n \"\${FINAL_FILE+x}\" ] && cat \"\$FINAL_FILE\" > \"$rundir/.shellm/final\"
+[ -n \"\${FINAL+x}\" ] && printf '%s' \"\$FINAL\" > \"$final_path\"
+[ -n \"\${FINAL_FILE+x}\" ] && cat \"\$FINAL_FILE\" > \"$final_path\"
 exit \$__shellm_rc
 "
 
@@ -1868,7 +1852,9 @@ exit \$__shellm_rc
             SHELLM_DOCKER_SOCKET="$SHELLM_DOCKER_SOCKET"
             SHELLM_ALLOW_NESTED_DOCKER="$SHELLM_ALLOW_NESTED_DOCKER"
             _SHELLM_PARENT_RUN="$run_name"
-            _SHELLM_PARENT_RUNDIR="$rundir"
+            _SHELLM_PARENT_TRAJ_ID="$_run_traj_id"
+            TRAJ_DIR="$_run_traj_dir"
+            TRAJ_ID="$_run_traj_id"
             SHELLM_RUNDIR="$rundir"
             _SHELLM_ROOT_RUNDIR="$_SHELLM_ROOT_RUNDIR"
             PATH="$(dirname "$shellm_path"):$PATH"
@@ -1893,10 +1879,10 @@ exit \$__shellm_rc
         done
 
         # Execute code — background exec + watchdog + polling reader
-        local output_file="$rundir/.shellm/.output"
-        local exec_pid_file="$rundir/.shellm/.exec_pid"
-        local watchdog_pid_file="$rundir/.shellm/.watchdog_pid"
-        local timeout_marker="$rundir/.shellm/.timeout"
+        local output_file="$rundir/.output"
+        local exec_pid_file="$rundir/.exec_pid"
+        local watchdog_pid_file="$rundir/.watchdog_pid"
+        local timeout_marker="$rundir/.timeout"
         : > "$output_file"
         rm -f "$timeout_marker" "$exec_pid_file" "$watchdog_pid_file"
         local exit_code=0
@@ -2024,25 +2010,33 @@ exit \$__shellm_rc
             '{type:"reasoning", thought:$thought, cmd:$cmd}')
 
         # Check for final answer before recording output
-        if [[ -f "$rundir/.shellm/final" ]]; then
+        if [[ -f "$final_path" ]]; then
             [[ "$QUIET" -eq 0 ]] && echo >&2
             progress "Final answer received"
             local final_answer
-            final_answer=$(cat "$rundir/.shellm/final")
+            final_answer=$(cat "$final_path")
+            rm -f "$final_path"
             # Record as a final step instead of reasoning
-            traj_append_step "$rundir/.shellm/traj" "$(jq -n \
+            printf '%s' "$(jq -n \
                 --arg thought "$reasoning" \
                 --arg cmd "$code" \
                 --arg content "$final_answer" \
-                '{type:"final", thought:$thought, cmd:$cmd, content:$content}')" >/dev/null
+                '{type:"final", thought:$thought, cmd:$cmd, content:$content}')" \
+                | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
             redact_sensitive "$final_answer"
             [[ "$QUIET" -eq 0 ]] && echo >&2
-            progress_dim "Run: $rundir"
+            progress_dim "Trajectory: $_run_traj_id"
+            # Merge back into parent's traj
+            if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+                traj merge "$_run_traj_id" \
+                    --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" \
+                    --content "$(printf '%s' "$final_answer")" >/dev/null 2>/dev/null || true
+            fi
             return 0
         fi
 
         # Record reasoning step
-        traj_append_step "$rundir/.shellm/traj" "$reasoning_json" >/dev/null
+        printf '%s' "$reasoning_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
 
         # Record shell-output step (user role in multi-turn)
         local output_json
@@ -2069,17 +2063,23 @@ exit \$__shellm_rc
 
         # Also record as feedback step if timed out
         if [[ "$timed_out" -eq 1 ]]; then
-            traj_append_step "$rundir/.shellm/traj" "$output_json" >/dev/null
+            printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
             local feedback_json
             feedback_json=$(jq -n --arg content "$feedback" '{type:"feedback", content:$content}')
-            traj_append_step "$rundir/.shellm/traj" "$feedback_json" >/dev/null
+            printf '%s' "$feedback_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
         else
-            traj_append_step "$rundir/.shellm/traj" "$output_json" >/dev/null
+            printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
         fi
     done
 
     [[ "$QUIET" -eq 0 ]] && echo >&2
     progress "\033[1;31mMax iterations ($SHELLM_MAX_ITERATIONS) reached without final answer\033[0m"
+    # Merge back into parent's traj (even on failure)
+    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+        traj merge "$_run_traj_id" \
+            --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" \
+            --content "(max iterations reached)" >/dev/null 2>/dev/null || true
+    fi
     return 1
 }
 
