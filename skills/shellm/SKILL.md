@@ -139,15 +139,16 @@ Other important vars (not identity-scoped):
 6. If it was an action, forks a child branch, executes via shellm, merges back
 7. Dispatches thought processes (TPs) — each TP gets recent thoughts and can write to traj/mem
 
-## Thought processes
+## Thinkers
 
-TPs are markdown prompts in `thought-processes/`. Each runs as a mini shellm call after every think cycle. They triage first (skip if nothing to do) then act:
+Thinkers live in `thinkers/`. Each has a `step` script, `prompt.md`, and `subscriptions.jsonl`. They subscribe to trajectory events and run autonomously via `thinkers start`:
 
+- **main** — core thought generator, produces stream-of-consciousness thoughts and actions
 - **intentions-goals-creator** — notices emerging goals, stores via mem
 - **intentions-goals-enforcer** — redirects when the stream drifts from goals
 - **learning** — extracts lessons from action/observation pairs
 - **mind-wandering** — surfaces associative memories
-- **system-architecture** — meta-cognitive self-modification (can write new TPs)
+- **system-architecture** — meta-cognitive self-modification
 - **values-beliefs-creator** — crystallizes values and beliefs
 - **values-beliefs-enforcer** — flags misalignment between behavior and values
 

@@ -1,7 +1,11 @@
 *.swp
+.DS_Store
 .env
 .shelly/
 .memories/
 .skills/
 .skillsrc
 plans/
+
+# Identity instances are runtime data (logs, trajectories, memories, etc.)
+.identities/

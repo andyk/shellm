@@ -3,7 +3,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 SYMLINKS="${SYMLINKS:-0}"
-TOOLS=(shellm shellm-docker shellm-docker-broker skills mem llm shellm-explore context traj identity think chat focus)
+TOOLS=(shellm shellm-docker shellm-docker-broker skills mem llm shellm-explore context traj identity thinkers chat focus)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -76,19 +76,24 @@ if [[ -d "prompts" ]]; then
     echo "Installed prompts → $PROMPTS_PREFIX"
 fi
 
-# Install bundled thought-processes
-TP_PREFIX="${HOME}/.shelly-thought-processes"
-if [[ -d "thought-processes" ]]; then
-    mkdir -p "$TP_PREFIX"
+# Install bundled thinker templates
+THINKERS_PREFIX="${HOME}/.shellm-thinkers"
+if [[ -d "thinkers" ]]; then
+    mkdir -p "$THINKERS_PREFIX"
     if [[ "$SYMLINKS" -eq 1 ]]; then
-        for tp_file in thought-processes/*.md; do
-            [[ -f "$tp_file" ]] || continue
-            ln -sf "$(pwd)/$tp_file" "$TP_PREFIX/$(basename "$tp_file")"
+        for td in thinkers/*/; do
+            [[ -d "$td" ]] || continue
+            ln -sfn "$(pwd)/$td" "$THINKERS_PREFIX/$(basename "$td")"
         done
     else
-        cp thought-processes/*.md "$TP_PREFIX/" 2>/dev/null || true
+        for td in thinkers/*/; do
+            [[ -d "$td" ]] || continue
+            name=$(basename "$td")
+            rm -rf "$THINKERS_PREFIX/$name"
+            cp -R "$td" "$THINKERS_PREFIX/$name"
+        done
     fi
-    echo "Installed thought-processes → $TP_PREFIX"
+    echo "Installed thinker templates → $THINKERS_PREFIX"
 fi
 
 case ":$PATH:" in
