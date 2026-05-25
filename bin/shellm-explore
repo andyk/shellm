@@ -122,7 +122,7 @@ list_runs() {
     local limit="$1"
     [[ -d "$TRAJ_DIR" ]] || die "No trajectories directory: $TRAJ_DIR"
 
-    # Find all .jsonl files, sorted newest first by filename (timestamp prefix)
+    # Find all trajectory files (both root.jsonl and legacy .jsonl), sorted newest first
     local -a traj_files=()
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
@@ -139,19 +139,37 @@ list_runs() {
     for traj_file in "${traj_files[@]}"; do
         if [[ "$limit" -gt 0 && "$count" -ge "$limit" ]]; then break; fi
 
-        local basename_noext
-        basename_noext=$(basename "$traj_file" .jsonl)
+        # Parse hex and timestamp from either directory-based or legacy format
+        local hex="" ts=""
+        local bn
+        bn=$(basename "$traj_file")
 
-        # Parse timestamp and hex from name: YYYY-MM-DD-HH-MM-SS_HEXID_slug
-        local ts="" hex="" slug=""
-        if [[ "$basename_noext" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2})_([0-9a-f]{8})_(.+)$ ]]; then
-            ts="${BASH_REMATCH[1]}"
-            hex="${BASH_REMATCH[2]}"
-            slug="${BASH_REMATCH[3]}"
-            # Format timestamp for display: YYYY-MM-DD HH:MM
-            ts="${ts:0:10} ${ts:11:2}:${ts:14:2}"
+        if [[ "$bn" == "root.jsonl" ]]; then
+            # Directory-based: parent dir is <hex8>-<slug>
+            local dir_name
+            dir_name=$(basename "$(dirname "$traj_file")")
+            if [[ "$dir_name" =~ ^([0-9a-f]{8})-(.+)$ ]]; then
+                hex="${BASH_REMATCH[1]}"
+            else
+                hex="$dir_name"
+            fi
+            # Get timestamp from the first step
+            local first_ts
+            first_ts=$(head -1 "$traj_file" | jq -r '.ts // empty' 2>/dev/null)
+            if [[ "$first_ts" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2}) ]]; then
+                ts="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}"
+            fi
         else
-            hex="$basename_noext"
+            # Legacy flat file: YYYY-MM-DD-HH-MM-SS_HEXID_slug.jsonl
+            local basename_noext
+            basename_noext="${bn%.jsonl}"
+            if [[ "$basename_noext" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2})_([0-9a-f]{8})_(.+)$ ]]; then
+                ts="${BASH_REMATCH[1]}"
+                hex="${BASH_REMATCH[2]}"
+                ts="${ts:0:10} ${ts:11:2}:${ts:14:2}"
+            else
+                hex="$basename_noext"
+            fi
         fi
 
         # Count sub-runs (fork steps in this trajectory)
@@ -188,21 +206,36 @@ resolve_run_id() {
     [[ -d "$TRAJ_DIR" ]] || return 1
 
     local -a matches=()
-    local f basename_noext
+    local f
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
-        basename_noext=$(basename "$f" .jsonl)
 
         # Check if first step is shellm-run (it's a run, not a consciousness stream)
         local first_type
         first_type=$(head -1 "$f" | jq -r '.type // empty' 2>/dev/null)
         [[ "$first_type" == "shellm-run" ]] || continue
 
-        # Match by hex ID portion, slug, or full name prefix
-        if [[ "$basename_noext" == *"_${input}_"* || "$basename_noext" == *"_${input}" ]]; then
-            matches+=("$f")
-        elif [[ "$basename_noext" == "$input"* ]]; then
-            matches+=("$f")
+        local bn
+        bn=$(basename "$f")
+
+        if [[ "$bn" == "root.jsonl" ]]; then
+            # Directory-based: match against parent directory name (<hex8>-<slug>)
+            local dir_name
+            dir_name=$(basename "$(dirname "$f")")
+            if [[ "$dir_name" == "${input}-"* || "$dir_name" == *"-${input}" || "$dir_name" == "$input" ]]; then
+                matches+=("$f")
+            elif [[ "$dir_name" == "${input}"* ]]; then
+                matches+=("$f")
+            fi
+        else
+            # Legacy flat file
+            local basename_noext
+            basename_noext="${bn%.jsonl}"
+            if [[ "$basename_noext" == *"_${input}_"* || "$basename_noext" == *"_${input}" ]]; then
+                matches+=("$f")
+            elif [[ "$basename_noext" == "$input"* ]]; then
+                matches+=("$f")
+            fi
         fi
     done < <(find "$TRAJ_DIR" -name '*.jsonl' -not -path '*/blobs/*' 2>/dev/null | sort)
 
@@ -212,7 +245,13 @@ resolve_run_id() {
     elif [[ ${#matches[@]} -gt 1 ]]; then
         echo "Ambiguous run ID '$input' matches ${#matches[@]} runs:" >&2
         for m in "${matches[@]}"; do
-            echo "  $(basename "$m" .jsonl)" >&2
+            local mbn
+            mbn=$(basename "$m")
+            if [[ "$mbn" == "root.jsonl" ]]; then
+                echo "  $(basename "$(dirname "$m")")" >&2
+            else
+                echo "  ${mbn%.jsonl}" >&2
+            fi
         done
         return 1
     fi
@@ -243,12 +282,36 @@ find_root() {
     first_type=$(printf '%s' "$first_line" | jq -r '.type // empty')
 
     if [[ "$first_type" == "trajectory" ]]; then
-        # Get the parent filename
-        local parent_name
-        parent_name=$(printf '%s' "$first_line" | jq -r '.parent // empty')
-        if [[ -n "$parent_name" ]]; then
-            local parent_file="$TRAJ_DIR/$parent_name"
-            if [[ -f "$parent_file" ]]; then
+        # Get the parent UUID and resolve it
+        local parent_id
+        parent_id=$(printf '%s' "$first_line" | jq -r '.parent // empty')
+        if [[ -n "$parent_id" ]]; then
+            # Use traj's resolution logic: try directory-based, then legacy
+            local parent_file=""
+            local hex_prefix="$parent_id"
+            if [[ "$parent_id" == *-*-*-*-* ]]; then
+                hex_prefix="${parent_id%%-*}"
+            fi
+
+            # Try directory glob first
+            local match
+            match=$(find "$TRAJ_DIR" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
+            if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
+                parent_file="$match/root.jsonl"
+            fi
+
+            # Try legacy flat file
+            if [[ -z "$parent_file" ]]; then
+                match=$(find "$TRAJ_DIR" -name "*_${hex_prefix}_*.jsonl" -not -path '*/blobs/*' 2>/dev/null | head -1)
+                [[ -n "$match" ]] && parent_file="$match"
+            fi
+
+            # Try direct path (legacy: parent stored as filename)
+            if [[ -z "$parent_file" && -f "$TRAJ_DIR/$parent_id" ]]; then
+                parent_file="$TRAJ_DIR/$parent_id"
+            fi
+
+            if [[ -n "$parent_file" && -f "$parent_file" ]]; then
                 find_root "$parent_file"
                 return
             fi
@@ -277,13 +340,21 @@ print_tree() {
 
         [[ -f "$traj_file" ]] || return
 
-        local bn
-        bn=$(basename "$traj_file" .jsonl)
-        local hex=""
-        if [[ "$bn" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}_([0-9a-f]{8})_ ]]; then
+        # Parse hex ID from either directory-based or legacy format
+        local bn hex=""
+        bn=$(basename "$traj_file")
+        if [[ "$bn" == "root.jsonl" ]]; then
+            local dir_name
+            dir_name=$(basename "$(dirname "$traj_file")")
+            if [[ "$dir_name" =~ ^([0-9a-f]{8})- ]]; then
+                hex="${BASH_REMATCH[1]}"
+            else
+                hex="$dir_name"
+            fi
+        elif [[ "${bn%.jsonl}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}_([0-9a-f]{8})_ ]]; then
             hex="${BASH_REMATCH[1]}"
         else
-            hex="$bn"
+            hex="${bn%.jsonl}"
         fi
 
         depths+=("$depth")
@@ -301,13 +372,34 @@ print_tree() {
             child_ref=$(printf '%s' "$fork_line" | jq -r '.child // empty')
             [[ -n "$child_ref" ]] || continue
 
-            # Resolve child file
-            local child_file
-            local child_path="$child_ref"
-            [[ "$child_path" == *.jsonl ]] || child_path="${child_path}.jsonl"
-            child_file="$TRAJ_DIR/$child_path"
+            # Resolve child file: try UUID-based resolution, then legacy path
+            local child_file=""
+            local hex_prefix="$child_ref"
+            if [[ "$child_ref" == *-*-*-*-* ]]; then
+                hex_prefix="${child_ref%%-*}"
+            fi
 
-            [[ -f "$child_file" ]] && _collect_tree "$child_file" $((depth + 1))
+            # Try directory glob (both under current traj dir and TRAJ_DIR)
+            local match
+            match=$(find "$TRAJ_DIR" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
+            if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
+                child_file="$match/root.jsonl"
+            fi
+
+            # Try legacy flat file
+            if [[ -z "$child_file" ]]; then
+                match=$(find "$TRAJ_DIR" -name "*_${hex_prefix}_*.jsonl" -not -path '*/blobs/*' 2>/dev/null | head -1)
+                [[ -n "$match" ]] && child_file="$match"
+            fi
+
+            # Try direct path (legacy)
+            if [[ -z "$child_file" ]]; then
+                local child_path="$child_ref"
+                [[ "$child_path" == *.jsonl ]] || child_path="${child_path}.jsonl"
+                [[ -f "$TRAJ_DIR/$child_path" ]] && child_file="$TRAJ_DIR/$child_path"
+            fi
+
+            [[ -n "$child_file" && -f "$child_file" ]] && _collect_tree "$child_file" $((depth + 1))
         done <<< "$fork_lines"
     }
 
@@ -386,10 +478,17 @@ generate_report() {
         local traj_file="$1"
         [[ -f "$traj_file" ]] || return
 
+        # Display name: directory name for root.jsonl, basename for legacy
+        local display_name
         local bn
-        bn=$(basename "$traj_file" .jsonl)
+        bn=$(basename "$traj_file")
+        if [[ "$bn" == "root.jsonl" ]]; then
+            display_name=$(basename "$(dirname "$traj_file")")
+        else
+            display_name="${bn%.jsonl}"
+        fi
         all_contexts+="
-## ${bn}
+## ${display_name}
 "
         # Get summary
         local summary
@@ -417,11 +516,32 @@ generate_report() {
             local child_ref
             child_ref=$(printf '%s' "$fork_line" | jq -r '.child // empty')
             [[ -n "$child_ref" ]] || continue
-            local child_file
-            local child_path="$child_ref"
-            [[ "$child_path" == *.jsonl ]] || child_path="${child_path}.jsonl"
-            child_file="$TRAJ_DIR/$child_path"
-            [[ -f "$child_file" ]] && _collect_contexts "$child_file"
+
+            # Resolve child file using UUID-based resolution
+            local child_file=""
+            local hex_prefix="$child_ref"
+            if [[ "$child_ref" == *-*-*-*-* ]]; then
+                hex_prefix="${child_ref%%-*}"
+            fi
+
+            local match
+            match=$(find "$TRAJ_DIR" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
+            if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
+                child_file="$match/root.jsonl"
+            fi
+
+            if [[ -z "$child_file" ]]; then
+                match=$(find "$TRAJ_DIR" -name "*_${hex_prefix}_*.jsonl" -not -path '*/blobs/*' 2>/dev/null | head -1)
+                [[ -n "$match" ]] && child_file="$match"
+            fi
+
+            if [[ -z "$child_file" ]]; then
+                local child_path="$child_ref"
+                [[ "$child_path" == *.jsonl ]] || child_path="${child_path}.jsonl"
+                [[ -f "$TRAJ_DIR/$child_path" ]] && child_file="$TRAJ_DIR/$child_path"
+            fi
+
+            [[ -n "$child_file" && -f "$child_file" ]] && _collect_contexts "$child_file"
         done <<< "$fork_lines"
     }
 

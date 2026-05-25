@@ -38,6 +38,83 @@ fi
 
 die() { echo "skills: error: $*" >&2; exit 1; }
 
+# Process SKILL.md content, executing ```bash blocks with #| eval: true.
+# Reads from stdin, writes processed output to stdout.
+# Quarto-inspired directives: eval, echo, stdout, stderr.
+_process_skill_blocks() {
+    local state="passthrough"
+    local -a code_lines=()
+    local eval_dir="false" echo_dir="false" stdout_dir="true" stderr_dir="true"
+    local line key value
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$state" == "passthrough" ]]; then
+            if [[ "$line" =~ ^\`\`\`bash[[:space:]]*$ || "$line" == '```bash' ]]; then
+                state="fence"
+                code_lines=()
+                eval_dir="false"
+                echo_dir="false"
+                stdout_dir="true"
+                stderr_dir="true"
+            else
+                printf '%s\n' "$line"
+            fi
+        elif [[ "$state" == "fence" ]]; then
+            if [[ "$line" =~ ^'#| '([a-zA-Z]+):[[:space:]]*(.*) ]]; then
+                key="${BASH_REMATCH[1]}"
+                value="${BASH_REMATCH[2]}"
+                # Trim trailing whitespace
+                value="${value%"${value##*[![:space:]]}"}"
+                case "$key" in
+                    eval)   eval_dir="$value" ;;
+                    echo)   echo_dir="$value" ;;
+                    stdout) stdout_dir="$value" ;;
+                    stderr) stderr_dir="$value" ;;
+                esac
+            elif [[ "$line" == '```' ]]; then
+                if [[ "$eval_dir" == "true" ]]; then
+                    # Execute the block
+                    if [[ "$echo_dir" == "true" ]]; then
+                        printf '%s\n' '```bash'
+                        printf '%s\n' "${code_lines[@]}"
+                        printf '%s\n' '```'
+                    fi
+                    # Build the script from collected code lines
+                    local script=""
+                    local cl
+                    for cl in "${code_lines[@]}"; do
+                        script="${script}${cl}
+"
+                    done
+                    # Run and capture stdout/stderr separately
+                    local tmp_out tmp_err
+                    tmp_out=$(mktemp)
+                    tmp_err=$(mktemp)
+                    bash -c "$script" >"$tmp_out" 2>"$tmp_err" || true
+                    if [[ "$stdout_dir" == "true" && -s "$tmp_out" ]]; then
+                        cat "$tmp_out"
+                    fi
+                    if [[ "$stderr_dir" == "true" && -s "$tmp_err" ]]; then
+                        cat "$tmp_err"
+                    fi
+                    rm -f "$tmp_out" "$tmp_err"
+                else
+                    # Not eval — emit block unchanged
+                    printf '%s\n' '```bash'
+                    local cl
+                    for cl in "${code_lines[@]}"; do
+                        printf '%s\n' "$cl"
+                    done
+                    printf '%s\n' '```'
+                fi
+                state="passthrough"
+            else
+                code_lines+=("$line")
+            fi
+        fi
+    done
+}
+
 # Color output (respects NO_COLOR env var)
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     _bold='\033[1m'
@@ -820,7 +897,7 @@ action_show() {
             printf '%s' "$meta" | jq '.'
         fi
     else
-        cat "$skill_dir/SKILL.md"
+        _process_skill_blocks < "$skill_dir/SKILL.md"
     fi
 }
 
@@ -1177,6 +1254,82 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Prompt assembly (moved from identity prompt)
+# ---------------------------------------------------------------------------
+
+action_prompt() {
+    # Outputs the skills portion of the system prompt.
+    # Assembles: CLI knowledge, kernel skills, available skills list.
+    local skills_dir="${SKILLS_DIR:-}"
+    local kernel_dir="${SKILLS_KERNEL_DIR:-}"
+
+    local context=""
+
+    # 1. Skills CLI knowledge
+    context="## My skills system
+My skills are learned abilities that let me do specific things well. They are how I grow and become more capable over time. Each skill is a set of instructions I can follow to accomplish a particular type of task — like a recipe or a playbook. I can install new skills from GitHub or create my own, and they persist as part of me just like my memories. Skills are managed via \`skills\` (SKILLS_DIR is pre-set in my environment).
+
+Commands I can run:
+  skills                                    List all my installed skills
+  skills <query>                            Search installed + remote skills
+  skills show <name>                        Print a skill's full SKILL.md
+  skills install <name|owner/repo|url|path> Install a skill (by name from remotes, GitHub, or local path)
+  skills remove <name>                      Remove an installed skill
+  skills init [name]                        Scaffold a new skill
+  skills list-json                          List skills as JSON
+  skills promote <name>                     Promote a skill to my kernel (always loaded)
+  skills demote <name>                      Demote a kernel skill back to on-demand
+  skills kernel                             Show kernel skills with token counts
+  skills remote                             List configured skill remotes
+  skills remote add <url|path>              Add a skill remote
+  skills remote remove <url|path>           Remove a skill remote
+
+  My kernel skills are always loaded into my context. Regular skills are listed in my context but only shown in full on-demand — I load them with \`skills show <name>\` when needed.  When the user asks me to use a skill and it is installed, then I read it with \`skills show <name>\` and follow its instructions. If it isn't installed or available I can research and try to find it or I can try to write a new skill (and should install a skill-author skill to make that easier)."
+
+    # 2. Kernel skills — full content from each SKILL.md in kernel/
+    local kernel_content=""
+    if [[ -d "$kernel_dir" ]]; then
+        local skill_dir
+        for skill_dir in "$kernel_dir"/*/; do
+            [[ -f "${skill_dir}SKILL.md" ]] || continue
+            local skill_body
+            skill_body=$(sed '/^---$/,/^---$/d' "${skill_dir}SKILL.md" | _process_skill_blocks)
+            if [[ -n "$skill_body" ]]; then
+                kernel_content="${kernel_content}
+${skill_body}"
+            fi
+        done
+    fi
+    if [[ -n "$kernel_content" ]]; then
+        context="$context
+$kernel_content"
+    fi
+
+    # 3. Other installed skills — summary list
+    local skills_summary=""
+    if [[ -d "$skills_dir" ]]; then
+        local skill_dir
+        for skill_dir in "$skills_dir"/*/; do
+            [[ -f "${skill_dir}SKILL.md" ]] || continue
+            local sname sdesc
+            sname=$(sed -n '/^---$/,/^---$/p' "${skill_dir}SKILL.md" | grep '^name:' | sed 's/^name:[[:space:]]*//' | sed "s/^[\"']\(.*\)[\"']$/\1/")
+            sdesc=$(sed -n '/^---$/,/^---$/p' "${skill_dir}SKILL.md" | grep '^description:' | sed 's/^description:[[:space:]]*//' | sed "s/^[\"']\(.*\)[\"']$/\1/")
+            [[ -z "$sname" ]] && sname=$(basename "$skill_dir")
+            skills_summary="${skills_summary}  - ${sname}: ${sdesc}
+"
+        done
+    fi
+    if [[ -n "$skills_summary" ]]; then
+        context="$context
+
+## Available skills (use \`skills show <name>\` to load)
+$skills_summary"
+    fi
+
+    printf '%s' "$context"
+}
+
+# ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 
@@ -1200,6 +1353,7 @@ Usage:
   skills promote <name>                     Promote a skill to the kernel
   skills demote <name>                      Demote a kernel skill back to on-demand
   skills kernel                             Show kernel skills with token counts
+  skills prompt                             Print skills system prompt (for LLM context)
   skills remote                             List configured remotes
   skills remote add <url|path>              Add a skill remote
   skills remote remove <url|path>           Remove a skill remote
@@ -1228,6 +1382,25 @@ Requirements:
 
   By default, `skills list` only shows skills whose requirements are met.
   Use `skills check <name>` to diagnose specific requirements.
+
+Executable blocks:
+  Bash code blocks in SKILL.md can be executed at render time using
+  Quarto-inspired directives. Add directives as #| comments at the
+  top of a ```bash fenced block:
+
+    ```bash
+    #| eval: true
+    echo "runs at render time"
+    ```
+
+  Directives:
+    #| eval: true/false     Execute the block (default: false)
+    #| echo: true/false     Show source code in output (default: false)
+    #| stdout: true/false   Include stdout in output (default: true)
+    #| stderr: true/false   Include stderr in output (default: true)
+
+  Blocks without `#| eval: true` pass through unchanged (current behavior).
+  Evaluated blocks are processed by `skills show` and `skills prompt`.
 
 Environment:
   SKILLS_DIR              Override skills directory (default: ./.skills)
@@ -1270,6 +1443,7 @@ main() {
             demote)    action="demote";   shift ;;
             kernel)    action="kernel";   shift ;;
             list-json) action="list-json"; shift ;;
+            prompt)    action="prompt";   shift ;;
             remote)    action="remote";   shift ;;
         esac
     fi
@@ -1362,6 +1536,7 @@ main() {
             promote)   action="promote";  _positional=("${_positional[@]:1}") ;;
             demote)    action="demote";   _positional=("${_positional[@]:1}") ;;
             kernel)    action="kernel";   _positional=("${_positional[@]:1}") ;;
+            prompt)    action="prompt";   _positional=("${_positional[@]:1}") ;;
             remote)    action="remote";   _positional=("${_positional[@]:1}") ;;
         esac
     fi
@@ -1371,6 +1546,7 @@ main() {
     case "$action" in
         list)      action_list "$show_all" "$format" ;;
         list-json) action_list_json ;;
+        prompt)    action_prompt ;;
         kernel)    action_kernel ;;
         remote)
             local remote_sub="${_positional[0]:-list}"

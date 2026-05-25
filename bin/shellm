@@ -18,8 +18,12 @@ _shellm_load_env() {
     return 1
 }
 _SHELLM_SCRIPT_PATH=$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]:-$0}")
-SHELLM_HOME="${SHELLM_HOME:-$HOME/.shellm}"
-_shellm_load_env ".env" || _shellm_load_env "$SHELLM_HOME/.env" || true
+SHELLM_TRAJ_DIR="${SHELLM_TRAJ_DIR:-${TRAJ_DIR:-$HOME/.shellm/trajectories}}"
+SHELLM_ENVS_DIR="${SHELLM_ENVS_DIR:-$HOME/.shellm/envs}"
+SHELLM_WORKDIRS_DIR="${SHELLM_WORKDIRS_DIR:-$HOME/.shellm/workdirs}"
+SHELLM_BROKER_DIR="${SHELLM_BROKER_DIR:-$HOME/.shellm/docker-broker}"
+SHELLM_CONF_DIR="${SHELLM_CONF_DIR:-$HOME/.shellm}"
+_shellm_load_env ".env" || _shellm_load_env "$SHELLM_CONF_DIR/.env" || true
 
 # ---------------------------------------------------------------------------
 # Config & defaults
@@ -127,6 +131,8 @@ Options:
   --system-prompt FILE Override the default system prompt with contents of FILE
   --docker-image IMAGE Docker image to use (default: ubuntu:latest)
   --docker-access MODE Docker access for generated code: none, broker, socket, dind
+  --resume [TRAJ_ID]     Resume a previous run (default: most recent trajectory)
+  --traj-dir DIR         Trajectory directory (default: $HOME/.shellm/trajectories)
   --var NAME=VALUE       Set env var for generated code (repeatable)
   --bin PATH             Make binary available on PATH (repeatable)
   --print-system-prompt Print the system prompt and exit
@@ -138,6 +144,11 @@ Environment:
   SHELLM_MAX_TOKENS       Max tokens per response
   SHELLM_EFFORT           Thinking effort level (low/medium/high/xhigh/max)
   SHELLM_SYSTEM_PROMPT    Override the default system prompt text
+  SHELLM_TRAJ_DIR         Trajectory directory
+  SHELLM_ENVS_DIR         Env/container state directory
+  SHELLM_WORKDIRS_DIR     Working directories base
+  SHELLM_BROKER_DIR       Docker broker state directory
+  SHELLM_CONF_DIR         Config directory (for .env file)
   SHELLM_DOCKER_IMAGE     Docker image to use
   SHELLM_DOCKER_ACCESS    Docker access mode: none, broker, socket, dind
   SHELLM_DOCKER_BROKER_TRANSPORT  Broker transport: auto, socket, filesystem
@@ -211,6 +222,16 @@ extract_reasoning() {
         /^```(bash|sh)?[[:space:]]*$/ { exit }
         { print }
     '
+}
+
+_find_latest_traj() {
+    local traj_dir="$1"
+    local latest
+    latest=$(find "$traj_dir" -maxdepth 2 -name 'root.jsonl' \
+        -exec stat -f '%m %N' {} \; 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-)
+    [[ -n "$latest" ]] || return 1
+    head -1 "$latest" | jq -r '.step_id // empty' 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -442,7 +463,7 @@ docker_broker_start() {
     broker_path=$(resolve_shellm_tool_path "$shellm_path" "shellm-docker-broker" || true)
     [[ -x "$broker_path" ]] || die "Broker mode requires shellm-docker-broker next to shellm or on PATH"
 
-    local broker_dir="$SHELLM_HOME/docker-broker/$env_name"
+    local broker_dir="$SHELLM_BROKER_DIR/$env_name"
     local env_dir="$SHELLM_ENVS_DIR/$env_name"
     mkdir -p "$broker_dir" "$env_dir"
 
@@ -573,8 +594,8 @@ env_metadata_mismatch_message() {
         local stored_tool_mounts_version
         stored_tool_mounts_version=$(docker_metadata_value "$env_name" tool_mounts_version)
         if [[ "$stored_tool_mounts_version" != "$_SHELLM_TOOL_MOUNTS_VERSION" ]]; then
-            printf 'Env %s was created before current shellm tool mounts. Use a different --env or remove %s/envs/%s so shellm can recreate it with llm, shellm-explore, and sibling tools mounted.' \
-                "$env_name" "$SHELLM_HOME" "$env_name"
+            printf 'Env %s was created before current shellm tool mounts. Use a different --env or remove %s/%s so shellm can recreate it with llm, shellm-explore, and sibling tools mounted.' \
+                "$env_name" "$SHELLM_ENVS_DIR" "$env_name"
             return
         fi
     fi
@@ -586,8 +607,8 @@ env_metadata_mismatch_message() {
     _expected_var_mounts="${_expected_var_mounts%%$'\n'}"
     _stored_var_mounts="${_stored_var_mounts%%$'\n'}"
     if [[ "$_expected_var_mounts" != "$_stored_var_mounts" ]]; then
-        printf 'Env %s has different --var directory mounts than this run requires. Use a different --env or remove %s/envs/%s so shellm can recreate it with the correct mounts.' \
-            "$env_name" "$SHELLM_HOME" "$env_name"
+        printf 'Env %s has different --var directory mounts than this run requires. Use a different --env or remove %s/%s so shellm can recreate it with the correct mounts.' \
+            "$env_name" "$SHELLM_ENVS_DIR" "$env_name"
         return
     fi
     printf 'Env %s was created with docker_access=%s, but this run requested docker_access=%s. Use a different --env, destroy the env, or request the same access mode.' \
@@ -631,7 +652,7 @@ docker_setup() {
 
     # Mount the runs dir (parent of the default workspace) so containers can be
     # reused across runs without needing new bind mounts.
-    local runs_mount="$SHELLM_HOME"
+    local runs_mount="$SHELLM_WORKDIRS_DIR"
     mkdir -p "$runs_mount"
 
     local -a docker_run_flags=(
@@ -841,8 +862,6 @@ docker_attach() {
 # Env management
 # ---------------------------------------------------------------------------
 
-SHELLM_ENVS_DIR="$SHELLM_HOME/envs"
-
 # Create or reattach to a named env.
 # Sets _SHELLM_CONTAINER and _SHELLM_DOCKER_MODE if docker type.
 # Returns 0 on success.
@@ -863,7 +882,7 @@ env_resolve() {
         container_id=$(cat "$ws_dir/container_id")
         if [[ -n "$container_id" ]] && docker_container_has_unusable_tool_mounts "$container_id"; then
             if [[ "$explicit" -eq 1 ]]; then
-                die "Env $name has stale or unusable shellm tool mounts. Use a different --env or remove $SHELLM_HOME/envs/$name so shellm can recreate it."
+                die "Env $name has stale or unusable shellm tool mounts. Use a different --env or remove $SHELLM_ENVS_DIR/$name so shellm can recreate it."
             fi
             progress "Skipping env $name because its shellm tool mounts are stale"
             return 1
@@ -1468,24 +1487,68 @@ run_loop() {
     local -a file_contexts=()
     local _SHELLM_ACTIVE_ENV=""
 
-    # Create trajectory for this run
-    # Determine TRAJ_DIR — use existing env var or default to $SHELLM_HOME/.trajectories
-    local _run_traj_dir="${TRAJ_DIR:-$SHELLM_HOME/.trajectories}"
+    # Trajectory directory
+    local _run_traj_dir="$SHELLM_TRAJ_DIR"
     mkdir -p "$_run_traj_dir"
 
-    # Create the trajectory via traj new
     local _run_traj_id _new_output run_name
-    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-        _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt" --field "parent=$_SHELLM_PARENT_TRAJ_ID")
-    else
-        _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt")
-    fi
-    _run_traj_id=$(head -1 <<< "$_new_output")
-    run_name=$(tail -1 <<< "$_new_output")
 
-    # If this is a child run, record a fork step in the parent trajectory
-    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-        traj fork "$_run_traj_id" --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>&1 || true
+    if [[ -n "${_resume_traj:-}" ]]; then
+        # --- Resume path ---
+        # Resolve "latest" to actual ID
+        if [[ "$_resume_traj" == "__latest__" ]]; then
+            _resume_traj=$(_find_latest_traj "$_run_traj_dir") \
+                || die "No trajectories found in $_run_traj_dir"
+        fi
+
+        # Validate trajectory exists
+        traj exists --traj_dir "$_run_traj_dir" --traj_id "$_resume_traj" 2>/dev/null \
+            || die "Cannot find trajectory: $_resume_traj"
+
+        _run_traj_id="$_resume_traj"
+
+        # Extract workdir and env from the shellm-run step
+        local _orig_meta
+        _orig_meta=$(traj tail -n 50 --raw --traj_dir "$_run_traj_dir" --traj_id "$_resume_traj" \
+            | jq -c 'select(.type=="shellm-run")' 2>/dev/null | head -1)
+        local _orig_workdir _orig_env
+        _orig_workdir=$(printf '%s' "$_orig_meta" | jq -r '.workdir // empty')
+        _orig_env=$(printf '%s' "$_orig_meta" | jq -r '.env.name // empty')
+
+        # Validate --workdir and --env match original
+        if [[ -n "$_SHELLM_WORKDIR_USER" && "$_SHELLM_WORKDIR_USER" != "$_orig_workdir" ]]; then
+            die "Cannot change workdir on resume (original: $_orig_workdir, requested: $_SHELLM_WORKDIR_USER)"
+        fi
+        if [[ -n "$_SHELLM_ENV_NAME" && "$_SHELLM_ENV_NAME" != "$_orig_env" ]]; then
+            die "Cannot change env on resume (original: $_orig_env, requested: $_SHELLM_ENV_NAME)"
+        fi
+
+        # Use original workdir and env
+        _SHELLM_WORKDIR_USER="${_orig_workdir:-}"
+        [[ -n "$_orig_env" ]] && _SHELLM_ENV_NAME="$_orig_env"
+
+        # Resolve run_name from trajectory dir
+        local _resume_file
+        _resume_file=$(traj show "$_resume_traj" --traj_dir "$_run_traj_dir" 2>/dev/null \
+            | grep '^File:' | awk '{print $2}') || true
+        run_name=$(basename "$(dirname "$_resume_file")")
+
+        progress "Resuming trajectory: $_run_traj_id"
+    else
+        # --- New trajectory path ---
+        # Create the trajectory via traj new
+        if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+            _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt" --field "parent=$_SHELLM_PARENT_TRAJ_ID")
+        else
+            _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt")
+        fi
+        _run_traj_id=$(head -1 <<< "$_new_output")
+        run_name=$(tail -1 <<< "$_new_output")
+
+        # If this is a child run, record a fork step in the parent trajectory
+        if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+            traj fork "$_run_traj_id" --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>&1 || true
+        fi
     fi
 
     # Create a temp dir for transient state (exec pids, output, watchdog, etc.)
@@ -1502,7 +1565,7 @@ run_loop() {
     if [[ -n "$_SHELLM_WORKDIR_USER" ]]; then
         workdir="$_SHELLM_WORKDIR_USER"
     else
-        workdir="$SHELLM_HOME/workdirs/$run_name"
+        workdir="$SHELLM_WORKDIRS_DIR/$run_name"
     fi
     mkdir -p "$workdir"
 
@@ -1628,38 +1691,49 @@ run_loop() {
         _env_json='{"name":"local","type":"local"}'
     fi
 
-    # Build context_files JSON array
-    local _ctx_files_json="[]"
-    for _cf in "${context_files[@]+"${context_files[@]}"}"; do
-        _ctx_files_json=$(printf '%s' "$_ctx_files_json" | jq --arg f "$_cf" '. + [$f]')
-    done
-
-    # Write shellm-run step as the first step in the trajectory
-    local _shellm_run_json
-    _shellm_run_json=$(jq -nc \
-        --arg cmd "$_SHELLM_ORIGINAL_CMD" \
-        --arg wd "$workdir" \
-        --arg model "$SHELLM_MODEL" \
-        --argjson ctx "$_ctx_files_json" \
-        --argjson env "$_env_json" \
-        '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, context_files:$ctx, env:$env}')
-    printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
-
-    # Kick off async run-summary generation (background)
     local _ctx_summary_pid=""
-    local stdin_ctx_file=""
-    if [[ -n "$stdin_context" ]]; then
-        stdin_ctx_file="$rundir/.stdin_context"
-        printf '%s' "$stdin_context" > "$stdin_ctx_file"
-    fi
-    generate_run_summary "$_run_traj_dir" "$_run_traj_id" "$prompt" "$stdin_ctx_file" \
-        "${context_files[@]+"${context_files[@]}"}" &
-    _ctx_summary_pid=$!
-    debug "Run summary generation started (PID: $_ctx_summary_pid)"
 
-    # Write initial prompt to trajectory
-    printf '%s' "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" \
-        | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+    if [[ -z "${_resume_traj:-}" ]]; then
+        # Build context_files JSON array
+        local _ctx_files_json="[]"
+        for _cf in "${context_files[@]+"${context_files[@]}"}"; do
+            _ctx_files_json=$(printf '%s' "$_ctx_files_json" | jq --arg f "$_cf" '. + [$f]')
+        done
+
+        # Write shellm-run step as the first step in the trajectory
+        local _shellm_run_json
+        _shellm_run_json=$(jq -nc \
+            --arg cmd "$_SHELLM_ORIGINAL_CMD" \
+            --arg wd "$workdir" \
+            --arg model "$SHELLM_MODEL" \
+            --arg effort "$SHELLM_EFFORT" \
+            --arg max_iter "${SHELLM_MAX_ITERATIONS:-}" \
+            --arg max_tok "${SHELLM_MAX_TOKENS:-}" \
+            --arg inactivity_timeout "$SHELLM_INACTIVITY_TIMEOUT" \
+            --argjson ctx "$_ctx_files_json" \
+            --argjson env "$_env_json" \
+            '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env}')
+        printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+
+        # Kick off async run-summary generation (background)
+        local stdin_ctx_file=""
+        if [[ -n "$stdin_context" ]]; then
+            stdin_ctx_file="$rundir/.stdin_context"
+            printf '%s' "$stdin_context" > "$stdin_ctx_file"
+        fi
+        generate_run_summary "$_run_traj_dir" "$_run_traj_id" "$prompt" "$stdin_ctx_file" \
+            "${context_files[@]+"${context_files[@]}"}" &
+        _ctx_summary_pid=$!
+        debug "Run summary generation started (PID: $_ctx_summary_pid)"
+
+        # Write initial prompt to trajectory
+        printf '%s' "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" \
+            | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+    elif [[ -n "$prompt" ]]; then
+        # Resuming with new prompt — append as feedback step
+        printf '%s' "$(jq -n --arg p "$prompt" '{type:"feedback",content:$p}')" \
+            | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+    fi
 
     # --- Cleanup trap ---
     _cleanup_docker="$docker_active"
@@ -2093,6 +2167,7 @@ main() {
     local print_prompt=0
     local _SHELLM_ENV_NAME="${SHELLM_ENV:-}"
     local _new_env=0
+    local _resume_traj=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2163,6 +2238,19 @@ main() {
                 SHELLM_DOCKER_ACCESS="${2:?--docker-access requires a value}"
                 shift 2
                 ;;
+            --traj-dir)
+                SHELLM_TRAJ_DIR="${2:?--traj-dir requires DIR}"
+                shift 2
+                ;;
+            --resume)
+                _resume_traj="${2:-}"
+                if [[ -n "$_resume_traj" && "$_resume_traj" != -* ]]; then
+                    shift 2
+                else
+                    _resume_traj="__latest__"
+                    shift
+                fi
+                ;;
             --var)
                 _SHELLM_EXTRA_VARS+=("${2:?--var requires NAME=VALUE}")
                 shift 2
@@ -2195,7 +2283,7 @@ main() {
         exit 0
     fi
 
-    [[ -z "$prompt" ]] && { usage; }
+    [[ -z "$prompt" && -z "$_resume_traj" ]] && { usage; }
 
     if [[ "${#context_files[@]}" -gt 0 ]]; then
         run_loop "$prompt" "${context_files[@]}"

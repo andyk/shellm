@@ -17,6 +17,44 @@ _fm_field() {
     awk -v field="$2" 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f && $0 ~ "^"field":"{sub("^"field":[[:space:]]*", ""); print}' "$1"
 }
 
+# Set or insert a frontmatter field in a file
+_set_fm_field() {
+    local file="$1" field="$2" value="$3"
+    local existing
+    existing=$(_fm_field "$file" "$field")
+    if [[ -n "$existing" ]]; then
+        sed -i '' "s/^${field}:.*/${field}: ${value}/" "$file"
+    else
+        sed -i '' "1,/^---$/ { /^---$/a\\
+${field}: ${value}
+}" "$file"
+    fi
+}
+
+# Remove a frontmatter field from a file
+_rm_fm_field() {
+    local file="$1" field="$2"
+    sed -i '' "/^${field}:.*/d" "$file"
+}
+
+# Find a goal file by ID prefix query. Prints the file path.
+_find_goal() {
+    local query="$1"
+    local match=""
+    local f
+    while IFS=$'\t' read -r _pri f; do
+        [[ -z "$f" ]] && continue
+        local fid
+        fid=$(_fm_field "$f" "id")
+        if [[ "$fid" == "$query"* ]]; then
+            [[ -n "$match" ]] && die "Ambiguous ID: '$query' matches multiple goals"
+            match="$f"
+        fi
+    done < <(_sorted_goals "$MEM_DIR")
+    [[ -z "$match" ]] && die "No goal matching ID: $query"
+    printf '%s' "$match"
+}
+
 # Collect goal files sorted by priority (lower first), then filename.
 # Outputs one "priority\tfile" per line.
 _sorted_goals() {
@@ -43,12 +81,16 @@ _sorted_goals() {
 }
 
 # Extract goals from memories (looks for type: goal in frontmatter)
+# Skips completed goals (status: done)
 get_goals() {
     local mem_dir="$1"
     [[ -d "$mem_dir" ]] || return 0
     local goals=""
     while IFS=$'\t' read -r _pri f; do
         [[ -z "$f" ]] && continue
+        local status
+        status=$(_fm_field "$f" "status")
+        [[ "$status" == "done" ]] && continue
         local body
         body=$(awk 'NR==1 && /^---$/{f=1; next} f && /^---$/{f=0; next} !f{print}' "$f" | sed '/./,$!d' | head -3)
         [[ -n "$body" ]] && goals="${goals}- ${body}
@@ -64,41 +106,84 @@ get_goals() {
 cmd_list() {
     [[ -d "$MEM_DIR" ]] || { printf 'No goals.\n'; return; }
 
+    # Parse flags
+    local filter="active"  # default: active only
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --all)  filter="all" ;;
+            --done) filter="done" ;;
+            *)      die "Unknown flag: $arg" ;;
+        esac
+    done
+
     # Color setup (auto-detect TTY)
-    local c_reset="" c_id="" c_type="" c_date="" c_text=""
+    local c_reset="" c_id="" c_type="" c_date="" c_text="" c_dim=""
     if [[ -t 1 ]]; then
         c_reset=$'\033[0m'
         c_id=$'\033[2m'          # dim
         c_type=$'\033[33m'       # yellow
         c_date=$'\033[2m'        # dim
         c_text=$'\033[1;37m'     # bold white
+        c_dim=$'\033[2m'         # dim
     fi
 
     local found=0
     while IFS=$'\t' read -r _pri f; do
         [[ -z "$f" ]] && continue
 
-        local ftype fid fsummary fcreated
+        local ftype fid fsummary fcreated fstatus fcompleted
         ftype=$(_fm_field "$f" "type")
         fid=$(_fm_field "$f" "id")
         fsummary=$(_fm_field "$f" "summary")
         fcreated=$(_fm_field "$f" "created")
+        fstatus=$(_fm_field "$f" "status")
+        fcompleted=$(_fm_field "$f" "completed")
+
+        # Filter based on mode
+        local is_done=0
+        [[ "$fstatus" == "done" ]] && is_done=1
+        case "$filter" in
+            active) [[ "$is_done" -eq 1 ]] && continue ;;
+            done)   [[ "$is_done" -eq 0 ]] && continue ;;
+            all)    ;;  # show everything
+        esac
 
         # Fall back to body text if no summary
         if [[ -z "$fsummary" ]]; then
             fsummary=$(awk 'NR==1 && /^---$/{fm=1; next} fm && /^---$/{fm=0; next} !fm && /\S/{print; exit}' "$f")
         fi
 
-        printf '%s%s%s  %s%-9s%s  %s%s%s  %s%s%s\n' \
-            "$c_id" "${fid:--}" "$c_reset" \
-            "$c_type" "$ftype" "$c_reset" \
-            "$c_date" "${fcreated:--}" "$c_reset" \
-            "$c_text" "${fsummary:-(empty)}" "$c_reset"
+        # Build done tag
+        local done_tag=""
+        if [[ "$is_done" -eq 1 ]]; then
+            local done_date="${fcompleted%T*}"  # strip time portion if present
+            done_tag="  ${c_dim}[done${done_date:+ $done_date}]${c_reset}"
+        fi
+
+        # Dim the whole line for completed goals
+        local line_c_id="$c_id" line_c_type="$c_type" line_c_date="$c_date" line_c_text="$c_text"
+        if [[ "$is_done" -eq 1 ]]; then
+            line_c_id="$c_dim"
+            line_c_type="$c_dim"
+            line_c_date="$c_dim"
+            line_c_text="$c_dim"
+        fi
+
+        printf '%s%s%s  %s%-9s%s  %s%s%s  %s%s%s%s\n' \
+            "$line_c_id" "${fid:--}" "$c_reset" \
+            "$line_c_type" "$ftype" "$c_reset" \
+            "$line_c_date" "${fcreated:--}" "$c_reset" \
+            "$line_c_text" "${fsummary:-(empty)}" "$c_reset" \
+            "$done_tag"
         found=$((found + 1))
     done < <(_sorted_goals "$MEM_DIR")
 
     if [[ "$found" -eq 0 ]]; then
-        printf 'No goals.\n'
+        case "$filter" in
+            done)   printf 'No completed goals.\n' ;;
+            *)      printf 'No goals.\n' ;;
+        esac
     fi
 }
 
@@ -118,18 +203,7 @@ cmd_show() {
 # Write or update a priority field in a mem file's frontmatter.
 _set_priority() {
     local file="$1" new_pri="$2"
-    local existing
-    existing=$(_fm_field "$file" "priority")
-    if [[ -n "$existing" ]]; then
-        # Replace existing priority line
-        sed -i '' "s/^priority:.*/priority: $new_pri/" "$file"
-    else
-        # Insert after the opening --- line
-        sed -i '' "1,/^---$/ { /^---$/a\\
-priority: $new_pri
-}" "$file"
-        # The above inserts after the FIRST --- only (opening fence)
-    fi
+    _set_fm_field "$file" "priority" "$new_pri"
 }
 
 cmd_move() {
@@ -141,10 +215,13 @@ cmd_move() {
     [[ "$direction" == "up" || "$direction" == "down" ]] || die "Direction must be 'up' or 'down'"
     [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || die "N must be a positive integer"
 
-    # Collect sorted goals into arrays
+    # Collect sorted active goals into arrays (skip completed)
     local -a files=() pris=()
     while IFS=$'\t' read -r pri f; do
         [[ -z "$f" ]] && continue
+        local fstatus
+        fstatus=$(_fm_field "$f" "status")
+        [[ "$fstatus" == "done" ]] && continue
         files+=("$f")
         pris+=("$pri")
     done < <(_sorted_goals "$MEM_DIR")
@@ -213,10 +290,31 @@ cmd_move() {
 
 cmd_done() {
     local query="$*"
-    [[ -z "$query" ]] && die "Usage: focus done <goal query>"
-    MEM_DIR="$MEM_DIR" mem forget "$query" 2>/dev/null || \
-        die "No goal matching: $query"
-    printf 'Goal removed: %s\n' "$query" >&2
+    [[ -z "$query" ]] && die "Usage: focus done <goal id>"
+    local file
+    file=$(_find_goal "$query")
+    _set_fm_field "$file" "status" "done"
+    _set_fm_field "$file" "completed" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local name
+    name=$(_fm_field "$file" "summary")
+    [[ -z "$name" ]] && name="$query"
+    printf 'Goal completed: %s\n' "$name" >&2
+}
+
+cmd_undo() {
+    local query="$*"
+    [[ -z "$query" ]] && die "Usage: focus undo <goal id>"
+    local file
+    file=$(_find_goal "$query")
+    local fstatus
+    fstatus=$(_fm_field "$file" "status")
+    [[ "$fstatus" != "done" ]] && die "Goal is not completed"
+    _rm_fm_field "$file" "status"
+    _rm_fm_field "$file" "completed"
+    local name
+    name=$(_fm_field "$file" "summary")
+    [[ -z "$name" ]] && name="$query"
+    printf 'Goal reactivated: %s\n' "$name" >&2
 }
 
 usage() {
@@ -224,11 +322,12 @@ usage() {
 focus — Goal management
 
 Usage:
-  focus list                          List goals with IDs and color
-  focus set <goal text>               Set a goal
-  focus show                          Show current goals (plain text)
-  focus move <id> <up|down> [N]       Reorder a goal (default N=1)
-  focus done <query>                  Mark a goal as done (remove it)
+  focus list [--all|--done]             List goals (default: active only)
+  focus set <goal text>                 Set a goal
+  focus show                            Show current goals (plain text)
+  focus move <id> <up|down> [N]         Reorder a goal (default N=1)
+  focus done <id>                       Mark a goal as completed
+  focus undo <id>                       Reactivate a completed goal
 
 Environment:
   MEM_DIR   Memories directory (set by `identity shell`)
@@ -238,11 +337,12 @@ EOF
 
 # Dispatch
 case "${1:-}" in
-    list)   cmd_list ;;
+    list)   shift; cmd_list "$@" ;;
     set)    shift; cmd_set "$@" ;;
     show)   cmd_show ;;
     move)   shift; cmd_move "$@" ;;
     done)   shift; cmd_done "$@" ;;
+    undo)   shift; cmd_undo "$@" ;;
     -h|--help|help) usage ;;
     "")     cmd_list ;;
     *)      die "Unknown command: $1 (try focus --help)" ;;

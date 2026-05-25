@@ -24,3 +24,11 @@ Each memory/task/etc. is stored as a markdown file in my memories directory with
 IMPORTANT: I actively keep track of semantically important events in my life using my life context system. So I quick to create a new mem anytime something important or memorable or suprising happens.
 
 To create a new piece of life context, I use `mem add`. I can see my most recent memories below or I can use `mem search`.
+
+## Memories
+
+```bash
+#| eval: true
+#| stderr: false
+mem list --short 2>/dev/null || true
+```
