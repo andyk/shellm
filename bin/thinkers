@@ -77,9 +77,9 @@ _resolve_traj_file() {
         printf '%s' "$traj_dir/$traj_id"; return
     fi
 
-    # 2. Directory-based: $traj_dir/$traj_id/root.jsonl
-    if [[ -f "$traj_dir/$traj_id/root.jsonl" ]]; then
-        printf '%s' "$traj_dir/$traj_id/root.jsonl"; return
+    # 2. Directory-based: $traj_dir/$traj_id/trajectory.jsonl
+    if [[ -f "$traj_dir/$traj_id/trajectory.jsonl" ]]; then
+        printf '%s' "$traj_dir/$traj_id/trajectory.jsonl"; return
     fi
 
     # 3. UUID handling: extract hex prefix and try directory glob FIRST
@@ -91,8 +91,8 @@ _resolve_traj_file() {
 
     local match
     match=$(find "$traj_dir" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
-    if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
-        printf '%s' "$match/root.jsonl"; return
+    if [[ -n "$match" && -f "$match/trajectory.jsonl" ]]; then
+        printf '%s' "$match/trajectory.jsonl"; return
     fi
 
     # 4. Legacy .jsonl suffix

@@ -71,7 +71,7 @@ cmd_history() {
 
     local identity_name="${IDENTITY_NAME:-agent}"
 
-    traj tail -n "$n" --type human-msg,agent-msg --raw 2>/dev/null \
+    traj tail -n "$n" --filter type=human-msg,agent-msg --raw 2>/dev/null \
     | while IFS= read -r line; do
         local step_type content
         step_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
@@ -91,7 +91,7 @@ cmd_repl() {
     # Background watcher for agent replies
     local watcher_pid=""
     _start_reply_watcher() {
-        traj tail -f --type agent-msg -n 0 --raw 2>/dev/null \
+        traj tail -f --filter type=agent-msg -n 0 --raw 2>/dev/null \
         | while IFS= read -r line; do
             local content
             content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)

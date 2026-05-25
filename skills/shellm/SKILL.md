@@ -123,7 +123,7 @@ Other important vars (not identity-scoped):
   kernel/               kernel skills (always loaded)
     mem/SKILL.md        bootstrapped mem skill
   .trajectories/        trajectory files
-    root.jsonl          main consciousness stream
+    trajectory.jsonl          main consciousness stream
     blobs/              spilled large fields
   .shellm/              shellm working state
   workdir/              working directory for think cycles

@@ -27,7 +27,7 @@ One append-mostly log of thoughts is the only agent-specific state. It lives at 
 
 ```
 ~/.config/headlong/traj/
-  root.jsonl              # main thought stream
+  trajectory.jsonl              # main thought stream
   <branch-uuid>.jsonl     # child branches (shelly runs)
   blobs/                  # spilled large fields
 ```
@@ -121,9 +121,9 @@ Grep-based search via `traj search` is less sophisticated than FTS5 ranking but 
 
 When `headlong act` executes an action, it:
 1. Generates a branch UUID
-2. Records `{type: "agent-run", branch: "<uuid>", source: "act"}` in root.jsonl
+2. Records `{type: "agent-run", branch: "<uuid>", source: "act"}` in trajectory.jsonl
 3. Invokes `shelly send "<action body>"` with shelly writing its trajectory as a child branch under `~/.config/headlong/traj/<uuid>.jsonl`
-4. Captures shelly's response and records `{type: "observation", content: "observation: <response>", source: "act"}` in root.jsonl
+4. Captures shelly's response and records `{type: "observation", content: "observation: <response>", source: "act"}` in trajectory.jsonl
 
 ### The run loop
 

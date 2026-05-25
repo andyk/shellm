@@ -122,7 +122,7 @@ list_runs() {
     local limit="$1"
     [[ -d "$TRAJ_DIR" ]] || die "No trajectories directory: $TRAJ_DIR"
 
-    # Find all trajectory files (both root.jsonl and legacy .jsonl), sorted newest first
+    # Find all trajectory files (both trajectory.jsonl and legacy .jsonl), sorted newest first
     local -a traj_files=()
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
@@ -144,7 +144,7 @@ list_runs() {
         local bn
         bn=$(basename "$traj_file")
 
-        if [[ "$bn" == "root.jsonl" ]]; then
+        if [[ "$bn" == "trajectory.jsonl" ]]; then
             # Directory-based: parent dir is <hex8>-<slug>
             local dir_name
             dir_name=$(basename "$(dirname "$traj_file")")
@@ -218,7 +218,7 @@ resolve_run_id() {
         local bn
         bn=$(basename "$f")
 
-        if [[ "$bn" == "root.jsonl" ]]; then
+        if [[ "$bn" == "trajectory.jsonl" ]]; then
             # Directory-based: match against parent directory name (<hex8>-<slug>)
             local dir_name
             dir_name=$(basename "$(dirname "$f")")
@@ -247,7 +247,7 @@ resolve_run_id() {
         for m in "${matches[@]}"; do
             local mbn
             mbn=$(basename "$m")
-            if [[ "$mbn" == "root.jsonl" ]]; then
+            if [[ "$mbn" == "trajectory.jsonl" ]]; then
                 echo "  $(basename "$(dirname "$m")")" >&2
             else
                 echo "  ${mbn%.jsonl}" >&2
@@ -296,8 +296,8 @@ find_root() {
             # Try directory glob first
             local match
             match=$(find "$TRAJ_DIR" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
-            if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
-                parent_file="$match/root.jsonl"
+            if [[ -n "$match" && -f "$match/trajectory.jsonl" ]]; then
+                parent_file="$match/trajectory.jsonl"
             fi
 
             # Try legacy flat file
@@ -343,7 +343,7 @@ print_tree() {
         # Parse hex ID from either directory-based or legacy format
         local bn hex=""
         bn=$(basename "$traj_file")
-        if [[ "$bn" == "root.jsonl" ]]; then
+        if [[ "$bn" == "trajectory.jsonl" ]]; then
             local dir_name
             dir_name=$(basename "$(dirname "$traj_file")")
             if [[ "$dir_name" =~ ^([0-9a-f]{8})- ]]; then
@@ -382,8 +382,8 @@ print_tree() {
             # Try directory glob (both under current traj dir and TRAJ_DIR)
             local match
             match=$(find "$TRAJ_DIR" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
-            if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
-                child_file="$match/root.jsonl"
+            if [[ -n "$match" && -f "$match/trajectory.jsonl" ]]; then
+                child_file="$match/trajectory.jsonl"
             fi
 
             # Try legacy flat file
@@ -478,11 +478,11 @@ generate_report() {
         local traj_file="$1"
         [[ -f "$traj_file" ]] || return
 
-        # Display name: directory name for root.jsonl, basename for legacy
+        # Display name: directory name for trajectory.jsonl, basename for legacy
         local display_name
         local bn
         bn=$(basename "$traj_file")
-        if [[ "$bn" == "root.jsonl" ]]; then
+        if [[ "$bn" == "trajectory.jsonl" ]]; then
             display_name=$(basename "$(dirname "$traj_file")")
         else
             display_name="${bn%.jsonl}"
@@ -526,8 +526,8 @@ generate_report() {
 
             local match
             match=$(find "$TRAJ_DIR" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
-            if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
-                child_file="$match/root.jsonl"
+            if [[ -n "$match" && -f "$match/trajectory.jsonl" ]]; then
+                child_file="$match/trajectory.jsonl"
             fi
 
             if [[ -z "$child_file" ]]; then

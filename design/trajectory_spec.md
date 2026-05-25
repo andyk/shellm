@@ -1,27 +1,27 @@
 # Trajectory Spec
 
-A **trajectory** is an append-only log of steps stored as a JSONL file named `root.jsonl` inside a directory. Each line is a JSON object representing one step. Trajectories record what an agent did, thought, observed, and produced during a run.
+A **trajectory** is an append-only log of steps stored as a JSONL file named `trajectory.jsonl` inside a directory. Each line is a JSON object representing one step. Trajectories record what an agent did, thought, observed, and produced during a run.
 
 ## Core concepts
 
-A trajectory is itself a step. The first line of every `root.jsonl` file is a step with `"type":"trajectory"` whose `step_id` serves as the trajectory's ID. This means trajectories and steps share a single ID namespace — any UUID in the system can be looked up uniformly with `traj show <id>`.
+A trajectory is itself a step. The first line of every `trajectory.jsonl` file is a step with `"type":"trajectory"` whose `step_id` serves as the trajectory's ID. This means trajectories and steps share a single ID namespace — any UUID in the system can be looked up uniformly with `traj show <id>`.
 
 Steps are append-only. Once written, a step is never modified.
 
 ## Directory structure
 
-Each trajectory is a directory containing `root.jsonl`. Child trajectories are nested as subdirectories of their parent, so the filesystem mirrors the logical tree.
+Each trajectory is a directory containing `trajectory.jsonl`. Child trajectories are nested as subdirectories of their parent, so the filesystem mirrors the logical tree.
 
 ```
 trajectories/
   729eb4ae-root/
-    root.jsonl
+    trajectory.jsonl
     blobs/
     008951e3-initialize-leos-subconscious/
-      root.jsonl
+      trajectory.jsonl
       blobs/
     30b06a82-generate-next-thought/
-      root.jsonl
+      trajectory.jsonl
 ```
 
 Directory naming: `<hex8>-<slug>`, where:
@@ -40,8 +40,8 @@ A trajectory is located by two values:
 All subcommands accept `[ID]` as an optional positional argument, equivalent to `--traj_id ID`. Resolution order: positional / flags override env vars.
 
 The resolver (`_resolve_traj_id`) accepts:
-1. An exact relative path (e.g. `729eb4ae-root/root.jsonl`)
-2. A directory-based path — `$traj_dir/$traj_id/root.jsonl`
+1. An exact relative path (e.g. `729eb4ae-root/trajectory.jsonl`)
+2. A directory-based path — `$traj_dir/$traj_id/trajectory.jsonl`
 3. A basename without `.jsonl` (legacy)
 4. A full UUID — extracts first 8 hex chars, searches recursively for a directory named `<hex8>-*`
 5. An 8-char hex prefix — recursive directory search
@@ -78,7 +78,7 @@ These manage the trajectory tree itself.
 
 #### `trajectory`
 
-First step of every `root.jsonl` file. Its `step_id` is the trajectory's ID.
+First step of every `trajectory.jsonl` file. Its `step_id` is the trajectory's ID.
 
 ```json
 {"type":"trajectory", "step_id":"<uuid>", "ts":"..."}
@@ -86,29 +86,29 @@ First step of every `root.jsonl` file. Its `step_id` is the trajectory's ID.
 
 Optional fields:
 - `parent` — UUID of the parent trajectory (absent for roots)
-- `parent_ref` — relative path from this trajectory's directory to the parent's `root.jsonl` (e.g. `../root.jsonl`)
+- `parent_ref` — relative path from this trajectory's directory to the parent's `trajectory.jsonl` (e.g. `../trajectory.jsonl`)
 
 #### `fork`
 
 Records that a child trajectory was spawned from this point.
 
 ```json
-{"type":"fork", "child":"<child-traj-uuid>", "child_ref":"<hex8>-<slug>/root.jsonl", "step_id":"<uuid>", "ts":"..."}
+{"type":"fork", "child":"<child-traj-uuid>", "child_ref":"<hex8>-<slug>/trajectory.jsonl", "step_id":"<uuid>", "ts":"..."}
 ```
 
 - `child` — UUID of the child trajectory
-- `child_ref` — relative path from this trajectory's directory to the child's `root.jsonl`
+- `child_ref` — relative path from this trajectory's directory to the child's `trajectory.jsonl`
 
 #### `merge`
 
 Records that a child trajectory completed and its result was incorporated.
 
 ```json
-{"type":"merge", "from_traj":"<child-traj-uuid>", "from_traj_ref":"<hex8>-<slug>/root.jsonl", "from_step":"<last-step-uuid>", "content":"<summary>", "step_id":"<uuid>", "ts":"..."}
+{"type":"merge", "from_traj":"<child-traj-uuid>", "from_traj_ref":"<hex8>-<slug>/trajectory.jsonl", "from_step":"<last-step-uuid>", "content":"<summary>", "step_id":"<uuid>", "ts":"..."}
 ```
 
 - `from_traj` — UUID of the child trajectory that was merged
-- `from_traj_ref` — relative path from this trajectory's directory to the child's `root.jsonl`
+- `from_traj_ref` — relative path from this trajectory's directory to the child's `trajectory.jsonl`
 - `from_step` — UUID of the child's last step at merge time
 
 ### Reference pattern
@@ -261,7 +261,7 @@ The agent's conversational reply.
 
 When `stdout` or `stderr` exceeds 4096 bytes (configurable via `$SHELLM_STDOUT_INLINE_LIMIT`), the full content is written to a blob file and the inline value is truncated.
 
-Blob files live in a `blobs/` directory inside the same trajectory directory as the `root.jsonl` that references them.
+Blob files live in a `blobs/` directory inside the same trajectory directory as the `trajectory.jsonl` that references them.
 
 ### Blob file naming
 
@@ -369,13 +369,13 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 
 ```
 729eb4ae-root/
-  root.jsonl
+  trajectory.jsonl
   blobs/
   acce682d-sub-task/
-    root.jsonl
+    trajectory.jsonl
 ```
 
-`729eb4ae-root/root.jsonl`:
+`729eb4ae-root/trajectory.jsonl`:
 ```jsonl
 {"type":"trajectory","step_id":"729eb4ae-2a49-4b41-9db6-8ff3aa500d2a","ts":"2026-05-16T13:26:06.846-0700"}
 {"type":"shellm-run","command":"shellm 'echo hello'","workdir":"/tmp/work","model":"claude-sonnet-4-20250514","effort":"high","max_iterations":"","max_tokens":"","inactivity_timeout":"30","context_files":[],"env":{"name":"local","type":"local"},"step_id":"aaa11111-0000-0000-0000-000000000001","ts":"2026-05-16T13:26:06.850-0700"}

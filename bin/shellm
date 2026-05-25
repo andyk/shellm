@@ -227,7 +227,7 @@ extract_reasoning() {
 _find_latest_traj() {
     local traj_dir="$1"
     local latest
-    latest=$(find "$traj_dir" -maxdepth 2 -name 'root.jsonl' \
+    latest=$(find "$traj_dir" -maxdepth 2 -name 'trajectory.jsonl' \
         -exec stat -f '%m %N' {} \; 2>/dev/null \
         | sort -rn | head -1 | cut -d' ' -f2-)
     [[ -n "$latest" ]] || return 1

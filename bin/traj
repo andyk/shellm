@@ -60,11 +60,16 @@ Commands:
                             trajectory's first step, shows traj metadata.
                             Otherwise shows the step JSON.
 
-  tail [ID] [-n N] [-f] [--type T1,T2]
-                            Like tail but for a trajectory's JSONL file.
+  tail [ID] [-n N] [-f] [--filter F] [-r] [--raw]
+                            Show recent steps (formatted by default).
+                            --filter field=val  Filter steps by field value.
+                            Multiple --filter flags are AND'd, comma values OR'd.
+                            -r/--recursive includes sub-trajectory steps.
+                            --raw for JSONL output.
 
-  search <pattern> [ID] [--field F] [-i] [-C N] [-E]
+  search <pattern> [ID] [--field F] [-i] [-C N] [-E] [-r]
                             Search step fields. Default field: all.
+                            -r, --recursive  Search sub-trajectories too.
 
   count [ID]                Print step count.
 
@@ -146,15 +151,15 @@ byte_len() {
 _resolve_traj_id() {
     local traj_dir="$1" traj_id="$2"
 
-    # 1. Exact path (e.g., root.jsonl, 30784dbe-root/root.jsonl, or legacy flat file)
+    # 1. Exact path (e.g., trajectory.jsonl, 30784dbe-root/trajectory.jsonl, or legacy flat file)
     if [[ -f "$traj_dir/$traj_id" ]]; then
         printf '%s\n' "$traj_dir/$traj_id"
         return
     fi
 
-    # 2. Directory-based: $traj_dir/$traj_id/root.jsonl
-    if [[ -f "$traj_dir/$traj_id/root.jsonl" ]]; then
-        printf '%s\n' "$traj_dir/$traj_id/root.jsonl"
+    # 2. Directory-based: $traj_dir/$traj_id/trajectory.jsonl
+    if [[ -f "$traj_dir/$traj_id/trajectory.jsonl" ]]; then
+        printf '%s\n' "$traj_dir/$traj_id/trajectory.jsonl"
         return
     fi
 
@@ -168,8 +173,8 @@ _resolve_traj_id() {
     #    (directory-based takes priority over legacy flat files)
     local match
     match=$(find "$traj_dir" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
-    if [[ -n "$match" && -f "$match/root.jsonl" ]]; then
-        printf '%s\n' "$match/root.jsonl"
+    if [[ -n "$match" && -f "$match/trajectory.jsonl" ]]; then
+        printf '%s\n' "$match/trajectory.jsonl"
         return
     fi
 
@@ -209,13 +214,13 @@ require_traj_file() {
 }
 
 # Extract the 8-char hex ID from a trajectory filename, or return the basename.
-# Handles both directory-based (root.jsonl inside <hex8>-<slug>/) and legacy flat files.
+# Handles both directory-based (trajectory.jsonl inside <hex8>-<slug>/) and legacy flat files.
 _parse_hex_id() {
     local bn
     bn=$(basename "$1")
 
-    # If the file is root.jsonl, parse the parent directory name instead
-    if [[ "$bn" == "root.jsonl" ]]; then
+    # If the file is trajectory.jsonl, parse the parent directory name instead
+    if [[ "$bn" == "trajectory.jsonl" ]]; then
         bn=$(basename "$(dirname "$1")")
     else
         bn="${bn%.jsonl}"
@@ -363,7 +368,7 @@ cmd_new() {
 
     local traj_dir_path="$base_dir/$dir_name"
     mkdir -p "$traj_dir_path"
-    local traj_file="$traj_dir_path/root.jsonl"
+    local traj_file="$traj_dir_path/trajectory.jsonl"
 
     # Build first step JSON: type=trajectory + any extra --field values
     local record='{"type":"trajectory"}'
@@ -372,11 +377,11 @@ cmd_new() {
         record=$(printf '%s' "$record" | jq --arg k "$key" --arg v "$val" '. + {($k): $v}')
     done
 
-    # Add parent_ref: relative path from this trajectory's dir to the parent's root.jsonl
+    # Add parent_ref: relative path from this trajectory's dir to the parent's trajectory.jsonl
     if [[ -n "$parent_file" ]]; then
         local parent_ref
         parent_ref=$(python3 -c "import os.path; print(os.path.relpath('$parent_file', '$traj_dir_path'))" 2>/dev/null) \
-            || parent_ref="../root.jsonl"
+            || parent_ref="../trajectory.jsonl"
         record=$(printf '%s' "$record" | jq --arg ref "$parent_ref" '. + {parent_ref: $ref}')
     fi
 
@@ -699,7 +704,8 @@ _collect_recursive_files() {
 }
 
 cmd_tail() {
-    local n=10 follow=0 raw=0 force_format=0 use_color=-1 filter_types="" traj_dir_opt="" traj_id_opt="" recursive=0
+    local n=10 follow=0 raw=0 force_format=0 use_color=-1 traj_dir_opt="" traj_id_opt="" recursive=0
+    local -a filters=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n)          n="${2:?-n requires a number}"; shift 2 ;;
@@ -709,16 +715,16 @@ cmd_tail() {
             --raw)       raw=1; shift ;;
             --format)    force_format=1; shift ;;
             --no-color)  use_color=0; shift ;;
-            --type)      filter_types="${2:?--type requires a value}"; shift 2 ;;
+            --filter)    filters+=("${2:?--filter requires field=value}"); shift 2 ;;
             -r|--recursive) recursive=1; shift ;;
             -h|--help)
                 cat <<'TAILHELP'
 traj tail — Stream trajectory steps
 
 Usage:
-  traj tail [ID] [-n N] [-f]   Show recent steps
-  traj tail [ID] --type T1,T2  Filter by step type
-  traj tail [ID] -r            Include sub-trajectory steps
+  traj tail [ID] [-n N] [-f]        Show recent steps
+  traj tail [ID] --filter field=val  Filter steps
+  traj tail [ID] -r                  Include sub-trajectory steps
 
 Options:
   [ID]               Trajectory ID (positional, or --traj_id)
@@ -726,7 +732,9 @@ Options:
   -f                 Follow new steps as they arrive
   -r, --recursive    Include steps from all sub-trajectories, interleaved
   --traj_dir DIR     Trajectory directory
-  --type T1,T2       Filter by step type (comma-separated)
+  --filter field=val Filter steps (e.g. --filter type=thought,merge).
+                     Multiple --filter flags are AND'd.
+                     Comma-separated values within a filter are OR'd.
   --raw              Raw JSONL (default when piped)
   --format           Force formatted output (even when piped)
   --no-color         Disable ANSI colors
@@ -755,6 +763,15 @@ TAILHELP
     traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "tail")
 
     [[ "$recursive" -eq 1 && "$follow" -eq 1 ]] && die "tail: --recursive and -f cannot be combined"
+
+    # Build filter JSON array: [{key:"field", vals:["v1","v2"]}, ...]
+    local _filter_json='[]'
+    local _f
+    for _f in "${filters[@]+"${filters[@]}"}"; do
+        local _fk="${_f%%=*}" _fv="${_f#*=}"
+        _filter_json=$(printf '%s' "$_filter_json" | jq -c --arg k "$_fk" --arg v "$_fv" \
+            '. + [{key: $k, vals: ($v | split(","))}]')
+    done
 
     # Auto-detect formatting: format on TTY, raw when piped
     local format=1
@@ -804,7 +821,14 @@ TAILHELP
           read -r step_id
           read -r traj_hex
         } < <(
-            printf '%s' "$line" | jq -r '
+            printf '%s' "$line" | jq -r --argjson filters "$_filter_json" '
+                def matches_filters($fs):
+                    . as $step |
+                    ($fs | length == 0) or all($fs[];
+                        .key as $k | .vals as $vs |
+                        ($step[$k] // null) as $fv |
+                        ($vs | any(. as $v | $v == ($fv | tostring)))
+                    );
                 def preview:
                     if   .type == "reasoning"    then (.thought // "")
                     elif .type == "shell-output"  then (.stdout // "")
@@ -816,25 +840,22 @@ TAILHELP
                     elif .type == "merge"         then ("<- " + (.from_traj // ""))
                     else (.content // "")
                     end;
+                select(matches_filters($filters)) |
                 (.type // "unknown"),
-                (preview | if . == "" then "" else (split("\n") | if length > 1 then .[0] + "..." else .[0] end) end),
-                (.source // ""),
-                ((.ts // .timestamp // 0) | tostring),
-                (.step_id // ""),
-                (._traj_hex // "")
+                (preview | if . == "" then "-" else (split("\n") | if length > 1 then .[0] + "..." else .[0] end) end | gsub("\t"; " ")),
+                (.source // "-"),
+                ((.ts // .timestamp // "0") | tostring),
+                (.step_id // "-"),
+                (._traj_hex // "-")
             ' 2>/dev/null
         )
         [[ -n "$entry_type" ]] || return 0
 
-        # Apply type filter
-        if [[ -n "$filter_types" ]]; then
-            local match=0 t
-            IFS=',' read -ra _filter_arr <<< "$filter_types"
-            for t in "${_filter_arr[@]}"; do
-                [[ "$entry_type" == "$t" ]] && { match=1; break; }
-            done
-            [[ "$match" -eq 0 ]] && return 0
-        fi
+        # Normalize placeholders back to empty
+        [[ "$content" == "-" ]] && content=""
+        [[ "$source" == "-" ]] && source=""
+        [[ "$step_id" == "-" ]] && step_id=""
+        [[ "$traj_hex" == "-" ]] && traj_hex=""
 
         # Extract HH:MM:SS.mmm from timestamp
         local time_display="--:--:--.---"
@@ -884,18 +905,21 @@ TAILHELP
         if [[ "$format" -eq 1 ]]; then
             _format_line "$line"
         else
-            # Raw mode: still apply type filter if set
-            if [[ -n "$filter_types" ]]; then
-                local entry_type
-                entry_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
-                local match=0 t
-                IFS=',' read -ra _filter_arr <<< "$filter_types"
-                for t in "${_filter_arr[@]}"; do
-                    [[ "$entry_type" == "$t" ]] && { match=1; break; }
-                done
-                [[ "$match" -eq 0 ]] && return 0
+            # Raw mode: apply filters via jq if set
+            if [[ "$_filter_json" != "[]" ]]; then
+                printf '%s' "$line" | jq -c --argjson filters "$_filter_json" '
+                    def matches_filters($fs):
+                        . as $step |
+                        ($fs | length == 0) or all($fs[];
+                            .key as $k | .vals as $vs |
+                            ($step[$k] // null) as $fv |
+                            ($vs | any(. as $v | $v == ($fv | tostring)))
+                        );
+                    select(matches_filters($filters))
+                ' 2>/dev/null
+            else
+                printf '%s\n' "$line"
             fi
-            printf '%s\n' "$line"
         fi
     }
 
@@ -953,7 +977,7 @@ TAILHELP
 # ---------------------------------------------------------------------------
 
 cmd_search() {
-    local pattern="" field="all" case_flag="" context_lines=0 use_regex=0 traj_dir_opt="" traj_id_opt=""
+    local pattern="" field="all" case_flag="" context_lines=0 use_regex=0 traj_dir_opt="" traj_id_opt="" recursive=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --field)     field="${2:?--field requires a value}"; shift 2 ;;
@@ -962,6 +986,7 @@ cmd_search() {
             -i)          case_flag="-i"; shift ;;
             -C)          context_lines="${2:?-C requires a number}"; shift 2 ;;
             -E)          use_regex=1; shift ;;
+            -r|--recursive) recursive=1; shift ;;
             -*)          die "search: unknown option: $1" ;;
             *)
                 if [[ -z "$pattern" ]]; then
@@ -981,9 +1006,6 @@ cmd_search() {
     traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "search")
     [[ -f "$traj_file" ]] || die "search: trajectory file not found: $traj_file"
 
-    local blob_base
-    blob_base="$(dirname "$traj_file")"
-
     # Search all non-metadata fields by default, or specific field.
     local fields_to_search
     case "$field" in
@@ -999,39 +1021,59 @@ cmd_search() {
     [[ "$context_lines" -gt 0 ]] && grep_args+=(-C "$context_lines")
     grep_args+=(-n)  # line numbers
 
-    # Iterate over each row in the trajectory.
-    while IFS= read -r row; do
-        local step_id
-        step_id=$(printf '%s' "$row" | jq -r '.step_id // empty')
-        [[ -n "$step_id" ]] || continue
+    # Collect files to search
+    local _search_files
+    if [[ "$recursive" -eq 1 ]]; then
+        _search_files=$(_collect_recursive_files "$traj_file")
+    else
+        _search_files="$traj_file"
+    fi
 
-        for f in $fields_to_search; do
-            local content=""
+    while IFS= read -r _sf; do
+        [[ -f "$_sf" ]] || continue
+        local _traj_hex
+        _traj_hex=$(_parse_hex_id "$_sf")
+        local blob_base
+        blob_base="$(dirname "$_sf")"
 
-            # For stdout/stderr, check if there's a blob and use that for full search.
-            local ref_key="${f}_ref"
-            local ref_val
-            ref_val=$(printf '%s' "$row" | jq -r ".${ref_key} // empty" 2>/dev/null)
+        # Iterate over each row in the trajectory.
+        while IFS= read -r row; do
+            local step_id
+            step_id=$(printf '%s' "$row" | jq -r '.step_id // empty')
+            [[ -n "$step_id" ]] || continue
 
-            if [[ -n "$ref_val" ]] && [[ -f "$blob_base/$ref_val" ]]; then
-                content=$(cat "$blob_base/$ref_val")
-            else
-                content=$(printf '%s' "$row" | jq -r ".${f} // empty")
-            fi
+            for f in $fields_to_search; do
+                local content=""
 
-            [[ -n "$content" ]] || continue
+                # For stdout/stderr, check if there's a blob and use that for full search.
+                local ref_key="${f}_ref"
+                local ref_val
+                ref_val=$(printf '%s' "$row" | jq -r ".${ref_key} // empty" 2>/dev/null)
 
-            # Search the content.
-            local matches
-            matches=$(printf '%s\n' "$content" | grep "${grep_args[@]}" -- "$pattern" 2>/dev/null || true)
-            [[ -n "$matches" ]] || continue
+                if [[ -n "$ref_val" ]] && [[ -f "$blob_base/$ref_val" ]]; then
+                    content=$(cat "$blob_base/$ref_val")
+                else
+                    content=$(printf '%s' "$row" | jq -r ".${f} // empty")
+                fi
 
-            # Format output: <step>:<field>:<line_no>: <line>
-            while IFS= read -r match_line; do
-                printf '%s:%s:%s\n' "$step_id" "$f" "$match_line"
-            done <<< "$matches"
-        done
-    done < "$traj_file"
+                [[ -n "$content" ]] || continue
+
+                # Search the content.
+                local matches
+                matches=$(printf '%s\n' "$content" | grep "${grep_args[@]}" -- "$pattern" 2>/dev/null || true)
+                [[ -n "$matches" ]] || continue
+
+                # Format output: <traj_hex>:<step>:<field>:<match> or <step>:<field>:<match>
+                while IFS= read -r match_line; do
+                    if [[ "$recursive" -eq 1 ]]; then
+                        printf '%s:%s:%s:%s\n' "$_traj_hex" "$step_id" "$f" "$match_line"
+                    else
+                        printf '%s:%s:%s\n' "$step_id" "$f" "$match_line"
+                    fi
+                done <<< "$matches"
+            done
+        done < "$_sf"
+    done <<< "$_search_files"
 }
 
 # ---------------------------------------------------------------------------
@@ -1426,10 +1468,10 @@ cmd_root() {
         depth=$((depth + 1))
     done
 
-    # For directory-based trajectories (root.jsonl), print the directory name
+    # For directory-based trajectories (trajectory.jsonl), print the directory name
     local display
     display=$(basename "$current")
-    if [[ "$display" == "root.jsonl" ]]; then
+    if [[ "$display" == "trajectory.jsonl" ]]; then
         display=$(basename "$(dirname "$current")")
     fi
     printf '%s\n' "$display"
