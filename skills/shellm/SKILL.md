@@ -64,8 +64,8 @@ identity shell myagent                 # or: start a subshell
 
 | Script | Purpose |
 |--------|---------|
-| `traj` | Trajectory operations (single-file and tree). Uses `TRAJ_DIR` + `TRAJ_ID`. `traj new`, `traj append`, `traj tail`, `traj cat`, `traj fork`, `traj merge`, `traj show`, `traj filter`, `traj list`, `traj isroot`, `traj root`. `show` is unified: pass any ID (trajectory or step) and it searches all files in traj_dir. |
-| `context` | Reads traj, outputs a JSON messages array for `llm -M`. Maps step types to assistant/user roles. Key flags: `--traj_dir`, `--traj_id`, `--tail N`, `--head N`, `--max-bytes`, `--pin <step_id>`. |
+| `traj` | Trajectory operations (single-file and tree). Uses `TRAJ_DIR` + `TRAJ_ID`. `traj new`, `traj append`, `traj tail`, `traj cat`, `traj fork`, `traj merge`, `traj show`, `traj list`, `traj isroot`, `traj root`. `show` is unified: pass any ID (trajectory or step) and it searches all files in traj_dir. |
+| `context` | Reads traj, outputs a JSON messages array for `llm -M`. Maps step types to assistant/user roles. Key flags: `--traj_dir`, `--tail N`, `--head N`, `--max-bytes`, `--pin <step_id>`. |
 
 ### File utilities
 
@@ -97,7 +97,10 @@ These are set by `source .identities/<name>/activate`:
 | `SKILLS_KERNEL_DIR` | `$IDENTITY_DIR/kernel` |
 | `TRAJ_DIR` | `$IDENTITY_DIR/trajectories` |
 | `TRAJ_ID` | UUID of root trajectory |
-| `SHELLM_HOME` | `$IDENTITY_DIR/.shellm` |
+| `SHELLM_TRAJ_DIR` | Trajectory directory (default `$HOME/.shellm/trajectories`) |
+| `SHELLM_ENVS_DIR` | Env/container state directory |
+| `SHELLM_WORKDIRS_DIR` | Working directories base |
+| `SHELLM_BROKER_DIR` | Docker broker state directory |
 | `THINK_MODEL` | Model for think cycles |
 | `THINK_TICK_INTERVAL` | Seconds between autonomous ticks |
 

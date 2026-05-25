@@ -72,29 +72,22 @@ frontmatter_field() {
 # Resolve a name/prefix/id to a memory file path.
 # Matches hex id, exact filename, then prefix/substring on slug portion.
 find_memory() {
-    local name="$1"
+    local id="$1"
 
-    # Hex id match (8-char hex prefix in filename)
-    if [[ "$name" =~ ^[0-9a-f]{4,8}$ ]]; then
+    # Hex id match (4-8 char hex prefix in filename)
+    if [[ "$id" =~ ^[0-9a-f]{4,8}$ ]]; then
         local id_match
-        id_match=$(ls -1 "$MEM_DIR"/*.md 2>/dev/null | xargs -I{} basename {} .md | grep "_${name}" | head -2) || true
+        id_match=$(ls -1 "$MEM_DIR"/*.md 2>/dev/null | xargs -I{} basename {} .md | grep "_${id}" | head -2) || true
         local id_count
         id_count=$(printf '%s' "$id_match" | grep -c . 2>/dev/null) || id_count=0
         [[ "$id_count" -eq 1 ]] && { echo "$MEM_DIR/${id_match}.md"; return; }
+        [[ "$id_count" -gt 1 ]] && die "Ambiguous: '$id' matches multiple memories"
     fi
 
-    # Exact match (with .md)
-    [[ -f "$MEM_DIR/${name}.md" ]] && { echo "$MEM_DIR/${name}.md"; return; }
+    # Exact filename match
+    [[ -f "$MEM_DIR/${id}.md" ]] && { echo "$MEM_DIR/${id}.md"; return; }
 
-    # Prefix/substring match
-    local matches
-    matches=$(ls -1 "$MEM_DIR"/*.md 2>/dev/null | xargs -I{} basename {} .md | grep "${name}" | head -2) || true
-    local count
-    count=$(printf '%s' "$matches" | grep -c . 2>/dev/null) || count=0
-
-    [[ "$count" -eq 1 ]] && { echo "$MEM_DIR/${matches}.md"; return; }
-    [[ "$count" -gt 1 ]] && die "Ambiguous: '$name' matches multiple memories"
-    die "Memory not found: $name"
+    die "Memory not found: $id (use hex ID prefix from 'mem list')"
 }
 
 # Parse filename into components: timestamp, hex id, slug
@@ -135,7 +128,7 @@ action_add() {
     slug=$(slugify "$text")
     filename="${timestamp}_${hex}_${slug}"
     summary=$(printf '%s' "$text" | head -1 | cut -c1-80)
-    created=$(date +%Y-%m-%dT%H:%M:%S)
+    created=$(date +"%Y-%m-%d %H:%M:%S")
 
     cat > "$MEM_DIR/${filename}.md" << EOF
 ---
@@ -248,6 +241,14 @@ action_list() {
     done <<< "$files"
 }
 
+action_types() {
+    ls -1 "$MEM_DIR"/*.md 2>/dev/null | while IFS= read -r f; do
+        frontmatter_field "$f" "type"
+    done | sort | uniq -c | sort -rn | while read -r count type; do
+        printf '%4d  %s\n' "$count" "$type"
+    done
+}
+
 action_show() {
     local name="$1"
     local file
@@ -270,6 +271,15 @@ action_edit() {
     local file
     file=$(find_memory "$name")
 
+    local slug=""
+    # Parse --slug flag
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --slug) slug="${2:?--slug requires TEXT}"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
     local text="$*"
     if [[ -z "$text" ]]; then
         text=$(cat)
@@ -277,11 +287,11 @@ action_edit() {
     fi
 
     local now
-    now=$(date +%Y-%m-%dT%H:%M:%S)
+    now=$(date +"%Y-%m-%d %H:%M:%S")
 
     # Extract frontmatter fields
     local summary type created id
-    summary=$(frontmatter_field "$file" "summary")
+    summary=$(printf '%s' "$text" | head -1 | head -c 80)
     type=$(frontmatter_field "$file" "type")
     created=$(frontmatter_field "$file" "created")
     id=$(frontmatter_field "$file" "id")
@@ -320,6 +330,23 @@ $updated_block
 $text
 EOF
 
+    # Auto-update slug in filename
+    local base
+    base=$(basename "$file" .md)
+    parse_filename "$base"
+    local new_slug
+    if [[ -n "$slug" ]]; then
+        new_slug="$slug"
+    else
+        # Generate slug from first 80 chars of new text
+        new_slug=$(printf '%s' "$text" | head -c 80 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+    fi
+    if [[ -n "$new_slug" && "$new_slug" != "$_pf_slug" ]]; then
+        local new_file="$MEM_DIR/${_pf_ts}_${_pf_id}_${new_slug}.md"
+        mv "$file" "$new_file"
+        file="$new_file"
+    fi
+
     debug "Updated: $file"
     echo "Updated: $(basename "$file" .md)" >&2
 }
@@ -336,9 +363,10 @@ Usage:
   mem add [--type TYPE] <text>   Add a memory (or pipe text via stdin)
   mem search <query>             Semantic search via shellm
   mem list [options] [N]         List memories (last N if given)
-  mem show <name>                Show a memory's full contents
-  mem forget <name>              Delete a memory by name/prefix/id
-  mem edit <name> <text>         Update a memory's body (or pipe via stdin)
+  mem types                      List memory types with counts
+  mem show <id>                  Show a memory's full contents
+  mem forget <id>                Delete a memory by hex ID
+  mem edit <id> [--slug SLUG] <text>  Update body (or pipe via stdin)
 
 List options:
   -s, --short        Concise one-line-per-memory view
@@ -420,16 +448,19 @@ main() {
         list)
             action_list "$@"
             ;;
+        types)
+            action_types
+            ;;
         show)
-            [[ $# -lt 1 ]] && die "Usage: mem show <name>"
+            [[ $# -lt 1 ]] && die "Usage: mem show <id>"
             action_show "$1"
             ;;
         forget)
-            [[ $# -lt 1 ]] && die "Usage: mem forget <name>"
+            [[ $# -lt 1 ]] && die "Usage: mem forget <id>"
             action_forget "$1"
             ;;
         edit)
-            [[ $# -lt 1 ]] && die "Usage: mem edit <name> [text]"
+            [[ $# -lt 1 ]] && die "Usage: mem edit <id> [--slug SLUG] [text]"
             local name="$1"; shift
             action_edit "$name" "$@"
             ;;

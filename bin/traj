@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # traj — Trajectory operations (single-file and tree).
-# Operates on a .jsonl trajectory file identified by --traj_dir + --traj_id
+# Operates on a .jsonl trajectory file identified by --traj_dir + positional ID
 # or $TRAJ_DIR + $TRAJ_ID env vars.
 #
 # A trajectory's ID is the UUID step_id of its first step. Filenames embed the
@@ -28,12 +28,12 @@ usage() {
 Usage: traj <command> [options]
 
 Trajectory is identified by (in priority order):
-  --traj_dir DIR --traj_id ID   Directory + traj ID (UUID or hex prefix).
+  --traj_dir DIR <ID>           Directory + traj ID (UUID or hex prefix).
   $TRAJ_DIR + $TRAJ_ID          Env vars for directory + ID.
 
 Commands:
   All commands accept [ID] as an optional positional argument (trajectory ID,
-  UUID, or hex prefix). Equivalent to --traj_id ID. Falls back to $TRAJ_ID.
+  UUID, or hex prefix). Falls back to $TRAJ_ID.
 
   new [--traj_dir DIR] [--slug TEXT] [--field key=val ...]
                             Create a new trajectory. Outputs two lines:
@@ -45,9 +45,10 @@ Commands:
                             --field flags (must include --field type=X).
                             Assigns UUID step_id, spills large fields to blobs.
 
-  fork <child_traj_id> [ID]
+  fork [ID] [--child CHILD_ID] [--slug TEXT]
                             Create a fork point: append a fork step to the
-                            current trajectory. Prints fork step_id.
+                            current trajectory. Auto-creates child trajectory
+                            if --child not provided. Prints child traj ID.
 
   merge <child_traj_id> [ID] [--content TEXT]
                             Merge a child back: reads the last step of
@@ -81,9 +82,6 @@ Commands:
                             --filter field=val  Filter steps by field value.
                             -r/--recursive includes sub-trajectory steps.
                             --raw for JSONL output (default when piped).
-
-  filter [ID] --type T1,T2 [--fields F1,F2,...]
-                            Output steps matching type filter as JSONL.
 
   exists [ID]               Exit 0 if trajectory exists and has steps.
 
@@ -213,7 +211,7 @@ require_traj_file() {
         return
     fi
 
-    die "$cmd_name: no trajectory specified. Use --traj_dir + --traj_id, or set TRAJ_DIR + TRAJ_ID env vars."
+    die "$cmd_name: no trajectory specified. Use --traj_dir DIR <ID>, or set TRAJ_DIR + TRAJ_ID env vars."
 }
 
 # Extract the 8-char hex ID from a trajectory filename, or return the basename.
@@ -410,7 +408,6 @@ cmd_append() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             --field)     fields+=("${2:?--field requires key=val}"); shift 2 ;;
             -*)          die "append: unknown option: $1" ;;
             *)
@@ -714,7 +711,6 @@ cmd_tail() {
             -n)          n="${2:?-n requires a number}"; shift 2 ;;
             -f)          follow=1; shift ;;
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             --raw)       raw=1; shift ;;
             --format)    force_format=1; shift ;;
             --no-color)  use_color=0; shift ;;
@@ -730,7 +726,7 @@ Usage:
   traj tail [ID] -r                  Include sub-trajectory steps
 
 Options:
-  [ID]               Trajectory ID (positional, or --traj_id)
+  [ID]               Trajectory ID (positional)
   -n N               Last N steps (default: 10)
   -f                 Follow new steps as they arrive
   -r, --recursive    Include steps from all sub-trajectories, interleaved
@@ -992,7 +988,6 @@ cmd_search() {
         case "$1" in
             --field)     field="${2:?--field requires a value}"; shift 2 ;;
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             -i)          case_flag="-i"; shift ;;
             -C)          context_lines="${2:?-C requires a number}"; shift 2 ;;
             -E)          use_regex=1; shift ;;
@@ -1091,16 +1086,15 @@ cmd_search() {
 # ---------------------------------------------------------------------------
 
 cmd_fork() {
-    local child_id="" traj_dir_opt="" traj_id_opt=""
+    local child_id="" traj_dir_opt="" traj_id_opt="" slug=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
+            --child)     child_id="${2:?--child requires CHILD_ID}"; shift 2 ;;
+            --slug)      slug="${2:?--slug requires TEXT}"; shift 2 ;;
             -*)          die "fork: unknown option: $1" ;;
             *)
-                if [[ -z "$child_id" ]]; then
-                    child_id="$1"
-                elif [[ -z "$traj_id_opt" ]]; then
+                if [[ -z "$traj_id_opt" ]]; then
                     traj_id_opt="$1"
                 else
                     die "fork: unexpected argument: $1"
@@ -1109,7 +1103,6 @@ cmd_fork() {
                 ;;
         esac
     done
-    [[ -n "$child_id" ]] || die "fork requires <child_traj_id>"
 
     # Resolve parent traj file to compute relative path to child
     local parent_file
@@ -1117,11 +1110,24 @@ cmd_fork() {
     local parent_dir
     parent_dir=$(dirname "$parent_file")
 
+    # Auto-create child trajectory if no --child provided
+    if [[ -z "$child_id" ]]; then
+        local -a new_args=(--traj_dir "$parent_dir")
+        [[ -n "$slug" ]] && new_args+=(--slug "$slug")
+        new_args+=(--field "parent=$(head -1 "$parent_file" | jq -r '.step_id')")
+        local new_output
+        new_output=$(cmd_new "${new_args[@]}")
+        child_id=$(head -1 <<< "$new_output")
+    fi
+
     # Resolve child traj file for the relative ref
     local search_dir="${TRAJ_DIR:-$parent_dir}"
     local child_ref=""
     local child_file
     child_file=$(_resolve_traj_id "$search_dir" "$child_id" 2>/dev/null) || true
+    if [[ -z "$child_file" ]]; then
+        child_file=$(_resolve_traj_id "$parent_dir" "$child_id" 2>/dev/null) || true
+    fi
     if [[ -n "$child_file" && -f "$child_file" ]]; then
         child_ref=$(python3 -c "import os.path; print(os.path.relpath('$child_file', '$parent_dir'))" 2>/dev/null) || true
     fi
@@ -1134,8 +1140,11 @@ cmd_fork() {
     # Append fork step to parent
     local -a append_args=()
     [[ -n "$traj_dir_opt" ]] && append_args+=(--traj_dir "$traj_dir_opt")
-    [[ -n "$traj_id_opt" ]] && append_args+=(--traj_id "$traj_id_opt")
+    [[ -n "$traj_id_opt" ]] && append_args+=("$traj_id_opt")
     printf '%s' "$fork_json" | cmd_append "${append_args[@]+"${append_args[@]}"}"
+
+    # Output the child traj ID (useful for callers)
+    printf '%s\n' "$child_id"
 }
 
 # ---------------------------------------------------------------------------
@@ -1148,7 +1157,6 @@ cmd_merge() {
         case "$1" in
             --content)   content="${2:?--content requires TEXT}"; shift 2 ;;
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             -*)          die "merge: unknown option: $1" ;;
             *)
                 if [[ -z "$from_traj" ]]; then
@@ -1198,7 +1206,7 @@ cmd_merge() {
     # Append merge step to parent.
     local -a append_args=()
     [[ -n "$traj_dir_opt" ]] && append_args+=(--traj_dir "$traj_dir_opt")
-    [[ -n "$traj_id_opt" ]] && append_args+=(--traj_id "$traj_id_opt")
+    [[ -n "$traj_id_opt" ]] && append_args+=("$traj_id_opt")
     printf '%s' "$merge_json" | cmd_append "${append_args[@]+"${append_args[@]}"}"
 }
 
@@ -1211,7 +1219,6 @@ cmd_count() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             -*)          die "count: unknown option: $1" ;;
             *)
                 if [[ -z "$traj_id_opt" ]]; then
@@ -1244,7 +1251,6 @@ cmd_last() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             --field)     field="${2:?--field requires KEY}"; shift 2 ;;
             -*)          die "last: unknown option: $1" ;;
             *)
@@ -1284,7 +1290,6 @@ cmd_cat() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             --raw)       raw=1; shift ;;
             --format)    force_format=1; shift ;;
             --no-color)  use_color=0; shift ;;
@@ -1300,7 +1305,7 @@ Usage:
   traj cat [ID] -r                 Include sub-trajectory steps
 
 Options:
-  [ID]               Trajectory ID (positional, or --traj_id)
+  [ID]               Trajectory ID (positional)
   -r, --recursive    Include steps from all sub-trajectories
   --traj_dir DIR     Trajectory directory
   --filter field=val Filter steps (e.g. --filter type=thought,merge).
@@ -1528,57 +1533,6 @@ CATHELP
     fi
 }
 
-# ---------------------------------------------------------------------------
-# filter — Output steps matching type filter as JSONL
-# ---------------------------------------------------------------------------
-
-cmd_filter() {
-    local traj_dir_opt="" traj_id_opt="" filter_types="" fields=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
-            --type)      filter_types="${2:?--type requires T1,T2,...}"; shift 2 ;;
-            --fields)    fields="${2:?--fields requires F1,F2,...}"; shift 2 ;;
-            -*)          die "filter: unknown option: $1" ;;
-            *)
-                if [[ -z "$traj_id_opt" ]]; then
-                    traj_id_opt="$1"
-                else
-                    die "filter: unexpected argument: $1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    [[ -n "$filter_types" ]] || die "filter requires --type T1,T2,..."
-
-    local traj_file
-    traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "filter")
-    [[ -f "$traj_file" ]] || return 0
-
-    # Build jq filter for types
-    local jq_type_filter=""
-    IFS=',' read -ra _types <<< "$filter_types"
-    for _t in "${_types[@]}"; do
-        [[ -n "$jq_type_filter" ]] && jq_type_filter+=" or "
-        jq_type_filter+=".type == \"$_t\""
-    done
-
-    if [[ -n "$fields" ]]; then
-        local jq_proj="{"
-        local first=1
-        IFS=',' read -ra _fields <<< "$fields"
-        for _f in "${_fields[@]}"; do
-            [[ "$first" -eq 1 ]] && first=0 || jq_proj+=","
-            jq_proj+="\"${_f}\": .${_f}"
-        done
-        jq_proj+="}"
-        jq -c "select($jq_type_filter) | $jq_proj" "$traj_file"
-    else
-        jq -c "select($jq_type_filter)" "$traj_file"
-    fi
-}
 
 # ---------------------------------------------------------------------------
 # exists — Exit 0 if trajectory exists with steps, 1 otherwise
@@ -1589,7 +1543,6 @@ cmd_exists() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             -*)          die "exists: unknown option: $1" ;;
             *)
                 if [[ -z "$traj_id_opt" ]]; then
@@ -1631,7 +1584,6 @@ cmd_isroot() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             -*)          die "isroot: unknown option: $1" ;;
             *)
                 if [[ -z "$traj_id_opt" ]]; then
@@ -1658,7 +1610,6 @@ cmd_root() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             -*)          die "root: unknown option: $1" ;;
             *)
                 if [[ -z "$traj_id_opt" ]]; then
@@ -1845,7 +1796,6 @@ cmd_list() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)   traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
-            --traj_id)    traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
             --parents)    parents_depth="${2:?--parents requires N or 'all'}"; shift 2 ;;
             --children)   children_depth="${2:?--children requires N or 'all'}"; children_explicit=1; shift 2 ;;
             --steps)      show_steps=1; shift ;;
@@ -2075,7 +2025,6 @@ case "$cmd" in
     last)     cmd_last "$@" ;;
     cat)      cmd_cat "$@" ;;
     dump)     cmd_cat "$@" ;;  # backwards compat alias
-    filter)   cmd_filter "$@" ;;
     exists)   cmd_exists "$@" ;;
     list)     cmd_list "$@" ;;
     isroot)   cmd_isroot "$@" ;;

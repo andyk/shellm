@@ -212,6 +212,53 @@ redact_sensitive() {
 # Trajectory helpers
 # ---------------------------------------------------------------------------
 
+# Resolve a traj_id to its file path within traj_dir.
+# Mirrors traj's _resolve_traj_id (which is internal to bin/traj).
+_resolve_traj_id() {
+    local traj_dir="$1" traj_id="$2"
+
+    # 1. Exact path
+    if [[ -f "$traj_dir/$traj_id" ]]; then
+        printf '%s\n' "$traj_dir/$traj_id"
+        return
+    fi
+
+    # 2. Directory-based: $traj_dir/$traj_id/trajectory.jsonl
+    if [[ -f "$traj_dir/$traj_id/trajectory.jsonl" ]]; then
+        printf '%s\n' "$traj_dir/$traj_id/trajectory.jsonl"
+        return
+    fi
+
+    # 3. UUID handling: extract first segment as hex prefix for glob matching.
+    local hex_prefix="$traj_id"
+    if [[ "$traj_id" == *-*-*-*-* ]]; then
+        hex_prefix="${traj_id%%-*}"
+    fi
+
+    # 4. Directory glob: find directories named <hex_prefix>-*
+    local match
+    match=$(find "$traj_dir" -type d -name "${hex_prefix}-*" 2>/dev/null | head -1)
+    if [[ -n "$match" && -f "$match/trajectory.jsonl" ]]; then
+        printf '%s\n' "$match/trajectory.jsonl"
+        return
+    fi
+
+    # 5. Legacy .jsonl suffix
+    if [[ "$traj_id" != *.jsonl && -f "$traj_dir/${traj_id}.jsonl" ]]; then
+        printf '%s\n' "$traj_dir/${traj_id}.jsonl"
+        return
+    fi
+
+    # 6. Legacy flat file glob: *_<hex_prefix>_*.jsonl
+    match=$(find "$traj_dir" -maxdepth 1 -name "*_${hex_prefix}_*.jsonl" -not -path '*/blobs/*' 2>/dev/null | head -1)
+    if [[ -n "$match" ]]; then
+        printf '%s\n' "$match"
+        return
+    fi
+
+    return 1
+}
+
 _shellm_time() {
     date +%s
 }
@@ -580,6 +627,11 @@ env_metadata_matches() {
     _stored_var_mounts="${_stored_var_mounts%%$'\n'}"
     [[ "$_expected_var_mounts" == "$_stored_var_mounts" ]] || return 1
 
+    # Workdirs mount must match so the container can access new run workdirs
+    local stored_workdirs_dir
+    stored_workdirs_dir=$(docker_metadata_value "$env_name" workdirs_dir)
+    [[ "$stored_workdirs_dir" == "$SHELLM_WORKDIRS_DIR" ]] || return 1
+
     return 0
 }
 
@@ -946,6 +998,9 @@ env_register() {
 
     # Save --var directory mounts for reattach validation
     _compute_var_mounts > "$ws_dir/var_mounts"
+
+    # Save workdirs dir so reattach can verify the mount matches
+    printf '%s\n' "$SHELLM_WORKDIRS_DIR" > "$ws_dir/workdirs_dir"
 }
 
 # Register a local (non-docker) env.
@@ -1236,7 +1291,7 @@ Monitor running sub-runs via their trajectory:
 # List child trajectories
 traj list --children all
 # Inspect a sub-run's progress
-traj tail --traj_dir "$TRAJ_DIR" --traj_id "<child-traj-id>" -n 5
+traj tail --traj_dir "$TRAJ_DIR" "<child-traj-id>" -n 5
 ```
 
 ## Never block — background long-running work
@@ -1465,7 +1520,7 @@ ${combined}"
         --arg tldr "${tldr:-(summary generation failed)}" \
         --arg full "$full_summary" \
         '{type:"run-summary", tldr:$tldr, full_summary:$full}')
-    printf '%s' "$summary_json" | traj append --traj_dir "$traj_dir" --traj_id "$traj_id" >/dev/null 2>/dev/null || true
+    printf '%s' "$summary_json" | traj append --traj_dir "$traj_dir" "$traj_id" >/dev/null 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1502,14 +1557,14 @@ run_loop() {
         fi
 
         # Validate trajectory exists
-        traj exists --traj_dir "$_run_traj_dir" --traj_id "$_resume_traj" 2>/dev/null \
+        traj exists --traj_dir "$_run_traj_dir" "$_resume_traj" 2>/dev/null \
             || die "Cannot find trajectory: $_resume_traj"
 
         _run_traj_id="$_resume_traj"
 
         # Extract workdir and env from the shellm-run step
         local _orig_meta
-        _orig_meta=$(traj tail -n 50 --raw --traj_dir "$_run_traj_dir" --traj_id "$_resume_traj" \
+        _orig_meta=$(traj tail -n 50 --raw --traj_dir "$_run_traj_dir" "$_resume_traj" \
             | jq -c 'select(.type=="shellm-run")' 2>/dev/null | head -1)
         local _orig_workdir _orig_env
         _orig_workdir=$(printf '%s' "$_orig_meta" | jq -r '.workdir // empty')
@@ -1547,7 +1602,7 @@ run_loop() {
 
         # If this is a child run, record a fork step in the parent trajectory
         if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-            traj fork "$_run_traj_id" --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>&1 || true
+            traj fork "$_run_traj_id" --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>&1 || true
         fi
     fi
 
@@ -1713,7 +1768,7 @@ run_loop() {
             --argjson ctx "$_ctx_files_json" \
             --argjson env "$_env_json" \
             '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env}')
-        printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+        printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
 
         # Kick off async run-summary generation (background)
         local stdin_ctx_file=""
@@ -1728,11 +1783,11 @@ run_loop() {
 
         # Write initial prompt to trajectory
         printf '%s' "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" \
-            | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+            | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
     elif [[ -n "$prompt" ]]; then
         # Resuming with new prompt — append as feedback step
         printf '%s' "$(jq -n --arg p "$prompt" '{type:"feedback",content:$p}')" \
-            | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+            | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
     fi
 
     # --- Cleanup trap ---
@@ -1801,7 +1856,7 @@ run_loop() {
         progress "Iteration $iter_label — calling Claude API..."
 
         # Build model context from trajectory as multi-turn messages
-        messages_json=$(context --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" \
+        messages_json=$(context --traj_dir "$_run_traj_dir" "$_run_traj_id" \
             --assistant-types reasoning,final \
             --user-types prompt,shell-output,feedback \
             --exclude-types sub-run,shellm-run,run-summary 2>/dev/null) || messages_json='[]'
@@ -1876,7 +1931,7 @@ run_loop() {
             progress "No code block found — returning response as answer"
             # Record as a final step with no cmd
             printf '%s' "$(jq -n --arg t "$reasoning" --arg f "$response" '{type:"final",thought:$t,content:$f}')" \
-                | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+                | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
             echo "$response"
             return 0
         fi
@@ -2096,21 +2151,21 @@ exit \$__shellm_rc
                 --arg cmd "$code" \
                 --arg content "$final_answer" \
                 '{type:"final", thought:$thought, cmd:$cmd, content:$content}')" \
-                | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+                | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
             redact_sensitive "$final_answer"
             [[ "$QUIET" -eq 0 ]] && echo >&2
             progress_dim "Trajectory: $_run_traj_id"
             # Merge back into parent's traj
             if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
                 traj merge "$_run_traj_id" \
-                    --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" \
+                    --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" \
                     --content "$(printf '%s' "$final_answer")" >/dev/null 2>/dev/null || true
             fi
             return 0
         fi
 
         # Record reasoning step
-        printf '%s' "$reasoning_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+        printf '%s' "$reasoning_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
 
         # Record shell-output step (user role in multi-turn)
         local output_json
@@ -2137,12 +2192,12 @@ exit \$__shellm_rc
 
         # Also record as feedback step if timed out
         if [[ "$timed_out" -eq 1 ]]; then
-            printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+            printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
             local feedback_json
             feedback_json=$(jq -n --arg content "$feedback" '{type:"feedback", content:$content}')
-            printf '%s' "$feedback_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+            printf '%s' "$feedback_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
         else
-            printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" --traj_id "$_run_traj_id" >/dev/null
+            printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
         fi
     done
 
@@ -2151,7 +2206,7 @@ exit \$__shellm_rc
     # Merge back into parent's traj (even on failure)
     if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
         traj merge "$_run_traj_id" \
-            --traj_dir "$_run_traj_dir" --traj_id "$_SHELLM_PARENT_TRAJ_ID" \
+            --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" \
             --content "(max iterations reached)" >/dev/null 2>/dev/null || true
     fi
     return 1

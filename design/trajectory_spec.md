@@ -35,9 +35,9 @@ A trajectory is located by two values:
 | Name | Positional | Flag | Env var | Purpose |
 |------|------------|------|---------|---------|
 | traj_dir | — | `--traj_dir` | `$TRAJ_DIR` | Root trajectories directory |
-| traj_id | `[ID]` | `--traj_id` | `$TRAJ_ID` | UUID (or 8-char hex prefix) of the trajectory |
+| traj_id | `[ID]` | — | `$TRAJ_ID` | UUID (or 8-char hex prefix) of the trajectory |
 
-All subcommands accept `[ID]` as an optional positional argument, equivalent to `--traj_id ID`. Resolution order: positional / flags override env vars.
+All subcommands accept `[ID]` as an optional positional argument. Falls back to `$TRAJ_ID`. Resolution order: positional > env var.
 
 The resolver (`_resolve_traj_id`) accepts:
 1. An exact relative path (e.g. `729eb4ae-root/trajectory.jsonl`)
@@ -345,7 +345,7 @@ The `run-summary` step is generated asynchronously and may land anywhere after t
 traj <command> [ID] [options]
 ```
 
-All commands accept `[ID]` as an optional positional argument (trajectory ID, UUID, or 8-char hex prefix). Equivalent to `--traj_id ID`. Falls back to `$TRAJ_ID`. All commands also accept `--traj_dir DIR` and `--traj_id ID` as explicit flags.
+All commands accept `[ID]` as an optional positional argument (trajectory ID, UUID, or 8-char hex prefix). Falls back to `$TRAJ_ID`. All commands also accept `--traj_dir DIR`.
 
 | Command | Syntax | Description |
 |---------|--------|-------------|
@@ -359,7 +359,6 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 | `count` | `count [ID]` | Print step count. |
 | `last` | `last [ID] [--field KEY]` | Print the last step. `--field` extracts one field. |
 | `cat` | `cat [ID] [--filter F] [-r] [--raw]` | Output all steps (formatted or JSONL). |
-| `filter` | `filter [ID] --type T1,T2 [--fields F1,F2,...]` | Output steps matching type filter. |
 | `exists` | `exists [ID]` | Exit 0 if trajectory exists and has steps. |
 | `list` | `list [ID] [--parents N\|all] [--children N\|all] [--steps] [--json]` | List tree as ASCII. `--steps` expands inline. |
 | `isroot` | `isroot [ID]` | Exit 0 if trajectory has no parent. |
