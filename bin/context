@@ -240,7 +240,7 @@ is_meta_key() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 1: Load trajectory rows via traj dump
+# Phase 1: Load trajectory rows via traj cat
 # ---------------------------------------------------------------------------
 
 ALL_ROWS=()

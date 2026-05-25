@@ -64,7 +64,7 @@ identity shell myagent                 # or: start a subshell
 
 | Script | Purpose |
 |--------|---------|
-| `traj` | Trajectory operations (single-file and tree). Uses `TRAJ_DIR` + `TRAJ_ID`. `traj new`, `traj append`, `traj tail`, `traj fork`, `traj merge`, `traj show`, `traj filter`, `traj list`, `traj isroot`, `traj root`. `show` is unified: pass any ID (trajectory or step) and it searches all files in traj_dir. |
+| `traj` | Trajectory operations (single-file and tree). Uses `TRAJ_DIR` + `TRAJ_ID`. `traj new`, `traj append`, `traj tail`, `traj cat`, `traj fork`, `traj merge`, `traj show`, `traj filter`, `traj list`, `traj isroot`, `traj root`. `show` is unified: pass any ID (trajectory or step) and it searches all files in traj_dir. |
 | `context` | Reads traj, outputs a JSON messages array for `llm -M`. Maps step types to assistant/user roles. Key flags: `--traj_dir`, `--traj_id`, `--tail N`, `--head N`, `--max-bytes`, `--pin <step_id>`. |
 
 ### File utilities

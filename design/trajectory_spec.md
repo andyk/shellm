@@ -358,7 +358,7 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 | `search` | `search <pattern> [ID] [--field F] [-i] [-C N] [-E]` | Search step fields for a pattern. |
 | `count` | `count [ID]` | Print step count. |
 | `last` | `last [ID] [--field KEY]` | Print the last step. `--field` extracts one field. |
-| `dump` | `dump [ID] [--fields F1,F2,...]` | Output all steps as JSONL. |
+| `cat` | `cat [ID] [--filter F] [-r] [--raw]` | Output all steps (formatted or JSONL). |
 | `filter` | `filter [ID] --type T1,T2 [--fields F1,F2,...]` | Output steps matching type filter. |
 | `exists` | `exists [ID]` | Exit 0 if trajectory exists and has steps. |
 | `list` | `list [ID] [--parents N\|all] [--children N\|all] [--steps] [--json]` | List tree as ASCII. `--steps` expands inline. |

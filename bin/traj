@@ -76,8 +76,11 @@ Commands:
   last [ID] [--field KEY]   Print the last step as JSON. --field KEY extracts
                             a single field value.
 
-  dump [ID] [--fields F1,F2,...]
+  cat [ID] [--filter F] [-r] [--raw]
                             Output all steps as JSONL to stdout.
+                            --filter field=val  Filter steps by field value.
+                            -r/--recursive includes sub-trajectory steps.
+                            --raw for JSONL output (default when piped).
 
   filter [ID] --type T1,T2 [--fields F1,F2,...]
                             Output steps matching type filter as JSONL.
@@ -1265,22 +1268,53 @@ cmd_last() {
 }
 
 # ---------------------------------------------------------------------------
-# dump — Output all steps as JSONL to stdout
+# cat — Output all steps (formatted or JSONL)
 # ---------------------------------------------------------------------------
 
-cmd_dump() {
-    local traj_dir_opt="" traj_id_opt="" fields=""
+cmd_cat() {
+    local traj_dir_opt="" traj_id_opt="" raw=0 force_format=0 use_color=-1 recursive=0
+    local -a filters=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
             --traj_id)   traj_id_opt="${2:?--traj_id requires ID}"; shift 2 ;;
-            --fields)    fields="${2:?--fields requires F1,F2,...}"; shift 2 ;;
-            -*)          die "dump: unknown option: $1" ;;
+            --raw)       raw=1; shift ;;
+            --format)    force_format=1; shift ;;
+            --no-color)  use_color=0; shift ;;
+            --filter)    filters+=("${2:?--filter requires field=value}"); shift 2 ;;
+            -r|--recursive) recursive=1; shift ;;
+            -h|--help)
+                cat <<'CATHELP'
+traj cat — Output all trajectory steps
+
+Usage:
+  traj cat [ID]                    Output all steps
+  traj cat [ID] --filter field=val Filter steps
+  traj cat [ID] -r                 Include sub-trajectory steps
+
+Options:
+  [ID]               Trajectory ID (positional, or --traj_id)
+  -r, --recursive    Include steps from all sub-trajectories
+  --traj_dir DIR     Trajectory directory
+  --filter field=val Filter steps (e.g. --filter type=thought,merge).
+                     Multiple --filter flags are AND'd.
+                     Comma-separated values within a filter are OR'd.
+  --raw              Raw JSONL (default when piped)
+  --format           Force formatted output (even when piped)
+  --no-color         Disable ANSI colors
+  -h, --help         Show this help
+
+Environment:
+  TRAJ_DIR + TRAJ_ID   Default trajectory
+CATHELP
+                return 0
+                ;;
+            -*)  die "cat: unknown option: $1" ;;
             *)
                 if [[ -z "$traj_id_opt" ]]; then
                     traj_id_opt="$1"
                 else
-                    die "dump: unexpected argument: $1"
+                    die "cat: unexpected argument: $1"
                 fi
                 shift
                 ;;
@@ -1288,23 +1322,195 @@ cmd_dump() {
     done
 
     local traj_file
-    traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "dump")
+    traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "cat")
 
     [[ -f "$traj_file" ]] || return 0
 
-    if [[ -n "$fields" ]]; then
-        # Build jq projection: {field1: .field1, field2: .field2, ...}
-        local jq_proj="{"
-        local first=1
-        IFS=',' read -ra _fields <<< "$fields"
-        for _f in "${_fields[@]}"; do
-            [[ "$first" -eq 1 ]] && first=0 || jq_proj+=","
-            jq_proj+="\"${_f}\": .${_f}"
-        done
-        jq_proj+="}"
-        jq -c "$jq_proj" "$traj_file"
+    # Build filter JSON array: [{key:"field", vals:["v1","v2"]}, ...]
+    local _filter_json='[]'
+    local _f
+    for _f in "${filters[@]+"${filters[@]}"}"; do
+        local _fk="${_f%%=*}" _fv="${_f#*=}"
+        _filter_json=$(printf '%s' "$_filter_json" | jq -c --arg k "$_fk" --arg v "$_fv" \
+            '. + [{key: $k, vals: ($v | split(","))}]')
+    done
+
+    # Auto-detect formatting: format on TTY, raw when piped
+    local format=1
+    if [[ "$raw" -eq 1 ]]; then
+        format=0
+    elif [[ "$force_format" -eq 1 ]]; then
+        format=1
+    elif [[ ! -t 1 ]]; then
+        format=0
+    fi
+
+    # Auto-detect color
+    if [[ "$use_color" -eq -1 ]]; then
+        if [[ "$format" -eq 1 && -t 1 ]]; then
+            use_color=1
+        else
+            use_color=0
+        fi
+    fi
+
+    # Color palette
+    local c_reset="" c_dim=""
+    local c_thought="" c_action="" c_observation="" c_human="" c_agent="" c_tp="" c_shell="" c_meta=""
+    if [[ "$use_color" -eq 1 ]]; then
+        c_reset=$'\033[0m'
+        c_dim=$'\033[2m'
+        c_thought=$'\033[36m'     # cyan
+        c_action=$'\033[33m'      # yellow
+        c_observation=$'\033[32m' # green
+        c_human=$'\033[1;37m'     # bold white
+        c_agent=$'\033[35m'       # magenta
+        c_tp=$'\033[34m'          # blue
+        c_shell=$'\033[2m'        # dim
+        c_meta=$'\033[2m'         # dim
+    fi
+
+    # Format a single JSON line (same as cmd_tail's _format_line)
+    _cat_format_line() {
+        local line="$1"
+        [[ -z "$line" ]] && return 0
+
+        local entry_type content source ts step_id traj_hex
+        { read -r entry_type
+          IFS= read -r content
+          read -r source
+          read -r ts
+          read -r step_id
+          read -r traj_hex
+        } < <(
+            printf '%s' "$line" | jq -r --argjson filters "$_filter_json" '
+                def matches_filters($fs):
+                    . as $step |
+                    ($fs | length == 0) or all($fs[];
+                        .key as $k | .vals as $vs |
+                        ($step[$k] // null) as $fv |
+                        ($vs | any(. as $v | $v == ($fv | tostring)))
+                    );
+                def preview:
+                    if   .type == "reasoning"    then (.thought // "")
+                    elif .type == "shell-output"  then (.stdout // "")
+                    elif .type == "shellm-run"    then (.command // "")
+                    elif .type == "run-summary"   then (.tldr // "")
+                    elif .type == "final"         then ((.content // .thought) // "")
+                    elif .type == "fork"          then ("-> " + (.child // ""))
+                    elif .type == "trajectory"    then (if .parent then ("<- parent: " + .parent) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
+                    elif .type == "merge"         then ("<- " + (.from_traj // ""))
+                    else (.content // "")
+                    end;
+                select(matches_filters($filters)) |
+                (.type // "unknown"),
+                (preview | if . == "" then "-" else (split("\n") | if length > 1 then .[0] + "..." else .[0] end) end | gsub("\t"; " ")),
+                (.source // "-"),
+                ((.ts // .timestamp // "0") | tostring),
+                (.step_id // "-"),
+                (._traj_hex // "-")
+            ' 2>/dev/null
+        )
+        [[ -n "$entry_type" ]] || return 0
+
+        # Normalize placeholders back to empty
+        [[ "$content" == "-" ]] && content=""
+        [[ "$source" == "-" ]] && source=""
+        [[ "$step_id" == "-" ]] && step_id=""
+        [[ "$traj_hex" == "-" ]] && traj_hex=""
+
+        # Extract HH:MM:SS.mmm from timestamp
+        local time_display="--:--:--.---"
+        if [[ "$ts" =~ ^[0-9]{9,10}$ ]]; then
+            time_display=$(date -r "$ts" +%H:%M:%S 2>/dev/null) || time_display="--:--:--"
+            time_display="${time_display}.000"
+        elif [[ "$ts" =~ T([0-9]{2}:[0-9]{2}:[0-9]{2})\.([0-9]{3}) ]]; then
+            time_display="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+        elif [[ "$ts" =~ T([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+            time_display="${BASH_REMATCH[1]}.000"
+        elif [[ "$ts" =~ ([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+            time_display="${BASH_REMATCH[1]}.000"
+        fi
+
+        # Color by type
+        local color=""
+        case "$entry_type" in
+            thought|reasoning)  color="$c_thought" ;;
+            action)             color="$c_action" ;;
+            observation)        color="$c_observation" ;;
+            human-msg|feedback) color="$c_human" ;;
+            agent-run|agent-msg|final) color="$c_agent" ;;
+            fork|merge|trajectory) color="$c_agent" ;;
+            tp:*|tp-thought)    color="$c_tp" ;;
+            shell-output)       color="$c_shell" ;;
+            shellm-run|run-summary|prompt) color="$c_meta" ;;
+        esac
+
+        local source_tag=""
+        [[ -n "$source" ]] && source_tag="($source) "
+
+        local short_id="${step_id:0:8}"
+        local traj_tag=""
+        [[ -n "$traj_hex" ]] && traj_tag="${c_dim}${traj_hex}/${c_reset}"
+
+        printf '%s%s%s %s%s%s%s %s[%s]%s %s%s\n' \
+            "$c_dim" "$time_display" "$c_reset" \
+            "$traj_tag" \
+            "$c_dim" "$short_id" "$c_reset" \
+            "$color" "$entry_type" "$c_reset" \
+            "$source_tag" "$content"
+    }
+
+    # Output a single line (raw or formatted)
+    _cat_output() {
+        local line="$1"
+        if [[ "$format" -eq 1 ]]; then
+            _cat_format_line "$line"
+        else
+            if [[ "$_filter_json" != "[]" ]]; then
+                printf '%s' "$line" | jq -c --argjson filters "$_filter_json" '
+                    def matches_filters($fs):
+                        . as $step |
+                        ($fs | length == 0) or all($fs[];
+                            .key as $k | .vals as $vs |
+                            ($step[$k] // null) as $fv |
+                            ($vs | any(. as $v | $v == ($fv | tostring)))
+                        );
+                    select(matches_filters($filters))
+                ' 2>/dev/null
+            else
+                printf '%s\n' "$line"
+            fi
+        fi
+    }
+
+    trap 'exit 0' INT PIPE
+
+    if [[ "$recursive" -eq 1 ]]; then
+        # Collect all trajectory files in the tree
+        local _all_files
+        _all_files=$(_collect_recursive_files "$traj_file")
+        [[ -z "$_all_files" ]] && return 0
+
+        # For each file: inject _traj_hex, prepend ts for sorting
+        local f hex
+        while IFS= read -r f; do
+            [[ -f "$f" ]] || continue
+            hex=$(_parse_hex_id "$f")
+            jq -r --arg h "$hex" '
+                . + {_traj_hex: $h} |
+                ((.ts // .timestamp // "") | tostring) + "\t" + tojson
+            ' "$f" 2>/dev/null
+        done <<< "$_all_files" \
+            | sort -t$'\t' -k1,1 \
+            | cut -f2- \
+            | while IFS= read -r line; do
+                _cat_output "$line"
+            done
     else
-        cat "$traj_file"
+        while IFS= read -r line; do
+            _cat_output "$line"
+        done < "$traj_file"
     fi
 }
 
@@ -1853,7 +2059,8 @@ case "$cmd" in
     search)   cmd_search "$@" ;;
     count)    cmd_count "$@" ;;
     last)     cmd_last "$@" ;;
-    dump)     cmd_dump "$@" ;;
+    cat)      cmd_cat "$@" ;;
+    dump)     cmd_cat "$@" ;;  # backwards compat alias
     filter)   cmd_filter "$@" ;;
     exists)   cmd_exists "$@" ;;
     list)     cmd_list "$@" ;;
