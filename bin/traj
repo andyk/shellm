@@ -956,11 +956,18 @@ TAILHELP
         while IFS= read -r f; do
             [[ -f "$f" ]] || continue
             hex=$(_parse_hex_id "$f")
-            jq -r --arg h "$hex" '
-                . + {_traj_hex: $h} |
-                ((.ts // .timestamp // "") | tostring) + "\t" + tojson
+            jq -c --arg h "$hex" --argjson filters "$_filter_json" '
+                def matches_filters($fs):
+                    . as $step |
+                    ($fs | length == 0) or all($fs[];
+                        .key as $k | .vals as $vs |
+                        ($step[$k] // null) as $fv |
+                        ($vs | any(. as $v | $v == ($fv | tostring)))
+                    );
+                . + {_traj_hex: $h} | select(matches_filters($filters))
             ' "$f" 2>/dev/null
         done <<< "$_all_files" \
+            | jq -r '((.ts // .timestamp // "") | tostring) + "\t" + tojson' \
             | sort -t$'\t' -k1,1 \
             | tail -n "$n" \
             | cut -f2- \
@@ -1492,16 +1499,23 @@ CATHELP
         _all_files=$(_collect_recursive_files "$traj_file")
         [[ -z "$_all_files" ]] && return 0
 
-        # For each file: inject _traj_hex, prepend ts for sorting
+        # For each file: inject _traj_hex, filter, prepend ts for sorting
         local f hex
         while IFS= read -r f; do
             [[ -f "$f" ]] || continue
             hex=$(_parse_hex_id "$f")
-            jq -r --arg h "$hex" '
-                . + {_traj_hex: $h} |
-                ((.ts // .timestamp // "") | tostring) + "\t" + tojson
+            jq -c --arg h "$hex" --argjson filters "$_filter_json" '
+                def matches_filters($fs):
+                    . as $step |
+                    ($fs | length == 0) or all($fs[];
+                        .key as $k | .vals as $vs |
+                        ($step[$k] // null) as $fv |
+                        ($vs | any(. as $v | $v == ($fv | tostring)))
+                    );
+                . + {_traj_hex: $h} | select(matches_filters($filters))
             ' "$f" 2>/dev/null
         done <<< "$_all_files" \
+            | jq -r '((.ts // .timestamp // "") | tostring) + "\t" + tojson' \
             | sort -t$'\t' -k1,1 \
             | cut -f2- \
             | while IFS= read -r line; do
