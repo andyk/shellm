@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# actor/step — Action executor thinker
+# Reads action body from step JSON on stdin, builds system prompt via
+# _build_system_prompt, calls shellm with fork/merge support.
+
+THINKER_NAME="actor"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../_lib/common.sh"
+
+_require_env
+
+THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
+
+# Read step JSON from stdin
+step_json=$(cat)
+[[ -z "$step_json" ]] && exit 0
+
+# Extract action content
+content=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
+[[ -z "$content" ]] && exit 0
+
+# Strip "action: " prefix
+action_body="${content#action: }"
+[[ "$action_body" == "$content" ]] && action_body="${content#action:}"
+[[ -z "$action_body" ]] && exit 0
+
+# Build system prompt with identity context
+system_prompt=$(_build_system_prompt)
+
+# Resolve absolute paths
+run_dir="$IDENTITY_DIR/workdir"
+mkdir -p "$run_dir"
+
+# Build shellm flags
+shellm_flags=()
+while IFS= read -r _flag; do
+    [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
+done < <(_build_shellm_flags "$IDENTITY_DIR")
+
+act_prompt="<context>
+$system_prompt
+
+Your job as the \"action executor\" is to carry out actions from the thought stream. Do the work described below.
+When you are done, if there is a meaningful observation or result to record, write it to your trajectory:
+  printf '{\"type\":\"observation\",\"content\":<json-escaped result>,\"source\":\"actor\"}' | traj append
+Then set FINAL to signal completion (FINAL content is not important, only traj matters).
+If there is nothing meaningful to observe, just set FINAL.
+</context>
+
+ACTION: $action_body"
+
+
+# shellm handles fork/merge via _SHELLM_PARENT_TRAJ_ID
+printf '  executing action...\n' >&2
+act_response=$(_SHELLM_PARENT_TRAJ_ID="$TRAJ_ID" \
+    SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+    shellm --env "$IDENTITY_NAME" --workdir "$run_dir" \
+    "${shellm_flags[@]}" \
+    "$act_prompt") || true
+
+if [[ -n "$act_response" ]]; then
+    printf '  [observation] %s\n' "$(printf '%s' "$act_response" | head -1)"
+fi

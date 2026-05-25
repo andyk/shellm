@@ -1,0 +1,7 @@
+{
+  "types": [
+    "thought",
+    "action",
+    "observation"
+  ]
+}
