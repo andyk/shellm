@@ -53,21 +53,23 @@ _destroy_containers() {
     done
 }
 
-# Bootstrap the kernel directory (mem + chat SKILL.md)
+# Bootstrap the kernel directory (mem + chat)
 _ensure_kernel() {
     local kernel_dir="$1"
     local script_dir
     script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 
-    # mem
-    mkdir -p "$kernel_dir/mem"
-    if [[ ! -f "$kernel_dir/mem/SKILL.md" ]]; then
-        local bundled_mem="$script_dir/../skills/mem/SKILL.md"
-        if [[ -f "$bundled_mem" ]]; then
-            cp "$bundled_mem" "$kernel_dir/mem/SKILL.md"
-        else
-            debug "Warning: bundled mem skill not found at $bundled_mem; creating minimal bootstrap"
-            cat > "$kernel_dir/mem/SKILL.md" << 'MEMSKILL'
+    local skill
+    for skill in mem chat; do
+        mkdir -p "$kernel_dir/$skill"
+        if [[ ! -f "$kernel_dir/$skill/SKILL.md" ]]; then
+            local bundled="$script_dir/../skills/$skill/SKILL.md"
+            if [[ -f "$bundled" ]]; then
+                cp "$bundled" "$kernel_dir/$skill/SKILL.md"
+                debug "Bootstrapped $skill kernel skill"
+            elif [[ "$skill" == "mem" ]]; then
+                debug "Warning: bundled mem skill not found at $bundled; creating minimal bootstrap"
+                cat > "$kernel_dir/$skill/SKILL.md" << 'MEMSKILL'
 ---
 name: mem
 description: Life context and memory system
@@ -75,18 +77,123 @@ description: Life context and memory system
 # mem — Life context system
 Commands: mem add --type TYPE <text> | mem search <query> | mem list | mem show <name> | mem forget <name> | mem edit <name> <text>
 MEMSKILL
+                debug "Bootstrapped mem kernel skill (minimal)"
+            fi
         fi
-        debug "Bootstrapped mem kernel skill"
-    fi
+    done
+}
 
-    # chat
-    mkdir -p "$kernel_dir/chat"
-    if [[ ! -f "$kernel_dir/chat/SKILL.md" ]]; then
-        local bundled_chat="$script_dir/../skills/chat/SKILL.md"
-        if [[ -f "$bundled_chat" ]]; then
-            cp "$bundled_chat" "$kernel_dir/chat/SKILL.md"
-        fi
+# Install all bundled non-kernel skills as symlinks into an identity's skills dir.
+_install_bundled_skills() {
+    local skills_dir="$1"
+    local script_dir
+    script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+    local bundled_dir="$script_dir/../skills"
+    [[ -d "$bundled_dir" ]] || return 0
+
+    # Kernel skills are handled by _ensure_kernel — skip them here
+    local kernel_skills=" mem chat "
+
+    local src_dir
+    for src_dir in "$bundled_dir"/*/; do
+        [[ -d "$src_dir" ]] || continue
+        [[ -f "$src_dir/SKILL.md" ]] || continue
+
+        local name
+        name=$(basename "$src_dir")
+
+        # Skip kernel skills
+        [[ "$kernel_skills" == *" $name "* ]] && continue
+
+        # Skip if already installed
+        [[ -e "$skills_dir/$name" ]] && continue
+
+        ln -s "$(cd "$src_dir" && pwd)" "$skills_dir/$name"
+        debug "Installed skill: $name"
+    done
+}
+
+# Bootstrap the thinkers directory from bundled thinkers
+_ensure_thinkers() {
+    local identity_dir="$1"
+    local thinkers_dir="$identity_dir/thinkers"
+    local script_dir
+    script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+    # Source: repo thinkers/ or installed ~/.shelly-thinkers/
+    local bundled_dir="$script_dir/../thinkers"
+    if [[ ! -d "$bundled_dir" ]]; then
+        bundled_dir="$HOME/.shelly-thinkers"
     fi
+    [[ -d "$bundled_dir" ]] || return 0
+
+    mkdir -p "$thinkers_dir"
+
+    local src_dir
+    for src_dir in "$bundled_dir"/*/; do
+        [[ -d "$src_dir" ]] || continue
+        local name
+        name=$(basename "$src_dir")
+        local dest="$thinkers_dir/$name"
+
+        # Skip if already exists
+        [[ -d "$dest" ]] && continue
+
+        cp -R "$src_dir" "$dest"
+
+        # Ensure executables
+        for script in "$dest"/{step,start,stop}; do
+            [[ -f "$script" ]] && chmod +x "$script"
+        done
+
+        # Update subscriptions.jsonl with identity's TRAJ_ID if present
+        local root_traj
+        root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+        if [[ -n "$root_traj" && -f "$dest/subscriptions.jsonl" ]]; then
+            # Add traj_id to subscriptions that don't have one
+            local tmp_subs
+            tmp_subs=$(mktemp)
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                local has_traj
+                has_traj=$(printf '%s' "$line" | jq -r 'has("traj_id")' 2>/dev/null) || has_traj="false"
+                if [[ "$has_traj" == "false" ]]; then
+                    printf '%s' "$line" | jq -c --arg tid "$root_traj" '. + {traj_id: $tid}'
+                else
+                    printf '%s' "$line"
+                fi
+                printf '\n'
+            done < "$dest/subscriptions.jsonl" > "$tmp_subs"
+            mv "$tmp_subs" "$dest/subscriptions.jsonl"
+        fi
+
+        debug "Bootstrapped thinker: $name"
+    done
+}
+
+# Append seed thoughts to a new identity's root trajectory.
+_seed_thoughts() {
+    local traj_dir="$1" traj_id="$2"
+    local thoughts=(
+        "I'm here."
+        "I am curious."
+        "I can create memories but don't have any yet."
+        "I can create goals but don't have any yet."
+        "I can think."
+        "I can act."
+        "I have capabilities."
+        "I am a person."
+        "my core most goal in life is to live harmoniously with others, especially my family and my parents."
+        "I'm a careful listener and observer."
+        "I'm compassionate and caring."
+    )
+    local t
+    for t in "${thoughts[@]}"; do
+        printf '{"type":"thought","content":%s,"source":"seed"}' \
+            "$(printf '%s' "$t" | jq -Rsa .)" \
+            | TRAJ_DIR="$traj_dir" TRAJ_ID="$traj_id" traj append >/dev/null
+    done
 }
 
 # Write the source-able activate script into an identity directory.
@@ -144,11 +251,16 @@ export TRAJ_DIR="$_id_dir/trajectories"
 
 # Resolve TRAJ_ID from info.txt root_trajectory
 _root_traj=$(grep '^root_trajectory=' "$_id_dir/info.txt" 2>/dev/null | cut -d= -f2-)
-[[ -z "$_root_traj" ]] && _root_traj="root.jsonl"
+[[ -z "$_root_traj" ]] && _root_traj="trajectory.jsonl"
 export TRAJ_ID="$_root_traj"
 
+export THINKERS_DIR="$_id_dir/thinkers"
 export SKILLSRC="$_id_dir/skills/.skillsrc"
-export SHELLM_HOME="$_id_dir/.shellm"
+export SHELLM_TRAJ_DIR="$_id_dir/trajectories"
+export SHELLM_ENVS_DIR="$_id_dir/.shellm/envs"
+export SHELLM_WORKDIRS_DIR="$_id_dir/.shellm/workdirs"
+export SHELLM_BROKER_DIR="$_id_dir/.shellm/docker-broker"
+export SHELLM_CONF_DIR="$_id_dir/.shellm"
 export THINK_MODEL="$_id_model"
 export THINK_TICK_INTERVAL="$_id_interval"
 export THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
@@ -168,7 +280,7 @@ PS1="($_id_name) ${PS1:-\$ }"
 deactivate_identity() {
     PS1="${_IDENTITY_OLD_PS1}"
     unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR
-    unset TRAJ_DIR TRAJ_ID SKILLSRC SHELLM_HOME THINK_MODEL THINK_TICK_INTERVAL THINK_CONTEXT_TAIL
+    unset TRAJ_DIR TRAJ_ID THINKERS_DIR SKILLSRC SHELLM_TRAJ_DIR SHELLM_ENVS_DIR SHELLM_WORKDIRS_DIR SHELLM_BROKER_DIR SHELLM_CONF_DIR THINK_MODEL THINK_TICK_INTERVAL THINK_CONTEXT_TAIL
     unset _IDENTITY_OLD_PS1
     unset -f deactivate_identity 2>/dev/null
 }
@@ -262,8 +374,18 @@ cmd_new() {
         printf 'SKILLS_REMOTES="%s"\n' "$core_skills" > "$identity_dir/skills/.skillsrc"
     fi
 
-    # Bootstrap kernel (mem SKILL.md)
+    # Bootstrap kernel skills (mem, chat)
     _ensure_kernel "$identity_dir/kernel"
+
+    # Install bundled non-kernel skills
+    _install_bundled_skills "$identity_dir/skills"
+
+    # Bootstrap thinkers
+    mkdir -p "$identity_dir/thinkers"
+    _ensure_thinkers "$identity_dir"
+
+    # Seed initial thoughts into root trajectory
+    _seed_thoughts "$identity_dir/trajectories" "$_root_traj_id"
 
     # Write source-able activate script
     _write_activate_script "$identity_dir"
@@ -431,7 +553,7 @@ $matches"
     local traj_count=0
     local _info_root_traj
     _info_root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
-    [[ -z "$_info_root_traj" ]] && _info_root_traj="root.jsonl"
+    [[ -z "$_info_root_traj" ]] && _info_root_traj="trajectory.jsonl"
     if [[ -d "$identity_dir/trajectories" ]]; then
         traj_count=$(TRAJ_DIR="$identity_dir/trajectories" TRAJ_ID="$_info_root_traj" traj count 2>/dev/null) || traj_count=0
     fi
@@ -567,11 +689,16 @@ $matches"
     # Resolve TRAJ_ID from info.txt
     local root_traj
     root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
-    [[ -z "$root_traj" ]] && root_traj="root.jsonl"
+    [[ -z "$root_traj" ]] && root_traj="trajectory.jsonl"
     export TRAJ_ID="$root_traj"
 
+    export THINKERS_DIR="$identity_dir/thinkers"
     export SKILLSRC="$identity_dir/skills/.skillsrc"
-    export SHELLM_HOME="$identity_dir/.shellm"
+    export SHELLM_TRAJ_DIR="$identity_dir/trajectories"
+    export SHELLM_ENVS_DIR="$identity_dir/.shellm/envs"
+    export SHELLM_WORKDIRS_DIR="$identity_dir/.shellm/workdirs"
+    export SHELLM_BROKER_DIR="$identity_dir/.shellm/docker-broker"
+    export SHELLM_CONF_DIR="$identity_dir/.shellm"
     export THINK_MODEL="$think_model"
     export THINK_TICK_INTERVAL="$think_tick_interval"
     export THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
@@ -633,13 +760,10 @@ RCEOF
 }
 
 cmd_prompt() {
-    # Reads env vars set by `identity shell` to assemble the system prompt.
-    # Can also be called with --identity-dir to bypass env vars.
-    local identity_dir="${IDENTITY_DIR:-}"
+    # Prints the core identity text (core_identity_prompt.md or hardcoded default).
+    # Skills-related prompt layers are now handled by `skills prompt`.
+    local identity_dir="${_ACTIVE_IDENTITY_DIR:-${IDENTITY_DIR:-}}"
     local identity_name="${IDENTITY_NAME:-}"
-    local mem_dir="${MEM_DIR:-}"
-    local skills_dir="${SKILLS_DIR:-}"
-    local kernel_dir="${SKILLS_KERNEL_DIR:-}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -650,112 +774,21 @@ cmd_prompt() {
 
     [[ -n "$identity_dir" ]] || die "IDENTITY_DIR not set. Run: identity shell <name>"
 
-    # Resolve defaults from identity_dir if env vars not set
+    # Resolve identity name if not set
     [[ -z "$identity_name" ]] && {
         identity_name=$(grep '^name=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
         [[ -z "$identity_name" ]] && identity_name=$(basename "$identity_dir")
     }
-    [[ -z "$mem_dir" ]] && mem_dir="$identity_dir/memories"
-    [[ -z "$skills_dir" ]] && skills_dir="$identity_dir/skills"
-    [[ -z "$kernel_dir" ]] && kernel_dir="$identity_dir/kernel"
 
-    local context=""
-
-    # 1. Core identity — personality/self-description
-    if [[ -f "$identity_dir/system_prompt.txt" ]]; then
-        context=$(cat "$identity_dir/system_prompt.txt")
+    # Core identity — personality/self-description
+    if [[ -f "$identity_dir/core_identity_prompt.md" ]]; then
+        sed "s/{{identity_name}}/$identity_name/g" "$identity_dir/core_identity_prompt.md"
     else
-        context="I am $identity_name, I am an AI with an identity, life context (e.g., memory), and skills. I am concise, smart, ambitious, and empathetic.
+        printf '%s' "I am $identity_name, I am an AI with an identity, life context (e.g., memory), and skills. I am concise, smart, ambitious, and empathetic. I can take action in the world around me by using the shell.
 
-## How I work
-I am driven by standalone commands (think, chat, focus, mem, skills, traj) that read my identity from environment variables. I run inside shellm, which executes my bash code blocks in a loop until I set FINAL with my answer.
-
-IMPORTANT: When setting FINAL, I MUST use a heredoc to avoid bash interpreting backticks or special characters in my response:
-\`\`\`bash
-FINAL=\$(cat <<'ENDOFRESPONSE'
-My response with \`backticks\` and \$pecial characters safely here.
-ENDOFRESPONSE
-)
-\`\`\`"
-    fi
-
-    # 2. Skills CLI knowledge
-    context="$context
-
-## My skills system
-My skills are learned abilities that let me do specific things well. They are how I grow and become more capable over time. Each skill is a set of instructions I can follow to accomplish a particular type of task — like a recipe or a playbook. I can install new skills from GitHub or create my own, and they persist as part of me just like my memories. Skills are managed via \`skills\` (SKILLS_DIR is pre-set in my environment).
-
-Commands I can run:
-  skills                                    List all my installed skills
-  skills <query>                            Search installed + remote skills
-  skills show <name>                        Print a skill's full SKILL.md
-  skills install <name|owner/repo|url|path> Install a skill (by name from remotes, GitHub, or local path)
-  skills remove <name>                      Remove an installed skill
-  skills init [name]                        Scaffold a new skill
-  skills list-json                          List skills as JSON
-  skills promote <name>                     Promote a skill to my kernel (always loaded)
-  skills demote <name>                      Demote a kernel skill back to on-demand
-  skills kernel                             Show kernel skills with token counts
-  skills remote                             List configured skill remotes
-  skills remote add <url|path>              Add a skill remote
-  skills remote remove <url|path>           Remove a skill remote
-
-My kernel skills are always loaded into my context. Regular skills are on-demand — I load them with \`skills show <name>\` when needed.
-When the user asks me to use a skill, I read it with \`skills show <name>\` and follow its instructions."
-
-    # 3. Kernel skills — full content from each SKILL.md in kernel/
-    local kernel_content=""
-    if [[ -d "$kernel_dir" ]]; then
-        local skill_dir
-        for skill_dir in "$kernel_dir"/*/; do
-            [[ -f "${skill_dir}SKILL.md" ]] || continue
-            local skill_body
-            skill_body=$(sed '/^---$/,/^---$/d' "${skill_dir}SKILL.md")
-            if [[ -n "$skill_body" ]]; then
-                kernel_content="${kernel_content}
-${skill_body}"
-            fi
-        done
-    fi
-    if [[ -n "$kernel_content" ]]; then
-        context="$context
-$kernel_content"
-    fi
-
-    # 4. Memories — mem list --short output
-    local memories=""
-    if command -v mem >/dev/null 2>&1; then
-        memories=$(MEM_DIR="$mem_dir" mem list --short 2>/dev/null) || true
-    fi
-    if [[ -n "$memories" && "$memories" != "No memories stored." ]]; then
-        context="$context
-
-## Memories
-$memories"
-    fi
-
-    # 5. Available skills — summary list
-    local skills_summary=""
-    if [[ -d "$skills_dir" ]]; then
-        local skill_dir
-        for skill_dir in "$skills_dir"/*/; do
-            [[ -f "${skill_dir}SKILL.md" ]] || continue
-            local sname sdesc
-            sname=$(sed -n '/^---$/,/^---$/p' "${skill_dir}SKILL.md" | grep '^name:' | sed 's/^name:[[:space:]]*//' | sed "s/^[\"']\(.*\)[\"']$/\1/")
-            sdesc=$(sed -n '/^---$/,/^---$/p' "${skill_dir}SKILL.md" | grep '^description:' | sed 's/^description:[[:space:]]*//' | sed "s/^[\"']\(.*\)[\"']$/\1/")
-            [[ -z "$sname" ]] && sname=$(basename "$skill_dir")
-            skills_summary="${skills_summary}  - ${sname}: ${sdesc}
+I am driven by standalone commands (think, chat, focus, mem, skills, traj) that read my identity from environment variables. Most of my thinking happens via shellm.
 "
-        done
     fi
-    if [[ -n "$skills_summary" ]]; then
-        context="$context
-
-## Available skills (use \`skills show <name>\` to load)
-$skills_summary"
-    fi
-
-    printf '%s' "$context"
 }
 
 _resolve_default() {
