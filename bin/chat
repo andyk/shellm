@@ -48,6 +48,23 @@ cmd_reply() {
     printf 'Reply sent.\n' >&2
 }
 
+cmd_send_file() {
+    local filepath="${1:?Usage: chat send-file <filename>}"
+    [[ -f "$filepath" ]] || die "File not found: $filepath"
+
+    local filename
+    filename=$(basename "$filepath")
+    local content
+    content=$(cat "$filepath")
+
+    printf '{"type":"human-msg","filename":%s,"content":%s}' \
+        "$(printf '%s' "$filename" | jq -Rsa .)" \
+        "$(printf '%s' "$content" | jq -Rsa .)" \
+        | traj append >/dev/null
+
+    printf 'File sent: %s\n' "$filename" >&2
+}
+
 cmd_history() {
     local n=20
     [[ -n "${1:-}" ]] && n="$1"
@@ -132,6 +149,7 @@ chat — Messaging for an activated identity
 
 Usage:
   chat send <message>      Human sends a message to the agent
+  chat send-file <file>    Send a file's contents as a message
   chat reply <message>     Agent sends a message to the human
   chat history [N]         Show last N messages (default 20)
   chat repl                Interactive chat (shows agent replies inline)
@@ -146,8 +164,9 @@ EOF
 
 # Dispatch
 case "${1:-}" in
-    send)    shift; cmd_send "$@" ;;
-    reply)   shift; cmd_reply "$@" ;;
+    send)      shift; cmd_send "$@" ;;
+    send-file) shift; cmd_send_file "$@" ;;
+    reply)     shift; cmd_reply "$@" ;;
     history) shift; cmd_history "$@" ;;
     repl)    cmd_repl ;;
     -h|--help|help) usage ;;
