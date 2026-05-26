@@ -118,7 +118,7 @@ Other important vars (not identity-scoped):
 .identities/<name>/
   info.txt              name=, cwd=, created=, think_model=, interval=
   activate              source-able activation script
-  system_prompt.txt     (optional) custom system prompt
+  core_identity_prompt.md  (optional) custom system prompt
   .env                  (optional) identity-specific env vars
   memories/             mem entries (markdown files)
   skills/               installed skills

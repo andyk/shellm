@@ -64,17 +64,6 @@ for skill_dir in skills/*/; do
 done
 echo "Installed core skills → $SKILLS_PREFIX"
 
-# Install bundled prompts to ~/.shelly-prompts (think.md, etc.)
-PROMPTS_PREFIX="${HOME}/.shelly-prompts"
-if [[ -d "prompts" ]]; then
-    mkdir -p "$PROMPTS_PREFIX"
-    if [[ "$SYMLINKS" -eq 1 ]]; then
-        ln -sfn "$(pwd)/prompts" "$PROMPTS_PREFIX"
-    else
-        cp -R prompts/* "$PROMPTS_PREFIX/" 2>/dev/null || true
-    fi
-    echo "Installed prompts → $PROMPTS_PREFIX"
-fi
 
 # Install bundled thinker templates
 THINKERS_PREFIX="${HOME}/.shellm-thinkers"

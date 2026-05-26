@@ -575,7 +575,8 @@ action_list() {
                 if [[ "$format" != "prompt" ]]; then
                     [[ ${#desc} -gt 60 ]] && desc="${desc:0:57}..."
                     skipped+="$(printf "  ${_bold}%-20s${_reset} %-60b ${_cyan}[%s]${_reset} ${_yellow}(missing: %s)${_reset}\n    ${_dim}%s${_reset}\n" \
-                        "$name" "${_dim}${desc}" "$label" "$missing" "$skill_path")"
+                        "$name" "${_dim}${desc}" "$label" "$missing" "$skill_path")
+"
                 fi
                 continue
             fi

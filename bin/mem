@@ -215,10 +215,11 @@ action_list() {
 
         if [[ "$short" -eq 1 ]]; then
             # Concise: one line per memory
+            local short_id="${_pf_id:---------}"
             local summary
             summary=$(frontmatter_field "$f" "summary") || true
             [[ -z "$summary" ]] && summary="$_pf_slug"
-            printf '%s  %-12s %s\n' "$display_ts" "[$mtype]" "$summary"
+            printf '%s  %s  %-12s %s\n' "$display_ts" "$short_id" "[$mtype]" "$summary"
         else
             # Verbose (default): multi-line with id, slug, summary, path
             local id_display
