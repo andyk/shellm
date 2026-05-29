@@ -403,30 +403,39 @@ _stop_dispatcher() {
 cmd_start() {
     _require_env
 
-    local name="${1:-}"
     local run_dir="$IDENTITY_DIR/run"
     mkdir -p "$run_dir"
 
-    if [[ -n "$name" ]]; then
-        # --- Start individual thinker ---
-        local thinker_dir="$THINKERS_DIR/$name"
-        [[ -d "$thinker_dir" ]] || die "Thinker not found: $name"
-        [[ -f "$thinker_dir/step" && -f "$thinker_dir/subscriptions.jsonl" ]] || \
-            die "Thinker '$name' missing step or subscriptions.jsonl"
+    if [[ $# -gt 0 ]]; then
+        # --- Start named thinkers ---
 
-        # Add to active_thinkers if not already there
-        if ! grep -qx "$name" "$run_dir/active_thinkers" 2>/dev/null; then
-            printf '%s\n' "$name" >> "$run_dir/active_thinkers"
-        fi
+        # Validate all names first
+        local name
+        for name in "$@"; do
+            local thinker_dir="$THINKERS_DIR/$name"
+            [[ -d "$thinker_dir" ]] || die "Thinker not found: $name"
+            [[ -f "$thinker_dir/step" && -f "$thinker_dir/subscriptions.jsonl" ]] || \
+                die "Thinker '$name' missing step or subscriptions.jsonl"
+        done
 
-        # Run start script if present
-        if [[ -x "$thinker_dir/start" ]]; then
-            "$thinker_dir/start" || printf 'Warning: %s start script failed\n' "$name" >&2
-            if [[ -f "$thinker_dir/pid" ]]; then
-                mkdir -p "$run_dir/thinkers"
-                cp "$thinker_dir/pid" "$run_dir/thinkers/$name.pid"
+        # Add to active list and run start scripts
+        for name in "$@"; do
+            local thinker_dir="$THINKERS_DIR/$name"
+
+            # Add to active_thinkers if not already there
+            if ! grep -qx "$name" "$run_dir/active_thinkers" 2>/dev/null; then
+                printf '%s\n' "$name" >> "$run_dir/active_thinkers"
             fi
-        fi
+
+            # Run start script if present
+            if [[ -x "$thinker_dir/start" ]]; then
+                "$thinker_dir/start" || printf 'Warning: %s start script failed\n' "$name" >&2
+                if [[ -f "$thinker_dir/pid" ]]; then
+                    mkdir -p "$run_dir/thinkers"
+                    cp "$thinker_dir/pid" "$run_dir/thinkers/$name.pid"
+                fi
+            fi
+        done
 
         # Start dispatcher if not running
         local pid_file="$run_dir/dispatcher.pid"
@@ -446,14 +455,16 @@ cmd_start() {
             printf 'Dispatcher started (PID %s)\n' "$dispatcher_pid" >&2
         fi
 
-        # Kick the thinker once to start the loop (dispatcher only sees new steps)
+        # Kick each thinker once (dispatcher only sees new steps)
         local trigger_json
         trigger_json=$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
             '{type:"manual-trigger", source:"thinkers-cli", ts:$ts}')
-        (printf '%s' "$trigger_json" | "$thinker_dir/step") \
-            >> "$run_dir/logs/$name.log" 2>&1 &
-
-        printf 'Started thinker: %s\n' "$name" >&2
+        for name in "$@"; do
+            local thinker_dir="$THINKERS_DIR/$name"
+            (printf '%s' "$trigger_json" | "$thinker_dir/step") \
+                >> "$run_dir/logs/$name.log" 2>&1 &
+            printf 'Started thinker: %s\n' "$name" >&2
+        done
     else
         # --- Start all thinkers ---
 
@@ -497,36 +508,40 @@ cmd_start() {
 cmd_stop() {
     _require_env
 
-    local name="${1:-}"
     local run_dir="$IDENTITY_DIR/run"
 
-    if [[ -n "$name" ]]; then
-        # --- Stop individual thinker ---
-        local thinker_dir="$THINKERS_DIR/$name"
-        [[ -d "$thinker_dir" ]] || die "Thinker not found: $name"
+    if [[ $# -gt 0 ]]; then
+        # --- Stop named thinkers ---
+        local name
+        for name in "$@"; do
+            local thinker_dir="$THINKERS_DIR/$name"
+            [[ -d "$thinker_dir" ]] || die "Thinker not found: $name"
 
-        # Remove from active_thinkers
-        if [[ -f "$run_dir/active_thinkers" ]]; then
-            grep -vx "$name" "$run_dir/active_thinkers" > "$run_dir/active_thinkers.tmp" 2>/dev/null || true
-            mv "$run_dir/active_thinkers.tmp" "$run_dir/active_thinkers"
-        fi
+            # Remove from active_thinkers
+            if [[ -f "$run_dir/active_thinkers" ]]; then
+                grep -vx "$name" "$run_dir/active_thinkers" > "$run_dir/active_thinkers.tmp" 2>/dev/null || true
+                mv "$run_dir/active_thinkers.tmp" "$run_dir/active_thinkers"
+            fi
 
-        # Kill running steps for this thinker
-        local step_pids_file="$run_dir/step_pids"
-        if [[ -f "$step_pids_file" ]]; then
-            local step_pid _step_name
-            while read -r step_pid _step_name; do
-                if [[ "$_step_name" == "$name" && -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
-                    _kill_tree "$step_pid" TERM
-                fi
-            done < "$step_pids_file"
-        fi
+            # Kill running steps for this thinker
+            local step_pids_file="$run_dir/step_pids"
+            if [[ -f "$step_pids_file" ]]; then
+                local step_pid _step_name
+                while read -r step_pid _step_name; do
+                    if [[ "$_step_name" == "$name" && -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
+                        _kill_tree "$step_pid" TERM
+                    fi
+                done < "$step_pids_file"
+            fi
 
-        # Run stop script if present
-        if [[ -x "$thinker_dir/stop" ]]; then
-            "$thinker_dir/stop" || true
-        fi
-        rm -f "$run_dir/thinkers/$name.pid"
+            # Run stop script if present
+            if [[ -x "$thinker_dir/stop" ]]; then
+                "$thinker_dir/stop" || true
+            fi
+            rm -f "$run_dir/thinkers/$name.pid"
+
+            printf 'Stopped thinker: %s\n' "$name" >&2
+        done
 
         # If no active thinkers left, stop dispatcher entirely
         local remaining
@@ -535,8 +550,6 @@ cmd_stop() {
             printf 'No active thinkers remain — stopping dispatcher.\n' >&2
             _stop_dispatcher
         fi
-
-        printf 'Stopped thinker: %s\n' "$name" >&2
         return
     fi
 
@@ -836,8 +849,8 @@ usage() {
 thinkers — Modular reactive thought process manager
 
 Usage:
-  thinkers start [name]        Start all thinkers (or one by name)
-  thinkers stop [name]         Stop all thinkers (or one by name)
+  thinkers start [name ...]    Start all thinkers (or specific ones by name)
+  thinkers stop [name ...]     Stop all thinkers (or specific ones by name)
   thinkers status              Show dispatcher and per-thinker status
   thinkers list                List installed thinkers with subscriptions
   thinkers step <name>          Manually trigger a thinker's step

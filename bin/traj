@@ -282,7 +282,7 @@ _is_root_file() {
     local first_type first_parent
     first_type=$(head -1 "$traj_file" | jq -r '.type // empty' 2>/dev/null)
     if [[ "$first_type" == "trajectory" ]]; then
-        first_parent=$(head -1 "$traj_file" | jq -r '.parent // empty' 2>/dev/null)
+        first_parent=$(head -1 "$traj_file" | jq -r '.parent_traj // .parent // empty' 2>/dev/null)
         [[ -z "$first_parent" ]] && return 0 || return 1
     fi
     # Not a trajectory step — treat as root (legacy shellm-run files etc.)
@@ -297,19 +297,27 @@ _resolve_parent_file() {
     local first_line
     first_line=$(head -1 "$traj_file")
     local parent_id parent_ref
-    parent_id=$(printf '%s' "$first_line" | jq -r '.parent // empty' 2>/dev/null)
+    parent_id=$(printf '%s' "$first_line" | jq -r '.parent_traj // .parent // empty' 2>/dev/null)
     [[ -n "$parent_id" ]] || return 1
 
-    # Fast path: parent_ref
-    parent_ref=$(printf '%s' "$first_line" | jq -r '.parent_ref // empty' 2>/dev/null)
+    # Fast path: parent_traj_ref (or legacy parent_ref)
+    parent_ref=$(printf '%s' "$first_line" | jq -r '.parent_traj_ref // .parent_ref // empty' 2>/dev/null)
     local my_dir
     my_dir=$(dirname "$traj_file")
-    if [[ -n "$parent_ref" && -f "$my_dir/$parent_ref" ]]; then
-        # Canonicalize to resolve .. components
-        local resolved
-        resolved=$(cd "$my_dir" && realpath "$parent_ref" 2>/dev/null) || resolved="$my_dir/$parent_ref"
-        printf '%s\n' "$resolved"
-        return 0
+    if [[ -n "$parent_ref" ]]; then
+        local candidate="$my_dir/$parent_ref"
+        local resolved=""
+        if [[ -f "$candidate" ]]; then
+            # Legacy: parent_ref points to file
+            resolved=$(cd "$my_dir" && realpath "$parent_ref" 2>/dev/null) || resolved="$candidate"
+        elif [[ -f "$candidate/trajectory.jsonl" ]]; then
+            # New: parent_traj_ref points to directory
+            resolved=$(cd "$my_dir" && realpath "$parent_ref/trajectory.jsonl" 2>/dev/null) || resolved="$candidate/trajectory.jsonl"
+        fi
+        if [[ -n "$resolved" ]]; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
     fi
 
     # Slow path: UUID search
@@ -355,7 +363,7 @@ cmd_new() {
     local f
     for f in "${fields[@]+"${fields[@]}"}"; do
         local key="${f%%=*}" val="${f#*=}"
-        [[ "$key" == "parent" ]] && parent_id="$val"
+        [[ "$key" == "parent_traj" ]] && parent_id="$val"
     done
 
     local parent_file=""
@@ -378,12 +386,12 @@ cmd_new() {
         record=$(printf '%s' "$record" | jq --arg k "$key" --arg v "$val" '. + {($k): $v}')
     done
 
-    # Add parent_ref: relative path from this trajectory's dir to the parent's trajectory.jsonl
+    # Add parent_traj_ref: relative path from this trajectory's dir to the parent's dir
     if [[ -n "$parent_file" ]]; then
-        local parent_ref
-        parent_ref=$(python3 -c "import os.path; print(os.path.relpath('$parent_file', '$traj_dir_path'))" 2>/dev/null) \
-            || parent_ref="../trajectory.jsonl"
-        record=$(printf '%s' "$record" | jq --arg ref "$parent_ref" '. + {parent_ref: $ref}')
+        local parent_traj_ref
+        parent_traj_ref=$(python3 -c "import os.path; print(os.path.relpath('$(dirname "$parent_file")', '$traj_dir_path'))" 2>/dev/null) \
+            || parent_traj_ref=".."
+        record=$(printf '%s' "$record" | jq --arg ref "$parent_traj_ref" '. + {parent_traj_ref: $ref}')
     fi
 
     # Add step_id and timestamp
@@ -450,9 +458,10 @@ cmd_append() {
     step_type=$(printf '%s' "$record" | jq -r '.type // empty')
     [[ -n "$step_type" ]] || die "append: step record must have a 'type' field"
 
-    # Assign step id.
+    # Assign step id (preserve existing if caller pre-generated one).
     local step_id
-    step_id=$(gen_step_id)
+    step_id=$(printf '%s' "$record" | jq -r '.step_id // empty')
+    [[ -z "$step_id" ]] && step_id=$(gen_step_id)
 
     # Add step_id and ts.
     local iso_ts
@@ -621,7 +630,7 @@ cmd_show() {
         printf 'Last:   %s\n' "$last_ts"
 
         local parent
-        parent=$(printf '%s' "$row" | jq -r '.parent // empty')
+        parent=$(printf '%s' "$row" | jq -r '.parent_traj // .parent // empty')
         if [[ -z "$parent" ]]; then
             printf 'Root:   yes\n'
         else
@@ -835,7 +844,7 @@ TAILHELP
                     elif .type == "run-summary"   then (.tldr // "")
                     elif .type == "final"         then ((.content // .thought) // "")
                     elif .type == "fork"          then ("-> " + (.child // ""))
-                    elif .type == "trajectory"    then (if .parent then ("<- parent: " + .parent) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
+                    elif .type == "trajectory"    then (if (.parent_traj // .parent) then ("<- parent: " + (.parent_traj // .parent)) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
                     elif .type == "merge"         then ("<- " + (.from_traj // ""))
                     else (.content // "")
                     end;
@@ -1086,12 +1095,13 @@ cmd_search() {
 # ---------------------------------------------------------------------------
 
 cmd_fork() {
-    local child_id="" traj_dir_opt="" traj_id_opt="" slug=""
+    local child_id="" traj_dir_opt="" traj_id_opt="" slug="" fork_step_id=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
             --child)     child_id="${2:?--child requires CHILD_ID}"; shift 2 ;;
             --slug)      slug="${2:?--slug requires TEXT}"; shift 2 ;;
+            --step-id)   fork_step_id="${2:?--step-id requires UUID}"; shift 2 ;;
             -*)          die "fork: unknown option: $1" ;;
             *)
                 if [[ -z "$traj_id_opt" ]]; then
@@ -1104,6 +1114,9 @@ cmd_fork() {
         esac
     done
 
+    # Pre-generate fork step_id (used for cross-referencing in child's parent_step field)
+    [[ -z "$fork_step_id" ]] && fork_step_id=$(gen_step_id)
+
     # Resolve parent traj file to compute relative path to child
     local parent_file
     parent_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "fork")
@@ -1114,7 +1127,10 @@ cmd_fork() {
     if [[ -z "$child_id" ]]; then
         local -a new_args=(--traj_dir "$parent_dir")
         [[ -n "$slug" ]] && new_args+=(--slug "$slug")
-        new_args+=(--field "parent=$(head -1 "$parent_file" | jq -r '.step_id')")
+        local parent_traj_id
+        parent_traj_id=$(head -1 "$parent_file" | jq -r '.step_id')
+        new_args+=(--field "parent_traj=$parent_traj_id")
+        new_args+=(--field "parent_step=$fork_step_id")
         local new_output
         new_output=$(cmd_new "${new_args[@]}")
         child_id=$(head -1 <<< "$new_output")
@@ -1132,18 +1148,18 @@ cmd_fork() {
         child_ref=$(python3 -c "import os.path; print(os.path.relpath('$child_file', '$parent_dir'))" 2>/dev/null) || true
     fi
 
-    # Build fork JSON with UUID + relative ref
+    # Build fork JSON with pre-generated step_id and child ref
     local fork_json
-    fork_json=$(jq -nc --arg child "$child_id" --arg ref "$child_ref" \
-        '{type:"fork", child:$child} + (if $ref != "" then {child_ref:$ref} else {} end)')
+    fork_json=$(jq -nc --arg child "$child_id" --arg ref "$child_ref" --arg sid "$fork_step_id" \
+        '{type:"fork", child:$child, step_id:$sid} + (if $ref != "" then {child_ref:$ref} else {} end)')
 
     # Append fork step to parent
     local -a append_args=()
     [[ -n "$traj_dir_opt" ]] && append_args+=(--traj_dir "$traj_dir_opt")
     [[ -n "$traj_id_opt" ]] && append_args+=("$traj_id_opt")
-    printf '%s' "$fork_json" | cmd_append "${append_args[@]+"${append_args[@]}"}"
+    printf '%s' "$fork_json" | cmd_append "${append_args[@]+"${append_args[@]}"}" >/dev/null
 
-    # Output the child traj ID (useful for callers)
+    # Output only the child traj ID
     printf '%s\n' "$child_id"
 }
 
@@ -1152,10 +1168,11 @@ cmd_fork() {
 # ---------------------------------------------------------------------------
 
 cmd_merge() {
-    local from_traj="" content="" traj_dir_opt="" traj_id_opt=""
+    local from_traj="" traj_dir_opt="" traj_id_opt=""
+    local -a fields=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --content)   content="${2:?--content requires TEXT}"; shift 2 ;;
+            --field)     fields+=("${2:?--field requires key=val}"); shift 2 ;;
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
             -*)          die "merge: unknown option: $1" ;;
             *)
@@ -1194,16 +1211,22 @@ cmd_merge() {
     local from_traj_ref=""
     from_traj_ref=$(python3 -c "import os.path; print(os.path.relpath('$child_file', '$traj_dir'))" 2>/dev/null) || true
 
-    # Build merge step JSON.
+    # Build merge step JSON
     local merge_json
     merge_json=$(jq -nc \
         --arg from_traj "$from_traj" \
         --arg from_step "$last_step_id" \
         --arg ref "$from_traj_ref" \
-        --arg content "$content" \
-        '{type: "merge", from_traj: $from_traj, from_step: $from_step, content: $content} + (if $ref != "" then {from_traj_ref: $ref} else {} end)')
+        '{type: "merge", from_traj: $from_traj, from_step: $from_step} + (if $ref != "" then {from_traj_ref: $ref} else {} end)')
 
-    # Append merge step to parent.
+    # Apply extra --field values
+    local f
+    for f in "${fields[@]+"${fields[@]}"}"; do
+        local key="${f%%=*}" val="${f#*=}"
+        merge_json=$(printf '%s' "$merge_json" | jq --arg k "$key" --arg v "$val" '. + {($k): $v}')
+    done
+
+    # Append merge step to parent
     local -a append_args=()
     [[ -n "$traj_dir_opt" ]] && append_args+=(--traj_dir "$traj_dir_opt")
     [[ -n "$traj_id_opt" ]] && append_args+=("$traj_id_opt")
@@ -1410,7 +1433,7 @@ CATHELP
                     elif .type == "run-summary"   then (.tldr // "")
                     elif .type == "final"         then ((.content // .thought) // "")
                     elif .type == "fork"          then ("-> " + (.child // ""))
-                    elif .type == "trajectory"    then (if .parent then ("<- parent: " + .parent) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
+                    elif .type == "trajectory"    then (if (.parent_traj // .parent) then ("<- parent: " + (.parent_traj // .parent)) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
                     elif .type == "merge"         then ("<- " + (.from_traj // ""))
                     else (.content // "")
                     end;

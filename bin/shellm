@@ -1593,7 +1593,11 @@ run_loop() {
         # --- New trajectory path ---
         # Create the trajectory via traj new
         if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-            _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt" --field "parent=$_SHELLM_PARENT_TRAJ_ID")
+            # Pre-generate fork step_id for cross-referencing
+            _fork_step_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+            _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt" \
+                --field "parent_traj=$_SHELLM_PARENT_TRAJ_ID" \
+                --field "parent_step=$_fork_step_id")
         else
             _new_output=$(traj new --traj_dir "$_run_traj_dir" --slug "$prompt")
         fi
@@ -1602,7 +1606,8 @@ run_loop() {
 
         # If this is a child run, record a fork step in the parent trajectory
         if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-            traj fork "$_run_traj_id" --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>&1 || true
+            traj fork "$_SHELLM_PARENT_TRAJ_ID" --traj_dir "$_run_traj_dir" \
+                --child "$_run_traj_id" --step-id "$_fork_step_id" >/dev/null 2>&1 || true
         fi
     fi
 
@@ -2155,11 +2160,19 @@ exit \$__shellm_rc
             redact_sensitive "$final_answer"
             [[ "$QUIET" -eq 0 ]] && echo >&2
             progress_dim "Trajectory: $_run_traj_id"
-            # Merge back into parent's traj
+            # Write thought step to parent traj referencing this sub-traj
             if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-                traj merge "$_run_traj_id" \
-                    --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" \
-                    --content "$(printf '%s' "$final_answer")" >/dev/null 2>/dev/null || true
+                local _last_step_id _child_dir_name _from_traj_ref
+                _last_step_id=$(traj last --traj_dir "$_run_traj_dir" "$_run_traj_id" --field step_id 2>/dev/null) || true
+                _child_dir_name=$(basename "$run_name")
+                _from_traj_ref="$_child_dir_name"
+                jq -nc \
+                    --arg content "$final_answer" \
+                    --arg from_traj "$_run_traj_id" \
+                    --arg from_step "${_last_step_id:-}" \
+                    --arg from_traj_ref "$_from_traj_ref" \
+                    '{type:"thought", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+                    | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
             fi
             return 0
         fi
@@ -2203,11 +2216,19 @@ exit \$__shellm_rc
 
     [[ "$QUIET" -eq 0 ]] && echo >&2
     progress "\033[1;31mMax iterations ($SHELLM_MAX_ITERATIONS) reached without final answer\033[0m"
-    # Merge back into parent's traj (even on failure)
+    # Write thought step to parent traj (even on failure)
     if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
-        traj merge "$_run_traj_id" \
-            --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" \
-            --content "(max iterations reached)" >/dev/null 2>/dev/null || true
+        local _last_step_id _child_dir_name _from_traj_ref
+        _last_step_id=$(traj last --traj_dir "$_run_traj_dir" "$_run_traj_id" --field step_id 2>/dev/null) || true
+        _child_dir_name=$(basename "$run_name")
+        _from_traj_ref="$_child_dir_name"
+        jq -nc \
+            --arg content "(max iterations reached)" \
+            --arg from_traj "$_run_traj_id" \
+            --arg from_step "${_last_step_id:-}" \
+            --arg from_traj_ref "$_from_traj_ref" \
+            '{type:"thought", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+            | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
     fi
     return 1
 }

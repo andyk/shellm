@@ -67,7 +67,7 @@ Every step is a single-line JSON object with at least these fields:
 
 | Field | Added by | Description |
 |-------|----------|-------------|
-| `step_id` | `traj append` | UUID v4, unique across all trajectories |
+| `step_id` | `traj append` | UUID v4, unique across all trajectories. Preserved if pre-set by caller (e.g. fork steps). |
 | `ts` | `traj append` | ISO 8601 timestamp, e.g. `2026-05-16T13:26:06.846-0700` |
 
 ## Step types
@@ -84,13 +84,14 @@ First step of every `trajectory.jsonl` file. Its `step_id` is the trajectory's I
 {"type":"trajectory", "step_id":"<uuid>", "ts":"..."}
 ```
 
-Optional fields:
-- `parent` — UUID of the parent trajectory (absent for roots)
-- `parent_ref` — relative path from this trajectory's directory to the parent's `trajectory.jsonl` (e.g. `../trajectory.jsonl`)
+Optional fields (absent for roots):
+- `parent_traj` — UUID of the parent trajectory
+- `parent_step` — UUID of the fork step in the parent trajectory that spawned this child
+- `parent_traj_ref` — relative path from this trajectory's directory to the parent's directory (e.g. `..`)
 
 #### `fork`
 
-Records that a child trajectory was spawned from this point.
+Records that a child trajectory was spawned from this point. The fork step's `step_id` is pre-generated and shared with the child trajectory's `parent_step` field for cross-referencing.
 
 ```json
 {"type":"fork", "child":"<child-traj-uuid>", "child_ref":"<hex8>-<slug>/trajectory.jsonl", "step_id":"<uuid>", "ts":"..."}
@@ -99,31 +100,23 @@ Records that a child trajectory was spawned from this point.
 - `child` — UUID of the child trajectory
 - `child_ref` — relative path from this trajectory's directory to the child's `trajectory.jsonl`
 
-#### `merge`
-
-Records that a child trajectory completed and its result was incorporated.
-
-```json
-{"type":"merge", "from_traj":"<child-traj-uuid>", "from_traj_ref":"<hex8>-<slug>/trajectory.jsonl", "from_step":"<last-step-uuid>", "content":"<summary>", "step_id":"<uuid>", "ts":"..."}
-```
-
-- `from_traj` — UUID of the child trajectory that was merged
-- `from_traj_ref` — relative path from this trajectory's directory to the child's `trajectory.jsonl`
-- `from_step` — UUID of the child's last step at merge time
-
 ### Reference pattern
 
-All cross-file references follow the same pattern: a UUID field for identity, paired with a `*_ref` field containing a relative path for direct file access. This applies uniformly to:
+All cross-trajectory references use three fields: a trajectory UUID, a step UUID within that trajectory, and a relative path for direct file access.
 
-| Reference | UUID field | Relative path field |
-|-----------|-----------|-------------------|
-| Parent trajectory | `parent` | `parent_ref` |
-| Forked child | `child` | `child_ref` |
-| Merged child | `from_traj` | `from_traj_ref` |
-| Spilled stdout | (implicit via `step_id`) | `stdout_ref` |
-| Spilled stderr | (implicit via `step_id`) | `stderr_ref` |
+| Reference | Traj UUID | Step UUID | Relative path |
+|-----------|-----------|-----------|---------------|
+| Parent trajectory | `parent_traj` | `parent_step` | `parent_traj_ref` |
+| Forked child | `child` | — | `child_ref` |
+| Source sub-traj | `from_traj` | `from_step` | `from_traj_ref` |
+| Spilled stdout | (implicit via `step_id`) | — | `stdout_ref` |
+| Spilled stderr | (implicit via `step_id`) | — | `stderr_ref` |
 
 The UUID is the stable identifier; the `_ref` path enables direct file access without searching.
+
+Cross-trajectory references appear in two directions:
+- **Upward** (`parent_traj`/`parent_step`/`parent_traj_ref`): on the child trajectory's first step, pointing to the parent that forked it
+- **Downward** (`from_traj`/`from_step`/`from_traj_ref`): on `thought` steps written back to a parent trajectory after a sub-run completes, pointing to the sub-trajectory's final step
 
 ### Run lifecycle types
 
@@ -229,6 +222,12 @@ A think-cycle thought (no action taken).
 {"type":"thought", "content":"<thought text>", "source":"think"}
 ```
 
+When a thought originates from a completed sub-trajectory (e.g. after a thinker's shellm run), it includes cross-references:
+
+```json
+{"type":"thought", "content":"<result>", "from_traj":"<sub-traj-uuid>", "from_step":"<final-step-uuid>", "from_traj_ref":"<hex8>-<slug>"}
+```
+
 #### `action`
 
 A think-cycle thought that begins with "action:" — triggers execution in a child trajectory.
@@ -289,11 +288,11 @@ When a field is spilled, three extra fields are added to the step:
 
 ## Tree structure
 
-Trajectories form a tree via `fork`/`merge` steps and `parent` fields:
+Trajectories form a tree via `fork` steps and `parent_traj` fields:
 
-- A **root** trajectory has no `parent` field on its first step.
-- A **child** trajectory has `"parent":"<parent-uuid>"` on its first step, and the parent has a corresponding `"fork"` step with `"child":"<child-uuid>"`.
-- When a child completes, the parent records a `"merge"` step.
+- A **root** trajectory has no `parent_traj` field on its first step.
+- A **child** trajectory has `"parent_traj":"<parent-uuid>"` and `"parent_step":"<fork-step-uuid>"` on its first step, and the parent has a corresponding `"fork"` step with `"child":"<child-uuid>"`.
+- When a child completes, the parent records a `"thought"` step with `from_traj`/`from_step`/`from_traj_ref` pointing to the child's final step.
 
 The filesystem mirrors this: child trajectory directories are nested inside their parent's directory.
 
@@ -318,7 +317,7 @@ The filesystem mirrors this: child trajectory directories are nested inside thei
     │   └── acce682d: sub task (3 steps)
     │       ├── bbb11111 [prompt] do the sub task
     │       └── bbb11112 [final] done
-    ├── aaa11114 [merge] <- acce682d-...
+    ├── aaa11114 [thought] (from acce682d)
     └── aaa11115 [final] Hello!
 ```
 
@@ -351,8 +350,8 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 |---------|--------|-------------|
 | `new` | `new [--slug TEXT] [--field key=val ...]` | Create a new trajectory. Outputs UUID then relative dir path. |
 | `append` | `append [ID] [--field key=val ...]` | Append a step from stdin JSON or `--field` flags. |
-| `fork` | `fork <child_id> [ID]` | Append a fork step pointing to `<child_id>`. |
-| `merge` | `merge <child_id> [ID] [--content TEXT]` | Append a merge step from a completed child. |
+| `fork` | `fork [ID] [--child CHILD_ID] [--slug TEXT] [--step-id UUID]` | Append a fork step. Auto-creates child traj if `--child` omitted. |
+| `merge` | `merge <child_id> [ID] [--field key=val ...]` | Append a merge step from a completed child. |
 | `show` | `show <id> [--full] [--field F]` | Show a trajectory or step by ID. Searches all files in traj_dir. |
 | `tail` | `tail [ID] [-n N] [-f] [--type T1,T2]` | Stream recent steps (like `tail` for JSONL). |
 | `search` | `search <pattern> [ID] [--field F] [-i] [-C N] [-E]` | Search step fields for a pattern. |
@@ -381,6 +380,6 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 {"type":"prompt","content":"echo hello","step_id":"aaa11111-0000-0000-0000-000000000002","ts":"2026-05-16T13:26:06.855-0700"}
 {"type":"run-summary","tldr":"Ran echo command","full_summary":"","step_id":"aaa11111-0000-0000-0000-000000000003","ts":"2026-05-16T13:26:07.100-0700"}
 {"type":"fork","child":"acce682d-1234-5678-9abc-def012345678","step_id":"aaa11111-0000-0000-0000-000000000004","ts":"2026-05-16T13:26:08.000-0700"}
-{"type":"merge","from_traj":"acce682d-1234-5678-9abc-def012345678","from_step":"bbb11111-0000-0000-0000-000000000002","content":"Sub task done","step_id":"aaa11111-0000-0000-0000-000000000005","ts":"2026-05-16T13:26:09.000-0700"}
+{"type":"thought","content":"Sub task done","from_traj":"acce682d-1234-5678-9abc-def012345678","from_step":"bbb11111-0000-0000-0000-000000000002","from_traj_ref":"acce682d-sub-task","step_id":"aaa11111-0000-0000-0000-000000000005","ts":"2026-05-16T13:26:09.000-0700"}
 {"type":"final","thought":"Got the output, returning it.","content":"hello","step_id":"aaa11111-0000-0000-0000-000000000006","ts":"2026-05-16T13:26:10.000-0700"}
 ```
