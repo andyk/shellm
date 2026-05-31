@@ -49,6 +49,29 @@ for tool in "${TOOLS[@]}"; do
     fi
 done
 
+# Build and install Rust TUI tools
+if [[ -d "tui" ]]; then
+    if command -v cargo &>/dev/null; then
+        for tui_dir in tui/*/; do
+            [[ -f "${tui_dir}Cargo.toml" ]] || continue
+            name=$(basename "$tui_dir")
+            printf 'Building %s...\n' "$name"
+            (cd "$tui_dir" && cargo build --release --quiet) || {
+                printf 'Warning: failed to build %s (skipping)\n' "$name" >&2
+                continue
+            }
+            local_bin="${tui_dir}target/release/$name-tui"
+            [[ -f "$local_bin" ]] || local_bin="${tui_dir}target/release/$name"
+            if [[ -f "$local_bin" ]]; then
+                cp "$local_bin" "$PREFIX/$(basename "$local_bin")"
+                echo "Installed $(basename "$local_bin") → $PREFIX/$(basename "$local_bin")"
+            fi
+        done
+    else
+        echo "Warning: cargo not found, skipping TUI tools" >&2
+    fi
+fi
+
 # Install bundled skills to ~/.skills/core-skills
 SKILLS_PREFIX="${HOME}/.skills/core-skills"
 mkdir -p "$SKILLS_PREFIX"

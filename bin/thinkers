@@ -841,6 +841,32 @@ cmd_step() {
 }
 
 # ---------------------------------------------------------------------------
+# watch — stream new steps from the root trajectory
+# ---------------------------------------------------------------------------
+
+cmd_watch() {
+    _require_env
+
+    local n=0
+    [[ -n "${1:-}" ]] && n="$1"
+
+    trap 'exit 0' INT TERM
+    traj tail -f -n "$n" --raw 2>/dev/null \
+    | while IFS= read -r line; do
+        local step_type source content
+        step_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
+        source=$(printf '%s' "$line" | jq -r '.source // empty' 2>/dev/null)
+        content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)
+        [[ -z "$step_type" ]] && continue
+
+        local label="$step_type"
+        [[ -n "$source" ]] && label="$step_type ($source)"
+
+        printf '[%s] %s\n' "$label" "$content"
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 
@@ -854,6 +880,7 @@ Usage:
   thinkers status              Show dispatcher and per-thinker status
   thinkers list                List installed thinkers with subscriptions
   thinkers step <name>          Manually trigger a thinker's step
+  thinkers watch [N]           Stream new steps (show last N first, default 0)
   thinkers new <name>          Scaffold a new thinker
 
 Options:
@@ -892,6 +919,7 @@ case "$cmd" in
     status)   cmd_status ;;
     list)     cmd_list ;;
     step)     cmd_step "$@" ;;
+    watch)    cmd_watch "$@" ;;
     new)      cmd_new "$@" ;;
     help)     usage ;;
     "")       usage ;;

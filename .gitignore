@@ -6,6 +6,10 @@
 .skills/
 .skillsrc
 plans/
+design/Bobbys-Brain
+
+# Compiled binaries (built by install.sh from tui/ sources)
+bin/chat-tui
 
 # Identity instances are runtime data (logs, trajectories, memories, etc.)
 .identities/

@@ -29,7 +29,7 @@ cat > "$THINKERS_DIR/custom-thinker/prompt.md" << 'EOF'
 EOF
 ```
 
-3. **Suggest a change to the main thinker** via a thought (don't modify directly without strong justification).
+3. **Suggest a change to the executive thinker** via a thought (don't modify directly without strong justification).
 
 Be conservative. Only make changes when there's clear evidence of a problem and a specific fix. The system should be stable by default.
 

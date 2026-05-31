@@ -9,7 +9,11 @@ metadata:
 
 # chat — Talking to humans
 
-When a human sends me a message (appears as a `human-msg` step in my trajectory), I can reply using:
+When a human sends me a message, it appears as an `observation` step (source=`"chat"`) in my trajectory, like:
+
+    [chat] human: <message>
+
+I can reply using:
 
     chat reply <message>
 
@@ -19,4 +23,4 @@ To review recent conversation history:
 
     chat history [N]     # show last N messages (default 20)
 
-I should reply when I see a human-msg that seems directed at me or asks me a question. I keep my replies natural and conversational.
+I should reply when I see a chat observation that seems directed at me or asks me a question. I keep my replies natural and conversational.

@@ -13,9 +13,12 @@ case "${1:-}" in -h|--help|help) ;; *)
     ;; esac
 
 cmd_send() {
-    local message=""
+    local message="" from="human"
     while [[ $# -gt 0 ]]; do
-        message="${message:+$message }$1"; shift
+        case "$1" in
+            --from) from="${2:?--from requires a name}"; shift 2 ;;
+            *) message="${message:+$message }$1"; shift ;;
+        esac
     done
 
     # Read from stdin if no args and stdin is piped
@@ -25,7 +28,15 @@ cmd_send() {
     [[ -z "$message" ]] && die "No message provided. Usage: chat send <message>"
 
     # Append human-msg step to trajectory
-    printf '{"type":"human-msg","content":%s}' "$(printf '%s' "$message" | jq -Rsa .)" \
+    local step='{"type":"human-msg","content":'
+    step+="$(printf '%s' "$message" | jq -Rsa .)"
+    [[ "$from" != "human" ]] && step+=',"from":'"$(printf '%s' "$from" | jq -Rsa .)"
+    step+='}'
+    printf '%s' "$step" | traj append >/dev/null
+
+    # Append observation for thinkers
+    printf '{"type":"observation","content":%s,"source":"chat"}' \
+        "$(printf '[chat] %s: %s' "$from" "$message" | jq -Rsa .)" \
         | traj append >/dev/null
 
     printf 'Message sent.\n' >&2
@@ -45,11 +56,23 @@ cmd_reply() {
         "$(printf '%s' "$message" | jq -Rsa .)" \
         | traj append >/dev/null
 
+    # Append observation for thinkers
+    printf '{"type":"observation","content":%s,"source":"chat"}' \
+        "$(printf '[chat] me: %s' "$message" | jq -Rsa .)" \
+        | traj append >/dev/null
+
     printf 'Reply sent.\n' >&2
 }
 
 cmd_send_file() {
-    local filepath="${1:?Usage: chat send-file <filename>}"
+    local from="human" filepath=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from) from="${2:?--from requires a name}"; shift 2 ;;
+            *) filepath="$1"; shift ;;
+        esac
+    done
+    [[ -z "$filepath" ]] && die "Usage: chat send-file [--from <name>] <filename>"
     [[ -f "$filepath" ]] || die "File not found: $filepath"
 
     local filename
@@ -57,9 +80,17 @@ cmd_send_file() {
     local content
     content=$(cat "$filepath")
 
-    printf '{"type":"human-msg","filename":%s,"content":%s}' \
-        "$(printf '%s' "$filename" | jq -Rsa .)" \
-        "$(printf '%s' "$content" | jq -Rsa .)" \
+    local step='{"type":"human-msg","filename":'
+    step+="$(printf '%s' "$filename" | jq -Rsa .)"
+    step+=',"content":'
+    step+="$(printf '%s' "$content" | jq -Rsa .)"
+    [[ "$from" != "human" ]] && step+=',"from":'"$(printf '%s' "$from" | jq -Rsa .)"
+    step+='}'
+    printf '%s' "$step" | traj append >/dev/null
+
+    # Append observation for thinkers
+    printf '{"type":"observation","content":%s,"source":"chat"}' \
+        "$(printf '[chat] %s sent file %s: %s' "$from" "$filename" "$content" | jq -Rsa .)" \
         | traj append >/dev/null
 
     printf 'File sent: %s\n' "$filename" >&2
@@ -71,76 +102,27 @@ cmd_history() {
 
     local identity_name="${IDENTITY_NAME:-agent}"
 
-    traj tail -n "$n" --filter type=human-msg,agent-msg --raw 2>/dev/null \
+    traj cat --filter type=human-msg,agent-msg --raw 2>/dev/null \
+    | tail -n "$n" \
     | while IFS= read -r line; do
-        local step_type content
+        local step_type content from
         step_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
         content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)
         [[ -z "$content" ]] && continue
         case "$step_type" in
-            human-msg)  printf 'you: %s\n' "$content" ;;
-            agent-msg)  printf '%s: %s\n' "$identity_name" "$content" ;;
+            human-msg)
+                from=$(printf '%s' "$line" | jq -r '.from // empty' 2>/dev/null)
+                printf '%s: %s\n' "${from:-you}" "$content"
+                ;;
+            agent-msg)
+                printf '%s: %s\n' "$identity_name" "$content"
+                ;;
         esac
     done
 }
 
 cmd_repl() {
-    local identity_name="${IDENTITY_NAME:-unknown}"
-    printf 'Chat with %s. Ctrl+D to exit.\n' "$identity_name" >&2
-
-    # Background watcher for agent replies
-    local watcher_pid=""
-    _start_reply_watcher() {
-        traj tail -f --filter type=agent-msg -n 0 --raw 2>/dev/null \
-        | while IFS= read -r line; do
-            local content
-            content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)
-            [[ -n "$content" ]] && printf '\n%s: %s\n> ' "$identity_name" "$content" >&2
-        done &
-        watcher_pid=$!
-    }
-    _start_reply_watcher
-    trap 'kill "$watcher_pid" 2>/dev/null; wait "$watcher_pid" 2>/dev/null' EXIT
-
-    # Readline history
-    local history_file="${IDENTITY_DIR:-.}/repl_history"
-    touch "$history_file"
-    history -r "$history_file" 2>/dev/null || true
-
-    while true; do
-        local input="" _sigint=0 read_rc=0
-
-        trap '_sigint=1; kill "$watcher_pid" 2>/dev/null; wait "$watcher_pid" 2>/dev/null' INT
-        IFS= read -e -r -p "> " input || read_rc=$?
-        trap 'kill "$watcher_pid" 2>/dev/null; wait "$watcher_pid" 2>/dev/null' EXIT
-
-        if [[ "$_sigint" -eq 1 ]]; then
-            printf '\n' >&2
-            continue
-        fi
-
-        if [[ "$read_rc" -ne 0 ]]; then
-            printf '\n' >&2
-            break
-        fi
-
-        # Save to readline history
-        history -s "$input" 2>/dev/null || true
-        history -w "$history_file" 2>/dev/null || true
-
-        [[ -z "$input" ]] && continue
-
-        # Sanitize
-        input="${input%$'\r'}"
-        input="${input%"${input##*[![:space:]]}"}"
-
-        # Handle /exit
-        case "$input" in
-            /exit|/q) break ;;
-        esac
-
-        cmd_send "$input"
-    done
+    exec chat-tui "$@"
 }
 
 usage() {
@@ -148,8 +130,8 @@ usage() {
 chat — Messaging for an activated identity
 
 Usage:
-  chat send <message>      Human sends a message to the agent
-  chat send-file <file>    Send a file's contents as a message
+  chat send [--from <name>] <message>    Human sends a message to the agent
+  chat send-file [--from <name>] <file> Send a file's contents as a message
   chat reply <message>     Agent sends a message to the human
   chat history [N]         Show last N messages (default 20)
   chat repl                Interactive chat (shows agent replies inline)
