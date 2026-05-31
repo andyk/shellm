@@ -329,20 +329,24 @@ Exit this shell first with: exit"
 cmd_new() {
     local set_default=0
     local name=""
+    local memories_dir=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --default) set_default=1; shift ;;
+            --memories)
+                [[ -z "${2:-}" ]] && die "--memories requires a directory argument"
+                memories_dir="$2"; shift 2 ;;
             -*) die "Unknown option: $1" ;;
             *)
-                [[ -n "$name" ]] && die "Usage: identity new [--default] <name>"
+                [[ -n "$name" ]] && die "Usage: identity new [--default] [--memories DIR] <name>"
                 name="$1"; shift
                 ;;
         esac
     done
 
-    [[ -z "$name" ]] && die "Usage: identity new [--default] <name>"
+    [[ -z "$name" ]] && die "Usage: identity new [--default] [--memories DIR] <name>"
 
     # Validate name: lowercase alphanumeric + hyphens
     if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
@@ -358,6 +362,18 @@ cmd_new() {
 
     # Create per-identity dirs
     mkdir -p "$identity_dir/memories" "$identity_dir/skills" "$identity_dir/kernel" "$identity_dir/trajectories"
+
+    # Import initial memories if --memories was given
+    if [[ -n "$memories_dir" ]]; then
+        [[ -d "$memories_dir" ]] || die "--memories: not a directory: $memories_dir"
+        local _mem_count=0
+        for _mf in "$memories_dir"/*.md; do
+            [[ -f "$_mf" ]] || continue
+            cp "$_mf" "$identity_dir/memories/"
+            (( _mem_count++ ))
+        done
+        printf 'Imported %d memories from %s\n' "$_mem_count" "$memories_dir" >&2
+    fi
 
     # Create root trajectory via traj new
     local _new_output _root_traj_id _root_traj_basename
@@ -827,7 +843,7 @@ usage() {
 identity — Identity management
 
 Usage:
-  identity new <name> [--default]  Create a new identity
+  identity new <name> [--default] [--memories DIR]  Create a new identity
   identity list [-a]         List all identities (-a: show directories)
   identity info [name] [-n|-p]  Show identity info (default: default; -n: name, -p: dir)
   identity default [name]     Show or set the default identity

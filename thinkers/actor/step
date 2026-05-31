@@ -41,14 +41,15 @@ while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
 done < <(_build_shellm_flags "$IDENTITY_DIR")
 
+# Load thinker prompt
+prompt_file="$SCRIPT_DIR/prompt.md"
+[[ -f "$prompt_file" ]] || { printf 'actor/step: error: prompt.md not found at %s\n' "$prompt_file" >&2; exit 1; }
+thinker_prompt=$(cat "$prompt_file")
+
 act_prompt="<context>
 $system_prompt
 
-Your job as the \"action executor\" is to carry out actions from the thought stream. Do the work described below.
-When you are done, if there is a meaningful observation or result to record, write it to your trajectory:
-  printf '{\"type\":\"observation\",\"content\":<json-escaped result>,\"source\":\"actor\"}' | traj append
-Then set FINAL to signal completion (FINAL content is not important, only traj matters).
-If there is nothing meaningful to observe, just set FINAL.
+$thinker_prompt
 </context>
 
 ACTION: $action_body"
