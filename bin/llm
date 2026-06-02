@@ -26,9 +26,10 @@ LLM_MODEL=""
 LLM_SYSTEM=""
 LLM_MAX_TOKENS=""
 LLM_MESSAGES=""
-LLM_STREAM=0
+LLM_STREAM=1
 LLM_PROVIDER=""
 LLM_THINKING=0
+LLM_THINKING_LEVEL=""
 LLM_EFFORT=""
 LLM_RAW=0
 LLM_PROMPT=""
@@ -48,15 +49,50 @@ Usage:
 
 Options:
   -m, --model MODEL        Model to use. Default: claude-sonnet-4-5-20250929
-  -s, --system TEXT        System prompt
+  -s, --system-prompt TEXT System prompt text
+  --system-prompt-file F   Read system prompt from file
   -t, --max-tokens N       Max output tokens. Default: model-specific cap
   -M, --messages JSON      Messages array JSON, e.g. [{"role":"user","content":"hi"}]
-  --stream                 Stream response text
+  --no-stream              Disable streaming (streaming is on by default)
   --provider NAME          Provider: anthropic, openai, or gemini
-  --thinking               Request Anthropic summarized thinking
+  --thinking [LEVEL]       Enable thinking (Anthropic: adaptive; Gemini: minimal/low/medium/high)
   --effort LEVEL           Thinking effort/provider output effort
   --raw                    Print raw non-streaming API response JSON
   -h, --help               Show this help
+
+Models:
+  Anthropic:  claude-opus-4-7, claude-sonnet-4-5, claude-haiku-4-5
+              claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus
+  OpenAI:     gpt-5.5, gpt-5, gpt-4o, o1, o3, o4
+  Gemini:     gemini-3.5-flash, gemini-2.0-flash, gemini-*
+
+Thinking & effort:
+  These flags control how much reasoning the model does before answering.
+  Each provider implements this differently:
+
+  Anthropic (--thinking, --effort):
+    --thinking enables extended thinking (chain-of-thought visible on stderr).
+    --effort controls output effort independent of thinking:
+      low, medium, high (default), xhigh, max
+    Both flags can be combined. Without --thinking, the model still reasons
+    internally but doesn't expose it.
+
+  Gemini (--thinking LEVEL):
+    Gemini models think by default. --thinking sets the depth:
+      minimal  Suppress thinking; lowest latency
+      low      Light reasoning
+      medium   Balanced (default for 3.5 Flash)
+      high     Deep reasoning (default for 3.1 Pro)
+    --effort is ignored for Gemini.
+
+  OpenAI (--thinking LEVEL):
+    GPT-5.5 and o-series models support reasoning. --thinking sets depth:
+      none     No reasoning; lowest latency
+      low      Light reasoning
+      medium   Balanced (default for gpt-5.5)
+      high     Deep reasoning
+      xhigh    Maximum reasoning depth
+    --effort is ignored for OpenAI.
 
 Environment:
   ANTHROPIC_API_KEY        Required for Anthropic models
@@ -67,7 +103,7 @@ Environment:
 Examples:
   llm -m claude-sonnet-4-5-20250929 "explain quicksort"
   echo "summarize this" | llm -m gpt-5
-  llm --stream --thinking -m claude-opus-4-7 "solve this carefully"
+  llm --thinking -m claude-opus-4-7 "solve this carefully"
   llm --raw -m gemini-2.0-flash "return a JSON greeting"
 EOF
     exit "${1:-0}"
@@ -81,12 +117,19 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)       usage 0 ;;
         -m|--model)      LLM_MODEL="${2:?--model requires a value}"; shift 2 ;;
-        -s|--system)     LLM_SYSTEM="${2:?--system requires a value}"; shift 2 ;;
+        -s|--system-prompt) LLM_SYSTEM="${2:?--system-prompt requires a value}"; shift 2 ;;
+        --system-prompt-file) local _spf="${2:?--system-prompt-file requires a path}"; [[ -f "$_spf" ]] || die "System prompt file not found: $_spf"; LLM_SYSTEM=$(cat "$_spf"); shift 2 ;;
         -t|--max-tokens) LLM_MAX_TOKENS="${2:?--max-tokens requires a value}"; shift 2 ;;
         -M|--messages)   LLM_MESSAGES="${2:?--messages requires a value}"; shift 2 ;;
         --stream)        LLM_STREAM=1; shift ;;
+        --no-stream)     LLM_STREAM=0; shift ;;
         --provider)      LLM_PROVIDER="${2:?--provider requires a value}"; shift 2 ;;
-        --thinking)      LLM_THINKING=1; shift ;;
+        --thinking)
+            LLM_THINKING=1
+            if [[ -n "${2:-}" && "$2" != -* ]]; then
+                LLM_THINKING_LEVEL="$2"; shift
+            fi
+            shift ;;
         --effort)        LLM_EFFORT="${2:?--effort requires a value}"; shift 2 ;;
         --raw)           LLM_RAW=1; shift ;;
         -*)              die "Unknown option: $1 (try llm --help)" ;;
@@ -211,13 +254,24 @@ build_payload_openai() {
         o1*|o3*|o4*|gpt-5*) tokens_field="max_completion_tokens" ;;
     esac
 
-    jq -n \
-        --arg model "$LLM_MODEL" \
-        --arg tokens_field "$tokens_field" \
-        --argjson max_tokens "$LLM_MAX_TOKENS" \
-        --argjson messages "$msgs" \
-        --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )" \
-        '{model:$model, messages:$messages, stream:$stream} + {($tokens_field): $max_tokens}'
+    local -a jq_args=(
+        --arg model "$LLM_MODEL"
+        --arg tokens_field "$tokens_field"
+        --argjson max_tokens "$LLM_MAX_TOKENS"
+        --argjson messages "$msgs"
+        --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )"
+    )
+    local jq_filter='{model:$model, messages:$messages, stream:$stream} + {($tokens_field): $max_tokens}'
+
+    # Map --thinking LEVEL to OpenAI reasoning.effort (only when an explicit
+    # level is given; bare --thinking without a level is ignored for OpenAI
+    # since not all models support the reasoning parameter).
+    if [[ -n "$LLM_THINKING_LEVEL" ]]; then
+        jq_args+=(--arg effort "$LLM_THINKING_LEVEL")
+        jq_filter="${jq_filter%\}} , reasoning:{effort:\$effort, summary:\"auto\"}}"
+    fi
+
+    jq -n "${jq_args[@]}" "$jq_filter"
 }
 
 build_payload_gemini() {
@@ -226,11 +280,18 @@ build_payload_gemini() {
     contents=$(printf '%s' "$LLM_MESSAGES" | jq '[.[] | {role: (if .role == "assistant" then "model" else .role end), parts: [{text: .content}]}]')
 
     local -a jq_args=(--argjson contents "$contents" --argjson maxOutputTokens "$LLM_MAX_TOKENS")
-    local jq_filter='{contents:$contents, generationConfig:{maxOutputTokens:$maxOutputTokens}}'
+    local gen_config='maxOutputTokens:$maxOutputTokens'
+
+    if [[ -n "$LLM_THINKING_LEVEL" ]]; then
+        jq_args+=(--arg thinkingLevel "$LLM_THINKING_LEVEL")
+        gen_config="${gen_config}, thinkingConfig:{thinkingLevel:\$thinkingLevel}"
+    fi
+
+    local jq_filter="{contents:\$contents, generationConfig:{${gen_config}}}"
 
     if [[ -n "$LLM_SYSTEM" ]]; then
         jq_args+=(--arg system "$LLM_SYSTEM")
-        jq_filter='{contents:$contents, systemInstruction:{parts:[{text:$system}]}, generationConfig:{maxOutputTokens:$maxOutputTokens}}'
+        jq_filter="{contents:\$contents, systemInstruction:{parts:[{text:\$system}]}, generationConfig:{${gen_config}}}"
     fi
 
     jq -n "${jq_args[@]}" "$jq_filter"
@@ -290,57 +351,93 @@ extract_text_gemini() {
 # ---------------------------------------------------------------------------
 
 stream_anthropic() {
-    while IFS= read -r raw_line; do
+    local _saw_data=0 _err_buf=""
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         local line="${raw_line%$'\r'}"
-        [[ "$line" != data:\ * ]] && continue
-        local json="${line#data: }"
-        [[ "$json" == "[DONE]" ]] && continue
+        if [[ "$line" == data:\ * ]]; then
+            _saw_data=1
+            local json="${line#data: }"
+            [[ "$json" == "[DONE]" ]] && continue
 
-        case "$json" in
-            *'"content_block_start"'*)
-                if [[ "$json" == *'"thinking"'* ]]; then
-                    _block="thinking"
-                elif [[ "$json" == *'"text"'* ]]; then
-                    _block="text"
-                fi
-                ;;
-            *'"content_block_delta"'*)
-                if [[ "$_block" == "thinking" ]]; then
-                    printf '%s' "$json" | jq -j '.delta.thinking // empty' >&2
-                elif [[ "$_block" == "text" ]]; then
-                    printf '%s' "$json" | jq -j '.delta.text // empty'
-                fi
-                ;;
-            *'"content_block_stop"'*)
-                _block=""
-                ;;
-            *'"type":"error"'*)
-                local err_msg
-                err_msg=$(printf '%s' "$json" | jq -r '.error.message // "unknown error"')
-                die "API stream error: $err_msg"
-                ;;
-        esac
+            case "$json" in
+                *'"content_block_start"'*)
+                    if [[ "$json" == *'"thinking"'* ]]; then
+                        _block="thinking"
+                    elif [[ "$json" == *'"text"'* ]]; then
+                        _block="text"
+                    fi
+                    ;;
+                *'"content_block_delta"'*)
+                    if [[ "$_block" == "thinking" ]]; then
+                        printf '%s' "$json" | jq -j '.delta.thinking // empty' >&2
+                    elif [[ "$_block" == "text" ]]; then
+                        printf '%s' "$json" | jq -j '.delta.text // empty'
+                    fi
+                    ;;
+                *'"content_block_stop"'*)
+                    _block=""
+                    ;;
+                *'"type":"error"'*)
+                    local err_msg
+                    err_msg=$(printf '%s' "$json" | jq -r '.error.message // "unknown error"')
+                    die "API stream error: $err_msg"
+                    ;;
+            esac
+        elif [[ "$_saw_data" -eq 0 ]]; then
+            _err_buf="${_err_buf}${line}
+"
+        fi
     done
+    if [[ "$_saw_data" -eq 0 && -n "$_err_buf" ]]; then
+        local _err
+        _err=$(printf '%s' "$_err_buf" | jq -r '.error.message // empty' 2>/dev/null || true)
+        [[ -n "$_err" ]] && die "API error: $_err"
+        die "API error: $_err_buf"
+    fi
 }
 
 stream_openai() {
-    while IFS= read -r raw_line; do
+    local _saw_data=0 _err_buf=""
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         local line="${raw_line%$'\r'}"
-        [[ "$line" != data:\ * ]] && continue
-        local json="${line#data: }"
-        [[ "$json" == "[DONE]" ]] && continue
-        printf '%s' "$json" | jq -j '.choices[0].delta.content // empty'
+        if [[ "$line" == data:\ * ]]; then
+            _saw_data=1
+            local json="${line#data: }"
+            [[ "$json" == "[DONE]" ]] && continue
+            printf '%s' "$json" | jq -j '.choices[0].delta.content // empty'
+        elif [[ "$_saw_data" -eq 0 ]]; then
+            _err_buf="${_err_buf}${line}
+"
+        fi
     done
+    if [[ "$_saw_data" -eq 0 && -n "$_err_buf" ]]; then
+        local _err
+        _err=$(printf '%s' "$_err_buf" | jq -r '.error.message // empty' 2>/dev/null || true)
+        [[ -n "$_err" ]] && die "API error: $_err"
+        die "API error: $_err_buf"
+    fi
 }
 
 stream_gemini() {
-    while IFS= read -r raw_line; do
+    local _saw_data=0 _err_buf=""
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         local line="${raw_line%$'\r'}"
-        [[ "$line" != data:\ * ]] && continue
-        local json="${line#data: }"
-        [[ "$json" == "[DONE]" ]] && continue
-        printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty'
+        if [[ "$line" == data:\ * ]]; then
+            _saw_data=1
+            local json="${line#data: }"
+            [[ "$json" == "[DONE]" ]] && continue
+            printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty'
+        elif [[ "$_saw_data" -eq 0 ]]; then
+            _err_buf="${_err_buf}${line}
+"
+        fi
     done
+    if [[ "$_saw_data" -eq 0 && -n "$_err_buf" ]]; then
+        local _err
+        _err=$(printf '%s' "$_err_buf" | jq -r '.error.message // empty' 2>/dev/null || true)
+        [[ -n "$_err" ]] && die "API error: $_err"
+        die "API error: $_err_buf"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -356,10 +453,19 @@ headers=()
 get_url_headers
 
 if [[ "$LLM_STREAM" -eq 1 ]]; then
-    # Streaming path
+    # Streaming path — use process substitution so stream handler runs in the
+    # main shell (not a pipeline subshell), allowing die() to exit properly.
     _block=""
-    curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>/dev/null \
-        | "stream_${LLM_PROVIDER}"
+    _curl_err=$(mktemp)
+    "stream_${LLM_PROVIDER}" < <(curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>"$_curl_err")
+    # If we get here, the stream handler didn't die — check for curl errors
+    if [[ -s "$_curl_err" ]]; then
+        local _ce
+        _ce=$(cat "$_curl_err")
+        rm -f "$_curl_err"
+        die "curl error: $_ce"
+    fi
+    rm -f "$_curl_err"
 else
     # Non-streaming path
     local_resp=$(mktemp)

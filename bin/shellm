@@ -32,8 +32,12 @@ _shellm_load_env ".env" || _shellm_load_env "$SHELLM_CONF_DIR/.env" || true
 SHELLM_MODEL="${SHELLM_MODEL:-claude-opus-4-7}"
 SHELLM_MAX_ITERATIONS="${SHELLM_MAX_ITERATIONS:-}"
 SHELLM_TRUNCATE="${SHELLM_TRUNCATE:-2000}"
-SHELLM_API_URL="${SHELLM_API_URL:-https://api.anthropic.com/v1/messages}"
-export LLM_API_URL="$SHELLM_API_URL"
+SHELLM_API_URL="${SHELLM_API_URL:-}"
+# Clear any inherited LLM_API_URL so llm uses per-provider defaults
+unset LLM_API_URL 2>/dev/null || true
+if [[ -n "$SHELLM_API_URL" ]]; then
+    export LLM_API_URL="$SHELLM_API_URL"
+fi
 SHELLM_MAX_TOKENS="${SHELLM_MAX_TOKENS:-}"
 SHELLM_EFFORT="${SHELLM_EFFORT:-high}"
 SHELLM_DOCKER_IMAGE="${SHELLM_DOCKER_IMAGE:-ubuntu:latest}"
@@ -120,7 +124,7 @@ Options:
   -v, --verbose        Verbose/debug mode
   -q, --quiet          Suppress all progress/streaming output (stderr), keep only final answer
   -h, --help           Show this help
-  --model MODEL        Model to use (default: claude-opus-4-7)
+  -m, --model MODEL    Model to use (default: claude-opus-4-7)
   --max-iterations N   Max loop iterations (default: unlimited)
   --max-tokens N       Max tokens per response (default: model's max output cap)
   --effort LEVEL       Thinking effort: low, medium, high, xhigh, max (default: high)
@@ -128,7 +132,8 @@ Options:
   --env NAME           Use/create a named env (Docker container or local)
   --new-env            Force creation of a new env (cannot combine with --env)
   --temp-docker        Teardown Docker container on exit (default: persist)
-  --system-prompt FILE Override the default system prompt with contents of FILE
+  -s, --system-prompt TEXT  Override the default system prompt with inline text
+  --system-prompt-file FILE Override the default system prompt with contents of FILE
   --docker-image IMAGE Docker image to use (default: ubuntu:latest)
   --docker-access MODE Docker access for generated code: none, broker, socket, dind
   --resume [TRAJ_ID]     Resume a previous run (default: most recent trajectory)
@@ -733,6 +738,20 @@ docker_setup() {
         seen_dirs+=("$workspace")
     fi
 
+    # Mount identity dir so skills, thinkers, etc. are accessible in the container.
+    if [[ -n "${IDENTITY_DIR:-}" && -d "$IDENTITY_DIR" ]]; then
+        local _id_abs
+        _id_abs=$(cd "$IDENTITY_DIR" && pwd)
+        local _id_covered=0
+        for d in "${seen_dirs[@]}"; do
+            [[ "$_id_abs" == "$d" || "$_id_abs" == "$d"/* ]] && { _id_covered=1; break; }
+        done
+        if [[ "$_id_covered" -eq 0 ]]; then
+            extra_mounts+=(-v "$_id_abs:$_id_abs")
+            seen_dirs+=("$_id_abs")
+        fi
+    fi
+
     # Build mount flags for -f file directories.
     for f in "${context_files[@]+"${context_files[@]}"}"; do
         local abs_path abs_dir
@@ -763,6 +782,46 @@ docker_setup() {
         seen_dirs+=("$abs_dir")
         extra_mounts+=(-v "$abs_dir:$abs_dir")
     done
+
+    # Mount symlink targets: scan all mounted dirs for symlinks pointing outside.
+    # This ensures e.g. identity skill symlinks resolve inside the container.
+    local _symlink_target_dirs=""
+    for _scan_dir in "${seen_dirs[@]}"; do
+        while IFS= read -r -d '' _link; do
+            local _target
+            _target=$(readlink -f "$_link" 2>/dev/null) || continue
+            [[ -e "$_target" ]] || continue
+            local _tdir
+            _tdir=$(dirname "$_target")
+            # Skip if already under a mounted dir
+            local _covered=0
+            for _sd in "${seen_dirs[@]}"; do
+                [[ "$_tdir" == "$_sd" || "$_tdir" == "$_sd"/* ]] && { _covered=1; break; }
+            done
+            [[ "$_covered" -eq 1 ]] && continue
+            # Skip if already collected
+            case $'\n'"$_symlink_target_dirs"$'\n' in
+                *$'\n'"$_tdir"$'\n'*) continue ;;
+            esac
+            _symlink_target_dirs="${_symlink_target_dirs:+${_symlink_target_dirs}
+}${_tdir}"
+        done < <(find "$_scan_dir" -type l -print0 2>/dev/null)
+    done
+    # Deduplicate: remove subdirs of other target dirs, then mount
+    local _tdir _other _is_sub
+    while IFS= read -r _tdir; do
+        [[ -z "$_tdir" ]] && continue
+        _is_sub=0
+        while IFS= read -r _other; do
+            [[ -z "$_other" || "$_tdir" == "$_other" ]] && continue
+            if [[ "$_tdir" == "$_other"/* ]]; then
+                _is_sub=1; break
+            fi
+        done <<< "$_symlink_target_dirs"
+        [[ "$_is_sub" -eq 1 ]] && continue
+        extra_mounts+=(-v "$_tdir:$_tdir:ro")
+        seen_dirs+=("$_tdir")
+    done <<< "$_symlink_target_dirs"
 
     case "$SHELLM_DOCKER_ACCESS" in
         broker)
@@ -1103,29 +1162,43 @@ call_llm() {
     local messages_json="$2"
     local thinking_output_file="${3:-}"
 
-    local -a args=(--stream -m "$SHELLM_MODEL"
-        --effort "$SHELLM_EFFORT" --thinking -s "$system_prompt" -M "$messages_json")
+    local -a args=(-m "$SHELLM_MODEL"
+        --effort "$SHELLM_EFFORT" --thinking --system-prompt "$system_prompt" -M "$messages_json")
     [[ -n "$SHELLM_MAX_TOKENS" ]] && args+=(-t "$SHELLM_MAX_TOKENS")
 
-    local text_file
+    local text_file stderr_file
     text_file=$(mktemp)
+    stderr_file=$(mktemp)
 
-    if [[ -n "$thinking_output_file" ]]; then
-        if [[ "$QUIET" -eq 0 ]]; then
-            llm "${args[@]}" 2> >(tee "$thinking_output_file" >&2) | tee "$text_file" >&2
-        else
-            llm "${args[@]}" 2>"$thinking_output_file" > "$text_file"
+    # Run llm, capturing stdout to text_file and stderr to stderr_file.
+    # When not quiet, also tee stdout to stderr (for live display) and
+    # stderr to the terminal. Use a subshell to capture llm's exit code
+    # despite the pipeline.
+    local llm_exit=0
+    if [[ "$QUIET" -eq 0 ]]; then
+        { llm "${args[@]}" 2>"$stderr_file"; echo $? > "$text_file.rc"; } | tee "$text_file" >&2
+        llm_exit=$(cat "$text_file.rc" 2>/dev/null) || llm_exit=0
+        rm -f "$text_file.rc"
+        # Replay stderr (thinking output + errors) to terminal and thinking file
+        if [[ -s "$stderr_file" ]]; then
+            cat "$stderr_file" >&2
+            [[ -n "$thinking_output_file" ]] && cp "$stderr_file" "$thinking_output_file"
         fi
     else
-        if [[ "$QUIET" -eq 0 ]]; then
-            llm "${args[@]}" 2>/dev/null | tee "$text_file" >&2
-        else
-            llm "${args[@]}" 2>/dev/null > "$text_file"
-        fi
+        llm "${args[@]}" > "$text_file" 2>"$stderr_file" || llm_exit=$?
+        [[ -n "$thinking_output_file" ]] && cp "$stderr_file" "$thinking_output_file"
+    fi
+
+    # If llm produced no output, surface any error from stderr
+    if [[ ! -s "$text_file" && -s "$stderr_file" ]]; then
+        local _llm_err
+        _llm_err=$(cat "$stderr_file")
+        rm -f "$text_file" "$stderr_file"
+        die "llm failed: $_llm_err"
     fi
 
     cat "$text_file"
-    rm -f "$text_file"
+    rm -f "$text_file" "$stderr_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -1858,7 +1931,7 @@ run_loop() {
         fi
         debug "=== Iteration $iter_label ==="
         [[ "$QUIET" -eq 0 ]] && echo >&2
-        progress "Iteration $iter_label — calling Claude API..."
+        progress "Iteration $iter_label — calling $SHELLM_MODEL..."
 
         # Build model context from trajectory as multi-turn messages
         messages_json=$(context --traj_dir "$_run_traj_dir" "$_run_traj_id" \
@@ -1916,9 +1989,9 @@ run_loop() {
 
         if [[ -z "$response" ]]; then
             if [[ -n "$thinking" ]]; then
-                die "Empty response from Claude API after $empty_retries retries: $(truncate_output "$thinking")"
+                die "Empty response from $SHELLM_MODEL after $empty_retries retries: $(truncate_output "$thinking")"
             fi
-            die "Empty response from Claude API after $empty_retries retries"
+            die "Empty response from $SHELLM_MODEL after $empty_retries retries"
         fi
 
         local reasoning
@@ -2264,7 +2337,7 @@ main() {
                 context_files+=("$f")
                 shift 2
                 ;;
-            --model)
+            -m|--model)
                 SHELLM_MODEL="${2:?--model requires a value}"
                 shift 2
                 ;;
@@ -2296,8 +2369,12 @@ main() {
                 SHELLM_TEMP_DOCKER=1
                 shift
                 ;;
-            --system-prompt)
-                local sp_file="${2:?--system-prompt requires a file path}"
+            -s|--system-prompt)
+                SHELLM_SYSTEM_PROMPT="${2:?--system-prompt requires a value}"
+                shift 2
+                ;;
+            --system-prompt-file)
+                local sp_file="${2:?--system-prompt-file requires a file path}"
                 [[ -f "$sp_file" ]] || die "System prompt file not found: $sp_file"
                 SHELLM_SYSTEM_PROMPT=$(cat "$sp_file")
                 shift 2
