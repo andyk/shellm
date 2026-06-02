@@ -870,6 +870,10 @@ cmd_watch() {
 # Usage
 # ---------------------------------------------------------------------------
 
+cmd_repl() {
+    exec shellm-tui thinkers "$@"
+}
+
 usage() {
     cat <<'EOF'
 thinkers — Modular reactive thought process manager
@@ -882,6 +886,7 @@ Usage:
   thinkers step <name>          Manually trigger a thinker's step
   thinkers watch [N]           Stream new steps (show last N first, default 0)
   thinkers new <name>          Scaffold a new thinker
+  thinkers repl                Interactive thinkers TUI
 
 Options:
   -v, --verbose   Verbose/debug mode
@@ -921,6 +926,7 @@ case "$cmd" in
     step)     cmd_step "$@" ;;
     watch)    cmd_watch "$@" ;;
     new)      cmd_new "$@" ;;
+    repl)     cmd_repl ;;
     help)     usage ;;
     "")       usage ;;
     *)        die "Unknown command: $cmd (try thinkers --help)" ;;

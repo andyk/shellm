@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # executive/step — Core thought generator thinker
-# Reads recent context, calls llm directly to produce a single thought/action.
+# Reads recent context, calls llm directly to produce a single thought.
 # Receives step JSON on stdin (ignored — this thinker generates new thoughts).
 
 THINKER_NAME="executive"
@@ -49,18 +49,10 @@ $recent_context"
 printf '  thinking...\n' >&2
 response=$(printf '%s' "$full_message" | \
     llm -m "$THINK_MODEL" \
-    -s "Output only a single thought or action. No explanation, no commands, no preamble." \
+    -s "Output only a single thought. No explanation, no commands, no preamble." \
     2>/dev/null) || true
 
 [[ -z "$response" ]] && { printf 'executive/step: empty response from shellm\n' >&2; exit 1; }
-
-# Determine step type
-step_type="thought"
-case "$response" in
-    "action: "*|"action:"*)
-        step_type="action"
-        ;;
-esac
 
 # Write thought to traj
 last_content=""
@@ -69,9 +61,9 @@ if traj exists 2>/dev/null; then
 fi
 
 if [[ "$last_content" != "$response" ]]; then
-    printf '{"type":"%s","content":%s,"source":"executive"}' \
-        "$step_type" "$(printf '%s' "$response" | jq -Rsa .)" \
+    printf '{"type":"thought","content":%s,"source":"executive"}' \
+        "$(printf '%s' "$response" | jq -Rsa .)" \
         | traj append >/dev/null
 fi
 
-printf '[%s] %s\n' "$step_type" "$response"
+printf '[thought] %s\n' "$response"

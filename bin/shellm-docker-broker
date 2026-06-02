@@ -67,6 +67,39 @@ path_under() {
     [[ "$path" == "$root" || "$path" == "$root"/* ]]
 }
 
+symlink_mounts() {
+    local workdir="$1"
+    local -A mount_dirs=()
+    while IFS= read -r -d '' link; do
+        local target
+        target=$(readlink -f "$link" 2>/dev/null) || continue
+        path_under "$target" "$workdir" && continue
+        [[ -e "$target" ]] || continue
+        local parent
+        parent=$(dirname "$target")
+        mount_dirs["$parent"]=1
+    done < <(find "$workdir" -type l -print0 2>/dev/null)
+
+    # Remove dirs that are subdirs of other dirs in the set
+    local -a unique=()
+    local dir other
+    for dir in "${!mount_dirs[@]}"; do
+        local dominated=false
+        for other in "${!mount_dirs[@]}"; do
+            [[ "$dir" == "$other" ]] && continue
+            if path_under "$dir" "$other"; then
+                dominated=true
+                break
+            fi
+        done
+        $dominated || unique+=("$dir")
+    done
+
+    for dir in "${unique[@]}"; do
+        printf -- '-v\n%s:%s:ro\n' "$dir" "$dir"
+    done
+}
+
 safe_cwd() {
     local requested="$1"
     local workdir="$2"
@@ -183,6 +216,11 @@ handle_run() {
     local memory="${SHELLM_BROKER_MEMORY:-2g}"
     local pids="${SHELLM_BROKER_PIDS_LIMIT:-512}"
 
+    local -a symlink_vols=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && symlink_vols+=("$line")
+    done < <(symlink_mounts "$workdir")
+
     local -a cmd=(
         docker run --rm
         --label "shellm.broker=1"
@@ -192,6 +230,7 @@ handle_run() {
         --memory "$memory"
         --pids-limit "$pids"
         -v "$workdir:$workdir"
+        "${symlink_vols[@]}"
         -w "$cwd"
         -e "SHELLM_WORKDIR=$workdir"
         "$image"

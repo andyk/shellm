@@ -12,12 +12,21 @@ use ratatui::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     sync::mpsc,
+    task::JoinHandle,
 };
 
 struct Message {
     sender: String,
     content: String,
     is_agent: bool,
+}
+
+#[derive(Clone, PartialEq)]
+enum Mode {
+    Chat,
+    Thinkers,
+    Traj,
+    Command,
 }
 
 struct App {
@@ -31,6 +40,43 @@ struct App {
     history: Vec<String>,
     history_idx: Option<usize>,
     stashed_input: String,
+    mode: Mode,
+    cmd_output: Vec<String>,
+    cmd_scroll: usize,
+    cmd_base: String,
+    mouse_captured: bool,
+}
+
+impl App {
+    fn mode_title(&self) -> String {
+        match self.mode {
+            Mode::Chat => format!(" {} ", self.identity_name),
+            Mode::Thinkers => " thinkers ".to_string(),
+            Mode::Traj => " traj ".to_string(),
+            Mode::Command => format!(" {} ", self.cmd_base),
+        }
+    }
+
+    fn scroll_up(&mut self, n: usize) {
+        match self.mode {
+            Mode::Chat => self.scroll_offset += n,
+            _ => self.cmd_scroll = self.cmd_scroll.saturating_sub(n),
+        }
+    }
+
+    fn scroll_down(&mut self, n: usize) {
+        match self.mode {
+            Mode::Chat => self.scroll_offset = self.scroll_offset.saturating_sub(n),
+            _ => self.cmd_scroll += n,
+        }
+    }
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn byte_pos(s: &str, char_idx: usize) -> usize {
@@ -84,17 +130,250 @@ fn wrap_input(input: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Parse a line containing ANSI SGR escape sequences into styled ratatui Spans.
+fn parse_ansi_line(line: &str) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut style = Style::default();
+    let mut buf = String::new();
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] == '\x1b' && i + 1 < len && chars[i + 1] == '[' {
+            // Flush text accumulated so far
+            if !buf.is_empty() {
+                spans.push(Span::styled(mem::take(&mut buf), style));
+            }
+            // Parse CSI sequence: ESC [ <params> m
+            i += 2; // skip ESC [
+            let mut params = String::new();
+            while i < len && chars[i] != 'm' {
+                // Stop if we hit a letter that isn't 'm' (not an SGR sequence)
+                if chars[i].is_ascii_alphabetic() {
+                    break;
+                }
+                params.push(chars[i]);
+                i += 1;
+            }
+            if i < len && chars[i] == 'm' {
+                i += 1; // skip 'm'
+                // Apply SGR codes
+                let codes: Vec<&str> = params.split(';').collect();
+                let mut ci = 0;
+                while ci < codes.len() {
+                    let code: u8 = codes[ci].parse().unwrap_or(0);
+                    match code {
+                        0 => style = Style::default(),
+                        1 => style = style.add_modifier(Modifier::BOLD),
+                        2 => style = style.add_modifier(Modifier::DIM),
+                        3 => style = style.add_modifier(Modifier::ITALIC),
+                        4 => style = style.add_modifier(Modifier::UNDERLINED),
+                        22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+                        23 => style = style.remove_modifier(Modifier::ITALIC),
+                        24 => style = style.remove_modifier(Modifier::UNDERLINED),
+                        30 => style = style.fg(Color::Black),
+                        31 => style = style.fg(Color::Red),
+                        32 => style = style.fg(Color::Green),
+                        33 => style = style.fg(Color::Yellow),
+                        34 => style = style.fg(Color::Blue),
+                        35 => style = style.fg(Color::Magenta),
+                        36 => style = style.fg(Color::Cyan),
+                        37 => style = style.fg(Color::White),
+                        38 => {
+                            // 256-color or RGB foreground
+                            if ci + 1 < codes.len() && codes[ci + 1] == "5" {
+                                if ci + 2 < codes.len() {
+                                    if let Ok(n) = codes[ci + 2].parse::<u8>() {
+                                        style = style.fg(Color::Indexed(n));
+                                    }
+                                    ci += 2;
+                                }
+                            }
+                        }
+                        39 => style = style.fg(Color::Reset),
+                        40 => style = style.bg(Color::Black),
+                        41 => style = style.bg(Color::Red),
+                        42 => style = style.bg(Color::Green),
+                        43 => style = style.bg(Color::Yellow),
+                        44 => style = style.bg(Color::Blue),
+                        45 => style = style.bg(Color::Magenta),
+                        46 => style = style.bg(Color::Cyan),
+                        47 => style = style.bg(Color::White),
+                        48 => {
+                            if ci + 1 < codes.len() && codes[ci + 1] == "5" {
+                                if ci + 2 < codes.len() {
+                                    if let Ok(n) = codes[ci + 2].parse::<u8>() {
+                                        style = style.bg(Color::Indexed(n));
+                                    }
+                                    ci += 2;
+                                }
+                            }
+                        }
+                        49 => style = style.bg(Color::Reset),
+                        90 => style = style.fg(Color::DarkGray),
+                        91 => style = style.fg(Color::LightRed),
+                        92 => style = style.fg(Color::LightGreen),
+                        93 => style = style.fg(Color::LightYellow),
+                        94 => style = style.fg(Color::LightBlue),
+                        95 => style = style.fg(Color::LightMagenta),
+                        96 => style = style.fg(Color::LightCyan),
+                        97 => style = style.fg(Color::White),
+                        _ => {}
+                    }
+                    ci += 1;
+                }
+            } else {
+                // Not a valid SGR sequence, emit the raw text
+                buf.push('\x1b');
+                buf.push('[');
+                buf.push_str(&params);
+                if i < len {
+                    buf.push(chars[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            buf.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, style));
+    }
+
+    if spans.is_empty() {
+        Line::raw("")
+    } else {
+        Line::from(spans)
+    }
+}
+
+fn help_text() -> Vec<String> {
+    vec![
+        "Modes:".into(),
+        "  /chat          Chat with the identity".into(),
+        "  /thinkers      Monitor & control thinkers".into(),
+        "  /identities    Identity management".into(),
+        "  /traj          Trajectory inspection".into(),
+        "  /help          Show this help".into(),
+        "".into(),
+        "In each mode, type a subcommand and press Enter.".into(),
+        "Examples:".into(),
+        "  (chat)      hello there        -> chat send hello there".into(),
+        "  (thinkers)  start executive    -> thinkers start executive".into(),
+        "  (traj)      tail -n 5          -> traj tail -n 5".into(),
+        "".into(),
+        "Keys:".into(),
+        "  Ctrl+C/D       Exit".into(),
+        "  Shift+Enter    Newline in input".into(),
+        "  PageUp/Down    Scroll output".into(),
+        "  Ctrl+G         Toggle mouse (scroll vs. text select)".into(),
+        "  Option+click   Select text (iTerm2) without toggling".into(),
+    ]
+}
+
+/// Run a command and return its combined stdout+stderr lines.
+async fn run_cmd(program: &str, args: &[&str]) -> Vec<String> {
+    let Ok(output) = tokio::process::Command::new(program)
+        .args(args)
+        .env("CLICOLOR_FORCE", "1")
+        .env("FORCE_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+    else {
+        return vec![format!("Failed to run: {} {}", program, args.join(" "))];
+    };
+    let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    let stderr_lines: Vec<String> = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    for l in stderr_lines {
+        if !l.is_empty() {
+            lines.push(l);
+        }
+    }
+    lines
+}
+
+/// Spawn an auto-refresh task that runs a command every `interval` seconds.
+fn spawn_auto_refresh(
+    tx: mpsc::UnboundedSender<Vec<String>>,
+    program: String,
+    args: Vec<String>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let output = run_cmd(&program, &arg_refs).await;
+            if tx.send(output).is_err() {
+                break;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    })
+}
+
+fn parse_mode(s: &str) -> Mode {
+    match s {
+        "thinkers" => Mode::Thinkers,
+        "traj" => Mode::Traj,
+        "chat" => Mode::Chat,
+        _ => Mode::Chat,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity_name = env::var("IDENTITY_NAME").unwrap_or_else(|_| "agent".into());
 
     let mut from: Option<String> = None;
+    let mut initial_mode = Mode::Chat;
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--from" {
-            i += 1;
-            from = args.get(i).cloned();
+        match args[i].as_str() {
+            "-h" | "--help" | "help" => {
+                println!("shellm-tui — Interactive terminal UI for shellm\n");
+                println!("Usage: shellm-tui [MODE] [--from NAME]\n");
+                println!("Modes:");
+                println!("  chat        Chat with the identity (default)");
+                println!("  thinkers    Monitor & control thinkers");
+                println!("  traj        Trajectory viewer\n");
+                println!("Options:");
+                println!("  --from NAME   Set sender name for chat messages");
+                println!("  --mode MODE   Set initial mode (same as positional)\n");
+                println!("Slash commands (available in any mode):");
+                println!("  /chat  /thinkers  /traj  /identities  /help\n");
+                println!("Keys:");
+                println!("  Ctrl+C/D       Exit");
+                println!("  Shift+Enter    Newline in input");
+                println!("  PageUp/Down    Scroll output");
+                println!("  Ctrl+G         Toggle mouse (scroll vs. text select)");
+                return Ok(());
+            }
+            "--from" => {
+                i += 1;
+                from = args.get(i).cloned();
+            }
+            "--mode" => {
+                i += 1;
+                if let Some(m) = args.get(i) {
+                    initial_mode = parse_mode(m);
+                }
+            }
+            arg if !arg.starts_with('-') && i == 0 => {
+                initial_mode = parse_mode(arg);
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -103,7 +382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let result = run(&mut terminal, identity_name, from).await;
+    let result = run(&mut terminal, identity_name, from, initial_mode).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
@@ -115,8 +394,10 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     identity_name: String,
     from: Option<String>,
+    initial_mode: Mode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
     let id_name = identity_name.clone();
     let parse_and_send = |line: &str, tx: &mpsc::UnboundedSender<Message>, id: &str| {
@@ -141,11 +422,19 @@ async fn run(
     };
 
     // Phase 1: load recent history via `traj cat --filter | tail -n 20`
+    // Use ROOT_TRAJ_ID so we always read from the root trajectory
     let id_hist = id_name.clone();
     let tx_hist = tx.clone();
     let history_loader = tokio::spawn(async move {
+        let traj_id = env::var("ROOT_TRAJ_ID")
+            .or_else(|_| env::var("TRAJ_ID"))
+            .unwrap_or_default();
+        let cmd = format!(
+            "traj cat {} --filter type=human-msg,agent-msg --raw 2>/dev/null | tail -n 20",
+            shell_escape(&traj_id)
+        );
         let Ok(output) = tokio::process::Command::new("bash")
-            .args(["-c", "traj cat --filter type=human-msg,agent-msg --raw 2>/dev/null | tail -n 20"])
+            .args(["-c", &cmd])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -163,9 +452,19 @@ async fn run(
     let _ = history_loader.await;
 
     // Phase 2: follow new messages via `traj tail -f -n 0`
+    // Use ROOT_TRAJ_ID so we follow the root trajectory
     let watcher = tokio::spawn(async move {
+        let traj_id = env::var("ROOT_TRAJ_ID")
+            .or_else(|_| env::var("TRAJ_ID"))
+            .unwrap_or_default();
+        let mut args = vec!["tail", "-f", "--filter", "type=human-msg,agent-msg", "-n", "0", "--raw"];
+        let traj_id_owned;
+        if !traj_id.is_empty() {
+            traj_id_owned = traj_id;
+            args.push(&traj_id_owned);
+        }
         let Ok(mut child) = tokio::process::Command::new("traj")
-            .args(["tail", "-f", "--filter", "type=human-msg,agent-msg", "-n", "0", "--raw"])
+            .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -181,6 +480,30 @@ async fn run(
         }
     });
 
+    // Auto-refresh handle (only active in thinkers mode)
+    let mut auto_refresh: Option<JoinHandle<()>> = None;
+
+    // Kick off auto-refresh for modes that need it
+    match initial_mode {
+        Mode::Thinkers => {
+            auto_refresh = Some(spawn_auto_refresh(
+                cmd_tx.clone(),
+                "thinkers".into(),
+                vec!["status".into()],
+                Duration::from_secs(2),
+            ));
+        }
+        Mode::Traj => {
+            auto_refresh = Some(spawn_auto_refresh(
+                cmd_tx.clone(),
+                "traj".into(),
+                vec!["tail".into(), "-r".into()],
+                Duration::from_secs(2),
+            ));
+        }
+        _ => {}
+    }
+
     let mut app = App {
         messages: Vec::new(),
         input: String::new(),
@@ -192,12 +515,23 @@ async fn run(
         history: Vec::new(),
         history_idx: None,
         stashed_input: String::new(),
+        mode: initial_mode,
+        cmd_output: Vec::new(),
+        cmd_scroll: 0,
+        cmd_base: String::new(),
+        mouse_captured: true,
     };
 
     loop {
         while let Ok(msg) = rx.try_recv() {
             app.messages.push(msg);
-            app.scroll_offset = 0;
+            if app.mode == Mode::Chat {
+                app.scroll_offset = 0;
+            }
+        }
+
+        while let Ok(lines) = cmd_rx.try_recv() {
+            app.cmd_output = lines;
         }
 
         terminal.draw(|f| draw(f, &app))?;
@@ -206,10 +540,8 @@ async fn run(
             let ev = event::read()?;
             if let Event::Mouse(mouse) = &ev {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => app.scroll_offset += 3,
-                    MouseEventKind::ScrollDown => {
-                        app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                    }
+                    MouseEventKind::ScrollUp => app.scroll_up(3),
+                    MouseEventKind::ScrollDown => app.scroll_down(3),
                     _ => {}
                 }
             }
@@ -217,6 +549,14 @@ async fn run(
                 match key.code {
                     KeyCode::Char('c') | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Esc => break,
+                    KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.mouse_captured = !app.mouse_captured;
+                        if app.mouse_captured {
+                            execute!(io::stdout(), EnableMouseCapture)?;
+                        } else {
+                            execute!(io::stdout(), DisableMouseCapture)?;
+                        }
+                    }
                     KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         let pos = byte_pos(&app.input, app.cursor);
                         app.input.insert(pos, '\n');
@@ -226,21 +566,132 @@ async fn run(
                         if !app.input.is_empty() {
                             let msg = mem::take(&mut app.input);
                             app.cursor = 0;
-                            app.scroll_offset = 0;
                             app.history_idx = None;
                             app.history.push(msg.clone());
-                            let from = app.from.clone();
-                            tokio::spawn(async move {
-                                let mut cmd = tokio::process::Command::new("chat");
-                                cmd.arg("send");
-                                if let Some(ref f) = from {
-                                    cmd.args(["--from", f]);
+                            let trimmed = msg.trim();
+
+                            // Slash command handling (available in all modes)
+                            if trimmed == "/thinkers" {
+                                app.mode = Mode::Thinkers;
+                                app.cmd_output = vec!["Loading...".into()];
+                                app.cmd_scroll = 0;
+                                app.cmd_base.clear();
+                                // Start auto-refresh
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
                                 }
-                                cmd.arg(&msg)
-                                    .stdout(Stdio::null())
-                                    .stderr(Stdio::null());
-                                let _ = cmd.status().await;
-                            });
+                                auto_refresh = Some(spawn_auto_refresh(
+                                    cmd_tx.clone(),
+                                    "thinkers".into(),
+                                    vec!["status".into()],
+                                    Duration::from_secs(2),
+                                ));
+                            } else if trimmed == "/chat" {
+                                app.mode = Mode::Chat;
+                                app.scroll_offset = 0;
+                                app.cmd_output.clear();
+                                app.cmd_scroll = 0;
+                                app.cmd_base.clear();
+                                // Stop auto-refresh
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
+                                }
+                            } else if trimmed == "/help" {
+                                app.mode = Mode::Command;
+                                app.cmd_output = help_text();
+                                app.cmd_scroll = 0;
+                                app.cmd_base = "help".into();
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
+                                }
+                            } else if trimmed == "/identities" {
+                                app.mode = Mode::Command;
+                                app.cmd_output = vec!["Loading...".into()];
+                                app.cmd_scroll = 0;
+                                app.cmd_base = "identity".into();
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
+                                }
+                                let tx = cmd_tx.clone();
+                                tokio::spawn(async move {
+                                    let output = run_cmd("identity", &["list"]).await;
+                                    let _ = tx.send(output);
+                                });
+                            } else if trimmed == "/traj" {
+                                app.mode = Mode::Traj;
+                                app.cmd_output = vec!["Loading...".into()];
+                                app.cmd_scroll = 0;
+                                app.cmd_base.clear();
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
+                                }
+                                auto_refresh = Some(spawn_auto_refresh(
+                                    cmd_tx.clone(),
+                                    "traj".into(),
+                                    vec!["tail".into(), "-r".into()],
+                                    Duration::from_secs(2),
+                                ));
+                            } else {
+                                // Mode-specific dispatch
+                                match app.mode {
+                                    Mode::Chat => {
+                                        app.scroll_offset = 0;
+                                        let from = app.from.clone();
+                                        let msg_owned = msg;
+                                        tokio::spawn(async move {
+                                            let mut cmd = tokio::process::Command::new("chat");
+                                            cmd.arg("send");
+                                            if let Some(ref f) = from {
+                                                cmd.args(["--from", f]);
+                                            }
+                                            cmd.arg(&msg_owned)
+                                                .stdout(Stdio::null())
+                                                .stderr(Stdio::null());
+                                            let _ = cmd.status().await;
+                                        });
+                                    }
+                                    Mode::Thinkers => {
+                                        if let Some(h) = auto_refresh.take() {
+                                            h.abort();
+                                        }
+                                        let tx = cmd_tx.clone();
+                                        let args_str = msg;
+                                        tokio::spawn(async move {
+                                            let parts: Vec<&str> = args_str.split_whitespace().collect();
+                                            let output = run_cmd("thinkers", &parts).await;
+                                            let _ = tx.send(output);
+                                        });
+                                    }
+                                    Mode::Traj => {
+                                        if let Some(h) = auto_refresh.take() {
+                                            h.abort();
+                                        }
+                                        let tx = cmd_tx.clone();
+                                        let args_str = msg;
+                                        tokio::spawn(async move {
+                                            let parts: Vec<&str> = args_str.split_whitespace().collect();
+                                            let output = run_cmd("traj", &parts).await;
+                                            let _ = tx.send(output);
+                                        });
+                                    }
+                                    Mode::Command => {
+                                        if app.cmd_base == "help" {
+                                            // In help mode, just re-show help
+                                            app.cmd_output = help_text();
+                                            app.cmd_scroll = 0;
+                                        } else {
+                                            let tx = cmd_tx.clone();
+                                            let base = app.cmd_base.clone();
+                                            let args_str = msg;
+                                            tokio::spawn(async move {
+                                                let parts: Vec<&str> = args_str.split_whitespace().collect();
+                                                let output = run_cmd(&base, &parts).await;
+                                                let _ = tx.send(output);
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -362,7 +813,6 @@ async fn run(
                         if inner_w > 0 {
                             let (cx, cy) = cursor_xy(&app.input, app.cursor, inner_w);
                             if cy > 0 {
-                                // Find char index at (cx, cy-1)
                                 app.cursor = char_at_xy(&app.input, cx, cy - 1, inner_w);
                             }
                         }
@@ -377,16 +827,17 @@ async fn run(
                             }
                         }
                     }
-                    KeyCode::PageUp => app.scroll_offset += 5,
-                    KeyCode::PageDown => {
-                        app.scroll_offset = app.scroll_offset.saturating_sub(5);
-                    }
+                    KeyCode::PageUp => app.scroll_up(5),
+                    KeyCode::PageDown => app.scroll_down(5),
                     _ => {}
                 }
             }
         }
     }
 
+    if let Some(h) = auto_refresh.take() {
+        h.abort();
+    }
     watcher.abort();
     Ok(())
 }
@@ -434,56 +885,88 @@ fn char_at_xy(input: &str, target_col: u16, target_row: u16, width: usize) -> us
 
 fn draw(f: &mut Frame, app: &App) {
     let total_h = f.size().height;
-    let inner_w = f.size().width.saturating_sub(2) as usize;
+    let full_w = f.size().width as usize;
+    let input_inner_w = full_w.saturating_sub(2); // input box keeps borders
 
     // Pre-wrap input text (character-based, matches cursor_xy exactly)
-    let wrapped = wrap_input(&app.input, inner_w);
+    let wrapped = wrap_input(&app.input, input_inner_w);
     let text_lines = wrapped.len();
 
     // Input box grows with content, capped at half the screen
     let max_input_h = (total_h / 2).max(3);
     let input_h = ((text_lines as u16) + 2).min(max_input_h).max(3);
 
+    // Title bar (1 line) + top pane + input box
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(input_h)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(input_h),
+        ])
         .split(f.size());
 
-    // Messages area
-    let msg_lines: Vec<Line> = app
-        .messages
-        .iter()
-        .map(|m| {
-            let color = if m.is_agent {
-                Color::Green
-            } else {
-                Color::Blue
-            };
-            Line::from(vec![
-                Span::styled(format!("{}: ", m.sender), Style::default().fg(color).bold()),
-                Span::raw(&m.content),
-            ])
-        })
-        .collect();
+    // Title bar — inverted (white on dark) full-width bar
+    let title_text = app.mode_title();
+    let bar_width = chunks[0].width as usize;
+    let padded = format!("{:<width$}", title_text, width = bar_width);
+    let title = Line::from(Span::styled(
+        padded,
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ));
+    f.render_widget(Paragraph::new(title), chunks[0]);
 
-    let para = Paragraph::new(msg_lines).wrap(Wrap { trim: false });
-    let msg_inner_w = chunks[0].width.saturating_sub(2);
-    let msg_inner_h = chunks[0].height.saturating_sub(2) as usize;
-    let total = para.line_count(msg_inner_w);
-    let max_scroll = total.saturating_sub(msg_inner_h);
-    let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
+    // Top pane (no borders): render based on mode
+    match app.mode {
+        Mode::Chat => {
+            let msg_lines: Vec<Line> = app
+                .messages
+                .iter()
+                .map(|m| {
+                    let color = if m.is_agent {
+                        Color::Green
+                    } else {
+                        Color::Blue
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{}: ", m.sender), Style::default().fg(color).bold()),
+                        Span::raw(&m.content),
+                    ])
+                })
+                .collect();
 
-    let messages = para
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", app.identity_name)),
-        )
-        .scroll((scroll, 0));
-    f.render_widget(messages, chunks[0]);
+            let para = Paragraph::new(msg_lines).wrap(Wrap { trim: false });
+            let msg_inner_h = chunks[1].height as usize;
+            let total = para.line_count(chunks[1].width);
+            let max_scroll = total.saturating_sub(msg_inner_h);
+            let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
+
+            let messages = para.scroll((scroll, 0));
+            f.render_widget(messages, chunks[1]);
+        }
+        Mode::Thinkers | Mode::Traj | Mode::Command => {
+            let output_lines: Vec<Line> = app
+                .cmd_output
+                .iter()
+                .map(|l| parse_ansi_line(l))
+                .collect();
+
+            let para = Paragraph::new(output_lines).wrap(Wrap { trim: false });
+            let msg_inner_h = chunks[1].height as usize;
+            let total = para.line_count(chunks[1].width);
+            let max_scroll = total.saturating_sub(msg_inner_h);
+            let scroll = app.cmd_scroll.min(max_scroll) as u16;
+
+            let output = para.scroll((scroll, 0));
+            f.render_widget(output, chunks[1]);
+        }
+    }
 
     // Input area — render pre-wrapped lines (no ratatui Wrap, so cursor matches exactly)
-    let (cx, cy) = cursor_xy(&app.input, app.cursor, inner_w);
+    let (cx, cy) = cursor_xy(&app.input, app.cursor, input_inner_w);
     let visible_lines = input_h.saturating_sub(2);
     let input_scroll = if cy >= visible_lines {
         cy - visible_lines + 1
@@ -495,10 +978,10 @@ fn draw(f: &mut Frame, app: &App) {
     let input = Paragraph::new(input_text)
         .block(Block::default().borders(Borders::ALL).title(" > "))
         .scroll((input_scroll, 0));
-    f.render_widget(input, chunks[1]);
+    f.render_widget(input, chunks[2]);
 
     f.set_cursor(
-        chunks[1].x + 1 + cx,
-        chunks[1].y + 1 + cy - input_scroll,
+        chunks[2].x + 1 + cx,
+        chunks[2].y + 1 + cy - input_scroll,
     );
 }

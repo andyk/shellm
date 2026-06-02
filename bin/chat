@@ -3,8 +3,15 @@ set -euo pipefail
 
 # chat — Send messages to an activated identity's thought stream
 # Reads TRAJ_DIR + TRAJ_ID from environment (set by `identity shell`).
+# Always appends to the root trajectory (ROOT_TRAJ_ID), even when called
+# from a forked sub-trajectory (e.g. inside an actor step).
 
 die() { printf 'chat: error: %s\n' "$*" >&2; exit 1; }
+
+# Append to the root trajectory, not the current (possibly forked) one
+_chat_append() {
+    traj append "${ROOT_TRAJ_ID:-$TRAJ_ID}" >/dev/null
+}
 
 # Handle --help before env var check
 case "${1:-}" in -h|--help|help) ;; *)
@@ -32,12 +39,12 @@ cmd_send() {
     step+="$(printf '%s' "$message" | jq -Rsa .)"
     [[ "$from" != "human" ]] && step+=',"from":'"$(printf '%s' "$from" | jq -Rsa .)"
     step+='}'
-    printf '%s' "$step" | traj append >/dev/null
+    printf '%s' "$step" | _chat_append
 
     # Append observation for thinkers
     printf '{"type":"observation","content":%s,"source":"chat"}' \
         "$(printf '[chat] %s: %s' "$from" "$message" | jq -Rsa .)" \
-        | traj append >/dev/null
+        | _chat_append
 
     printf 'Message sent.\n' >&2
 }
@@ -54,12 +61,12 @@ cmd_reply() {
 
     printf '{"type":"agent-msg","content":%s}' \
         "$(printf '%s' "$message" | jq -Rsa .)" \
-        | traj append >/dev/null
+        | _chat_append
 
     # Append observation for thinkers
     printf '{"type":"observation","content":%s,"source":"chat"}' \
         "$(printf '[chat] me: %s' "$message" | jq -Rsa .)" \
-        | traj append >/dev/null
+        | _chat_append
 
     printf 'Reply sent.\n' >&2
 }
@@ -86,12 +93,12 @@ cmd_send_file() {
     step+="$(printf '%s' "$content" | jq -Rsa .)"
     [[ "$from" != "human" ]] && step+=',"from":'"$(printf '%s' "$from" | jq -Rsa .)"
     step+='}'
-    printf '%s' "$step" | traj append >/dev/null
+    printf '%s' "$step" | _chat_append
 
     # Append observation for thinkers
     printf '{"type":"observation","content":%s,"source":"chat"}' \
         "$(printf '[chat] %s sent file %s: %s' "$from" "$filename" "$content" | jq -Rsa .)" \
-        | traj append >/dev/null
+        | _chat_append
 
     printf 'File sent: %s\n' "$filename" >&2
 }
@@ -102,7 +109,7 @@ cmd_history() {
 
     local identity_name="${IDENTITY_NAME:-agent}"
 
-    traj cat --filter type=human-msg,agent-msg --raw 2>/dev/null \
+    traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --filter type=human-msg,agent-msg --raw 2>/dev/null \
     | tail -n "$n" \
     | while IFS= read -r line; do
         local step_type content from
@@ -122,7 +129,7 @@ cmd_history() {
 }
 
 cmd_repl() {
-    exec chat-tui "$@"
+    exec shellm-tui "$@"
 }
 
 usage() {

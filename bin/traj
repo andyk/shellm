@@ -16,8 +16,8 @@ STDOUT_INLINE_LIMIT="${SHELLM_STDOUT_INLINE_LIMIT:-4096}"
 
 die() { printf 'traj: error: %s\n' "$*" >&2; exit 1; }
 
-# Colors (disabled if stdout is not a tty)
-if [[ -t 1 ]]; then
+# Colors (disabled if stdout is not a tty, unless forced)
+if [[ -t 1 || "${CLICOLOR_FORCE:-0}" != "0" ]]; then
     _c_tree=$'\033[36m'; _c_id=$'\033[1;33m'; _c_step=$'\033[32m'; _c_dim=$'\033[2m'; _c_fork=$'\033[35m'; _c_reset=$'\033[0m'
 else
     _c_tree="" _c_id="" _c_step="" _c_dim="" _c_fork="" _c_reset=""
@@ -93,6 +93,8 @@ Commands:
   isroot [ID]               Exit 0 if trajectory is a root (no parent).
 
   root [ID]                 Walk up parent links to find root. Print filename.
+
+  repl                      Interactive trajectory TUI
 
 EOF
     if [[ -n "${TRAJ_DIR:-}" ]]; then
@@ -787,13 +789,13 @@ TAILHELP
         format=0
     elif [[ "$force_format" -eq 1 ]]; then
         format=1
-    elif [[ ! -t 1 ]]; then
+    elif [[ ! -t 1 && "${CLICOLOR_FORCE:-0}" == "0" ]]; then
         format=0
     fi
 
     # Auto-detect color
     if [[ "$use_color" -eq -1 ]]; then
-        if [[ "$format" -eq 1 && -t 1 ]]; then
+        if [[ "$format" -eq 1 && ( -t 1 || "${CLICOLOR_FORCE:-0}" != "0" ) ]]; then
             use_color=1
         else
             use_color=0
@@ -1376,13 +1378,13 @@ CATHELP
         format=0
     elif [[ "$force_format" -eq 1 ]]; then
         format=1
-    elif [[ ! -t 1 ]]; then
+    elif [[ ! -t 1 && "${CLICOLOR_FORCE:-0}" == "0" ]]; then
         format=0
     fi
 
     # Auto-detect color
     if [[ "$use_color" -eq -1 ]]; then
-        if [[ "$format" -eq 1 && -t 1 ]]; then
+        if [[ "$format" -eq 1 && ( -t 1 || "${CLICOLOR_FORCE:-0}" != "0" ) ]]; then
             use_color=1
         else
             use_color=0
@@ -2030,6 +2032,10 @@ cmd_all()      { cmd_list "$@"; }
 cmd_parents()  { cmd_list --children 0 "$@"; }
 cmd_children() { cmd_list --parents 0 "$@"; }
 
+cmd_repl() {
+    exec shellm-tui traj "$@"
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -2052,6 +2058,7 @@ case "$cmd" in
     list)     cmd_list "$@" ;;
     isroot)   cmd_isroot "$@" ;;
     root)     cmd_root "$@" ;;
+    repl)     cmd_repl ;;
     all)      cmd_all "$@" ;;
     parents)  cmd_parents "$@" ;;
     children) cmd_children "$@" ;;

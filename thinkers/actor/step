@@ -20,12 +20,7 @@ step_json=$(cat)
 [[ -z "$step_json" ]] && exit 0
 
 # Extract action content
-content=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
-[[ -z "$content" ]] && exit 0
-
-# Strip "action: " prefix
-action_body="${content#action: }"
-[[ "$action_body" == "$content" ]] && action_body="${content#action:}"
+action_body=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
 [[ -z "$action_body" ]] && exit 0
 
 # Build system prompt with identity context

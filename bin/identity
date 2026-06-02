@@ -253,6 +253,7 @@ export TRAJ_DIR="$_id_dir/trajectories"
 _root_traj=$(grep '^root_trajectory=' "$_id_dir/info.txt" 2>/dev/null | cut -d= -f2-)
 [[ -z "$_root_traj" ]] && _root_traj="trajectory.jsonl"
 export TRAJ_ID="$_root_traj"
+export ROOT_TRAJ_ID="$_root_traj"
 
 export THINKERS_DIR="$_id_dir/thinkers"
 export SKILLSRC="$_id_dir/skills/.skillsrc"
@@ -707,6 +708,7 @@ $matches"
     root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
     [[ -z "$root_traj" ]] && root_traj="trajectory.jsonl"
     export TRAJ_ID="$root_traj"
+    export ROOT_TRAJ_ID="$root_traj"
 
     export THINKERS_DIR="$identity_dir/thinkers"
     export SKILLSRC="$identity_dir/skills/.skillsrc"
