@@ -1705,6 +1705,8 @@ run_loop() {
     export SHELLM_WORKDIR="$workdir"
     export TRAJ_DIR="$_run_traj_dir"
     export TRAJ_ID="$_run_traj_id"
+    # Preserve the root trajectory ID so chat history/reply work in forked trajs
+    export ROOT_TRAJ_ID="${ROOT_TRAJ_ID:-$_run_traj_id}"
 
     progress "Trajectory: $_run_traj_id (dir: $_run_traj_dir)"
     progress "Workdir: $workdir"
@@ -2062,6 +2064,7 @@ exit \$__shellm_rc
             _SHELLM_PARENT_TRAJ_ID="$_run_traj_id"
             TRAJ_DIR="$_run_traj_dir"
             TRAJ_ID="$_run_traj_id"
+            ROOT_TRAJ_ID="${ROOT_TRAJ_ID:-$_run_traj_id}"
             SHELLM_RUNDIR="$rundir"
             _SHELLM_ROOT_RUNDIR="$_SHELLM_ROOT_RUNDIR"
             PATH="$(dirname "$shellm_path"):$PATH"

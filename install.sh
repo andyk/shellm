@@ -64,6 +64,7 @@ if [[ -d "tui" ]]; then
             [[ -f "$local_bin" ]] || local_bin="${tui_dir}target/release/$name"
             if [[ -f "$local_bin" ]]; then
                 cp "$local_bin" "$PREFIX/$(basename "$local_bin")"
+                codesign --force --sign - "$PREFIX/$(basename "$local_bin")" 2>/dev/null || true
                 echo "Installed $(basename "$local_bin") → $PREFIX/$(basename "$local_bin")"
             fi
         done

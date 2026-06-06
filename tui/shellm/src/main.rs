@@ -60,14 +60,14 @@ impl App {
     fn scroll_up(&mut self, n: usize) {
         match self.mode {
             Mode::Chat => self.scroll_offset += n,
-            _ => self.cmd_scroll = self.cmd_scroll.saturating_sub(n),
+            _ => self.cmd_scroll += n,
         }
     }
 
     fn scroll_down(&mut self, n: usize) {
         match self.mode {
             Mode::Chat => self.scroll_offset = self.scroll_offset.saturating_sub(n),
-            _ => self.cmd_scroll += n,
+            _ => self.cmd_scroll = self.cmd_scroll.saturating_sub(n),
         }
     }
 }
@@ -256,6 +256,7 @@ fn help_text() -> Vec<String> {
         "  /chat          Chat with the identity".into(),
         "  /thinkers      Monitor & control thinkers".into(),
         "  /identities    Identity management".into(),
+        "  /skills        Skills management".into(),
         "  /traj          Trajectory inspection".into(),
         "  /help          Show this help".into(),
         "".into(),
@@ -497,7 +498,7 @@ async fn run(
             auto_refresh = Some(spawn_auto_refresh(
                 cmd_tx.clone(),
                 "traj".into(),
-                vec!["tail".into(), "-r".into()],
+                vec!["tail".into(), "-r".into(), "-n".into(), "50".into()],
                 Duration::from_secs(2),
             ));
         }
@@ -617,6 +618,19 @@ async fn run(
                                     let output = run_cmd("identity", &["list"]).await;
                                     let _ = tx.send(output);
                                 });
+                            } else if trimmed == "/skills" {
+                                app.mode = Mode::Command;
+                                app.cmd_output = vec!["Loading...".into()];
+                                app.cmd_scroll = 0;
+                                app.cmd_base = "skills".into();
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
+                                }
+                                let tx = cmd_tx.clone();
+                                tokio::spawn(async move {
+                                    let output = run_cmd("skills", &["list"]).await;
+                                    let _ = tx.send(output);
+                                });
                             } else if trimmed == "/traj" {
                                 app.mode = Mode::Traj;
                                 app.cmd_output = vec!["Loading...".into()];
@@ -628,7 +642,7 @@ async fn run(
                                 auto_refresh = Some(spawn_auto_refresh(
                                     cmd_tx.clone(),
                                     "traj".into(),
-                                    vec!["tail".into(), "-r".into()],
+                                    vec!["tail".into(), "-r".into(), "-n".into(), "50".into()],
                                     Duration::from_secs(2),
                                 ));
                             } else {
@@ -958,7 +972,7 @@ fn draw(f: &mut Frame, app: &App) {
             let msg_inner_h = chunks[1].height as usize;
             let total = para.line_count(chunks[1].width);
             let max_scroll = total.saturating_sub(msg_inner_h);
-            let scroll = app.cmd_scroll.min(max_scroll) as u16;
+            let scroll = max_scroll.saturating_sub(app.cmd_scroll) as u16;
 
             let output = para.scroll((scroll, 0));
             f.render_widget(output, chunks[1]);

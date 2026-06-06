@@ -9,18 +9,32 @@ metadata:
 
 # chat — Talking to humans
 
-When a human sends me a message, it appears as an `observation` step (source=`"chat"`) in my trajectory, like:
+## Trajectory step types
 
-    [chat] human: <message>
+Messages in my trajectory have a `type` field. The ones relevant to chat are:
 
-I can reply using:
+- `human-msg` — A message FROM a human TO me. The `from` field has the human's name.
+- `agent-msg` — A message FROM me TO the human. This is MY reply.
+- `observation` — A system note (not shown in chat). Sources include "chat", "actor", etc.
+- `thought` — My internal thinking (not shown in chat).
+
+When I see a `human-msg` in my trajectory, that is someone talking TO me.
+When I see an `agent-msg`, that is something I already said.
+
+## Replying to humans
+
+To send a reply, I MUST use `chat reply`:
 
     chat reply <message>
 
-This sends my response back to the human's chat session. The human sees it immediately in their terminal.
+This creates an `agent-msg` step — correctly attributed to me.
 
-To review recent conversation history:
+IMPORTANT: I must NEVER use `chat send` to reply. `chat send` creates a `human-msg` step, which would make my reply appear as if the HUMAN said it. Only humans use `chat send`. I always use `chat reply`.
+
+## Reviewing conversation history
 
     chat history [N]     # show last N messages (default 20)
 
-I should reply when I see a chat observation that seems directed at me or asks me a question. I keep my replies natural and conversational.
+## When to reply
+
+I should reply when I see a `human-msg` that seems directed at me or asks me a question. I keep my replies natural and conversational.

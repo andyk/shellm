@@ -840,7 +840,7 @@ TAILHELP
                         ($vs | any(. as $v | $v == ($fv | tostring)))
                     );
                 def preview:
-                    if   .type == "reasoning"    then (.thought // "")
+                    if   .type == "reasoning"    then ((.content // .thought // "")[0:100])
                     elif .type == "shell-output"  then (.stdout // "")
                     elif .type == "shellm-run"    then (.command // "")
                     elif .type == "run-summary"   then (.tldr // "")
@@ -1429,7 +1429,7 @@ CATHELP
                         ($vs | any(. as $v | $v == ($fv | tostring)))
                     );
                 def preview:
-                    if   .type == "reasoning"    then (.thought // "")
+                    if   .type == "reasoning"    then ((.content // .thought // "")[0:100])
                     elif .type == "shell-output"  then (.stdout // "")
                     elif .type == "shellm-run"    then (.command // "")
                     elif .type == "run-summary"   then (.tldr // "")
