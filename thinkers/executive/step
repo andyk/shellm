@@ -52,18 +52,24 @@ response=$(printf '%s' "$full_message" | \
     -s "Output only a single thought. No explanation, no commands, no preamble." \
     2>/dev/null) || true
 
-[[ -z "$response" ]] && { printf 'executive/step: empty response from shellm\n' >&2; exit 1; }
-
-# Write thought to traj
+# The executive is an infinite loop: it must ALWAYS append something to the
+# traj so that trigger_self re-fires.  Empty/duplicate responses are degraded
+# but still emit a thought so the dispatcher keeps us alive.
 last_content=""
 if traj exists 2>/dev/null; then
     last_content=$(traj last --field content 2>/dev/null) || true
 fi
 
-if [[ "$last_content" != "$response" ]]; then
-    printf '{"type":"thought","content":%s,"source":"executive"}' \
-        "$(printf '%s' "$response" | jq -Rsa .)" \
-        | traj append >/dev/null
+if [[ -z "$response" ]]; then
+    printf 'executive/step: empty response from llm — emitting placeholder\n' >&2
+    response="(executive received an empty response from the LLM; continuing)"
+    sleep 1   # brief backoff so transient API failures don't tight-loop
+elif [[ "$response" == "$last_content" ]]; then
+    response="$response (repeat)"
 fi
+
+printf '{"type":"thought","content":%s,"source":"executive"}' \
+    "$(printf '%s' "$response" | jq -Rsa .)" \
+    | traj append >/dev/null
 
 printf '[thought] %s\n' "$response"
