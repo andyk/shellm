@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>shellm — Architecture Deep Dive</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@300;400;600;700;900&display=swap');
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e0e0e8;
+    --text-dim: #6e6e80;
+    --accent: #7c6ff7;
+    --accent2: #4ecdc4;
+    --accent3: #ff6b6b;
+    --accent4: #ffd93d;
+    --accent5: #6bcb77;
+    --code-bg: #161622;
+    --glow: rgba(124, 111, 247, 0.15);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  .deck {
+    width: 100%; height: 100%;
+    position: relative;
+  }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 60px 80px;
+    opacity: 0;
+    transform: translateX(60px);
+    transition: opacity 0.5s ease, transform 0.5s ease;
+    pointer-events: none;
+    overflow-y: auto;
+  }
+
+  .slide.active {
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+
+  .slide.prev {
+    opacity: 0;
+    transform: translateX(-60px);
+  }
+
+  h1 {
+    font-size: 3.2em;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    margin-bottom: 16px;
+  }
+
+  h2 {
+    font-size: 2em;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  h2 .badge {
+    font-size: 0.45em;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--accent);
+    color: #fff;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  h3 {
+    font-size: 1.2em;
+    font-weight: 600;
+    margin: 18px 0 8px;
+    color: var(--accent2);
+  }
+
+  .subtitle {
+    font-size: 1.3em;
+    color: var(--text-dim);
+    font-weight: 300;
+    margin-bottom: 40px;
+    max-width: 700px;
+    line-height: 1.5;
+  }
+
+  p, li {
+    font-size: 1.05em;
+    line-height: 1.7;
+    color: var(--text);
+  }
+
+  ul { list-style: none; margin: 8px 0; }
+  ul li {
+    padding: 6px 0 6px 24px;
+    position: relative;
+  }
+  ul li::before {
+    content: '›';
+    position: absolute;
+    left: 4px;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 1.2em;
+  }
+
+  code, .mono {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.88em;
+  }
+
+  code {
+    background: var(--code-bg);
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82em;
+    line-height: 1.6;
+    color: var(--text-dim);
+  }
+
+  .highlight { color: var(--accent); }
+  .highlight2 { color: var(--accent2); }
+  .highlight3 { color: var(--accent3); }
+  .highlight4 { color: var(--accent4); }
+  .highlight5 { color: var(--accent5); }
+
+  .grid {
+    display: grid;
+    gap: 20px;
+    margin: 16px 0;
+  }
+
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+
+  .card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 30px var(--glow);
+  }
+
+  .card h3 {
+    margin-top: 0;
+    font-size: 1.1em;
+  }
+
+  .card p {
+    font-size: 0.92em;
+    color: var(--text-dim);
+    margin-top: 6px;
+  }
+
+  .tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72em;
+    padding: 3px 10px;
+    border-radius: 4px;
+    margin: 2px 4px 2px 0;
+    border: 1px solid;
+  }
+
+  .tag-purple { color: var(--accent); border-color: var(--accent); background: rgba(124,111,247,0.1); }
+  .tag-teal { color: var(--accent2); border-color: var(--accent2); background: rgba(78,205,196,0.1); }
+  .tag-red { color: var(--accent3); border-color: var(--accent3); background: rgba(255,107,107,0.1); }
+  .tag-yellow { color: var(--accent4); border-color: var(--accent4); background: rgba(255,217,61,0.1); }
+  .tag-green { color: var(--accent5); border-color: var(--accent5); background: rgba(107,203,119,0.1); }
+
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 20px 0;
+    flex-wrap: wrap;
+  }
+
+  .flow-step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 20px;
+    text-align: center;
+    font-size: 0.9em;
+    min-width: 120px;
+  }
+
+  .flow-arrow {
+    color: var(--accent);
+    font-size: 1.5em;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+
+  .tree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85em;
+    line-height: 1.8;
+    color: var(--text-dim);
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 12px 0;
+  }
+
+  .tree .dir { color: var(--accent2); font-weight: 700; }
+  .tree .file { color: var(--text); }
+  .tree .comment { color: var(--text-dim); font-style: italic; }
+
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    margin: 20px 0;
+  }
+
+  .diagram-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .diagram-box {
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 22px;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85em;
+    font-weight: 600;
+    transition: all 0.3s;
+    cursor: default;
+  }
+
+  .diagram-box:hover { transform: scale(1.05); }
+  .diagram-box.purple { border-color: var(--accent); color: var(--accent); }
+  .diagram-box.teal { border-color: var(--accent2); color: var(--accent2); }
+  .diagram-box.red { border-color: var(--accent3); color: var(--accent3); }
+  .diagram-box.yellow { border-color: var(--accent4); color: var(--accent4); }
+  .diagram-box.green { border-color: var(--accent5); color: var(--accent5); }
+
+  .diagram-arrow {
+    color: var(--text-dim);
+    font-size: 1.2em;
+  }
+
+  .nav {
+    position: fixed;
+    bottom: 30px;
+    right: 40px;
+    display: flex;
+    gap: 10px;
+    z-index: 100;
+    align-items: center;
+  }
+
+  .nav button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 42px;
+    height: 42px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.1em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+  }
+
+  .nav button:hover {
+    border-color: var(--accent);
+    background: rgba(124,111,247,0.1);
+  }
+
+  .nav .counter {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8em;
+    color: var(--text-dim);
+    padding: 0 8px;
+  }
+
+  .progress-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 3px;
+    background: var(--accent);
+    transition: width 0.4s ease;
+    z-index: 100;
+  }
+
+  .toc {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 260px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 60px 0 20px;
+    transform: translateX(-260px);
+    transition: transform 0.3s ease;
+    z-index: 99;
+    overflow-y: auto;
+  }
+
+  .toc.open { transform: translateX(0); }
+
+  .toc-item {
+    display: block;
+    padding: 10px 24px;
+    color: var(--text-dim);
+    font-size: 0.85em;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: all 0.2s;
+    text-decoration: none;
+  }
+
+  .toc-item:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+  .toc-item.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: rgba(124,111,247,0.05);
+  }
+
+  .toc-toggle {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1em;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+  }
+
+  .toc-toggle:hover { border-color: var(--accent); color: var(--text); }
+
+  .ascii-art {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7em;
+    line-height: 1.3;
+    color: var(--accent);
+    white-space: pre;
+    margin-bottom: 10px;
+  }
+
+  .cols { display: flex; gap: 30px; }
+  .cols > div { flex: 1; }
+
+  .step-list {
+    counter-reset: steps;
+    list-style: none;
+  }
+
+  .step-list li {
+    counter-increment: steps;
+    padding: 10px 0 10px 48px;
+    position: relative;
+    border-left: 2px solid var(--border);
+    margin-left: 16px;
+  }
+
+  .step-list li::before {
+    content: counter(steps);
+    position: absolute;
+    left: -16px;
+    top: 8px;
+    width: 30px;
+    height: 30px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8em;
+    font-weight: 700;
+  }
+
+  .step-list li:last-child { border-left-color: transparent; }
+
+  .big-num {
+    font-size: 5em;
+    font-weight: 900;
+    color: var(--accent);
+    line-height: 1;
+    opacity: 0.3;
+    position: absolute;
+    top: 40px;
+    right: 60px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 0.9em;
+  }
+
+  .table th, .table td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table th {
+    color: var(--accent2);
+    font-weight: 600;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .table td code { font-size: 0.9em; }
+
+  @media (max-width: 900px) {
+    .slide { padding: 30px 24px; }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.4em; }
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .cols { flex-direction: column; }
+    .big-num { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progress"></div>
+
+<button class="toc-toggle" id="tocToggle" title="Table of contents (T)">&#9776;</button>
+<div class="toc" id="toc"></div>
+
+<div class="deck" id="deck">
+
+  <!-- SLIDE 0: Title -->
+  <div class="slide" data-title="shellm">
+    <div class="ascii-art">███      █████ ██  ██ █████ ██ ██    ███   ███
+  ███    ██    ██  ██ ██    ██ ██    ██ ███ ██
+    ███  █████ ██▀▀██ ████  ██ ██    ██  █  ██
+  ███       ██ ██  ██ ██    ██ █████ ██     ██
+███      █████ ██  ██ █████ ████████</div>
+    <h1>Architecture Deep Dive</h1>
+    <p class="subtitle">A bash-native AI agent that thinks by writing shell commands, running them, and iterating until it has an answer. Composed of dead-simple shell tools.</p>
+    <div style="display:flex; gap:10px; flex-wrap: wrap;">
+      <span class="tag tag-purple">pure bash</span>
+      <span class="tag tag-teal">~5,000 lines</span>
+      <span class="tag tag-green">multi-provider LLM</span>
+      <span class="tag tag-yellow">append-only logs</span>
+      <span class="tag tag-red">text is the interface</span>
+    </div>
+  </div>
+
+  <!-- SLIDE 1: Key Ideas -->
+  <div class="slide" data-title="Key Ideas">
+    <h2>Key Ideas <span class="badge">Design Philosophy</span></h2>
+    <div class="grid grid-2">
+      <div class="card">
+        <h3 class="highlight">Ken Thompson&rsquo;s Unix Shell Philosophy</h3>
+        <p>Each tool does one thing well. Favor simplicity, clarity, and minimal, composable programs. <code>shellm</code> + <code>llm</code> + <code>traj</code> + <code>context</code> + <code>mem</code> + <code>skills</code> &mdash; each a standalone CLI, each composable via stdin/stdout/files.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight2">CLI implementation of RLM</h3>
+        <p>A Recursive Language Model agent implemented in bash. The LLM generates code, observes its output, and recurses. Collapses all tool calling into <strong>one tool</strong>: the shell itself. No need to explicitly declare tools &mdash; the entire Unix environment is the toolbox.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight3">Docker by default, lightweight</h3>
+        <p>Sandboxed execution in Docker containers. <strong>Container re-use</strong> across runs keeps it fast &mdash; no cold-start penalty. Easy to plug in other sandbox solutions (local, DinD, broker).</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight4">Trajectory DAG abstraction</h3>
+        <p>Agent inference context is a <strong>function of its trajectory</strong>. Append-only JSONL logs form a DAG with fork/merge. Non-destructive compaction: select head + tail steps, elide the middle. Full history preserved.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight5">pyenv-like agent semantics</h3>
+        <p><code>identity shell bobby</code> / <code>source activate</code> &mdash; a familiar paradigm. Trivial for humans and agents to co-work in the same shell. Switch identities like switching Python environments.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight">Turn-taking <em>and</em> autoregressive</h3>
+        <p>Supports both paradigms: traditional request/response <strong>and</strong> infinite thought generation where the model stays in a continuous loop. Human interactions are observations injected into the thought stream asynchronously.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 2: Why the Shell -->
+  <div class="slide" data-title="Why the Shell?">
+    <h2>Why the Shell? <span class="badge">Philosophy</span></h2>
+    <div class="cols">
+      <div>
+        <p>LLMs are <strong>text-in, text-out</strong>. The Unix shell is where <em>everything</em> is text &mdash; stdin, stdout, pipes, files, env vars.</p>
+        <br>
+        <p>Most agent frameworks give the LLM a curated menu of function calls. If your menu doesn&rsquo;t include a capability, the model can&rsquo;t do it.</p>
+        <br>
+        <p><strong>shellm inverts this.</strong> Instead of enumerating tools, drop the LLM into a composable environment and let it figure out what to do.</p>
+      </div>
+      <div>
+        <h3>The Unix advantage</h3>
+        <ul>
+          <li><code>curl</code> is the HTTP client</li>
+          <li><code>jq</code> is the JSON processor</li>
+          <li><code>python3 -c</code> is the escape hatch</li>
+          <li>No schemas, no wrappers</li>
+          <li>Compose tools by piping them together</li>
+        </ul>
+        <h3>Key insight</h3>
+        <p style="color: var(--accent); font-weight: 600;">The model composes tools the same way a human would.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 2: Architecture Overview -->
+  <div class="slide" data-title="Architecture Overview">
+    <h2>Architecture Overview <span class="badge">Components</span></h2>
+    <div class="grid grid-3">
+      <div class="card">
+        <h3 class="highlight">shellm</h3>
+        <p>The core agent loop. Send context to LLM, execute the bash it writes, repeat.</p>
+        <span class="tag tag-purple">2,451 lines</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight2">llm</h3>
+        <p>Multi-provider LLM CLI. Anthropic, OpenAI, Gemini behind one interface.</p>
+        <span class="tag tag-teal">~470 lines</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight3">traj</h3>
+        <p>Trajectory manager. Append-only JSONL step logs with tree nesting.</p>
+        <span class="tag tag-red">2,067 lines</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight4">context</h3>
+        <p>Reads trajectories, outputs JSON messages arrays for LLM consumption.</p>
+        <span class="tag tag-yellow">~540 lines</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight5">thinkers</h3>
+        <p>Modular concurrent thought processes that subscribe to trajectory steps.</p>
+        <span class="tag tag-green">933 lines</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight">identity / mem / skills</h3>
+        <p>Persona, memory, and skill systems. File-based, no databases.</p>
+        <span class="tag tag-purple">~1,200 lines</span>
+      </div>
+    </div>
+    <br>
+    <p style="color: var(--text-dim);">All pure bash. All compose through the filesystem and environment variables.</p>
+  </div>
+
+  <!-- SLIDE 3: Data Flow -->
+  <div class="slide" data-title="Data Flow">
+    <h2>How Data Flows <span class="badge">Architecture</span></h2>
+    <div class="diagram">
+      <div class="diagram-row">
+        <div class="diagram-box purple">User prompt</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box teal">shellm</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box yellow">context</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box green">llm</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box red">LLM API</div>
+      </div>
+      <div class="diagram-arrow" style="font-size: 2em;">&darr;</div>
+      <div class="diagram-row">
+        <div class="diagram-box red">bash code</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box teal">execute</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box purple">stdout/stderr</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box yellow">traj append</div>
+      </div>
+      <div class="diagram-arrow" style="font-size: 2em;">&#8635;</div>
+      <p style="color: var(--accent); font-weight: 600; font-size: 1.1em;">Loop until <code>FINAL="answer"</code></p>
+    </div>
+    <div class="cols" style="margin-top: 16px;">
+      <div>
+        <h3>Every iteration:</h3>
+        <ul>
+          <li><code>context</code> reads trajectory &rarr; JSON messages</li>
+          <li><code>llm</code> sends messages to provider API</li>
+          <li>shellm extracts <code>```bash</code> blocks</li>
+          <li>Executes in Docker or locally</li>
+          <li>Records step to trajectory via <code>traj append</code></li>
+        </ul>
+      </div>
+      <div>
+        <h3>Completion signals:</h3>
+        <pre>FINAL="The answer is 42"
+
+# Or for long output:
+FINAL_FILE="/path/to/result.txt"</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 4: shellm Agent Loop -->
+  <div class="slide" data-title="shellm — Agent Loop">
+    <span class="big-num">01</span>
+    <h2>shellm <span class="badge">Agent Loop</span></h2>
+    <div class="cols">
+      <div>
+        <ul class="step-list">
+          <li>Build messages from trajectory via <code>context</code></li>
+          <li>Call LLM with system prompt + messages via <code>llm</code></li>
+          <li>Extract <code>```bash</code> code block from response</li>
+          <li>Execute code in isolated workspace (Docker or local)</li>
+          <li>Capture stdout, stderr, exit code</li>
+          <li>Append <code>reasoning</code> + <code>shell-output</code> steps to trajectory</li>
+          <li>Repeat until <code>FINAL</code> is set or max iterations reached</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What you see</h3>
+        <pre><span style="color:var(--accent2);">▶ Iteration 1 — calling gpt-5.5...</span>
+<span style="color:var(--accent2);">▶ Executing bash (12 lines):</span>
+<span style="color:var(--accent);">    curl -s "https://api.example.com"</span>
+<span style="color:var(--accent);">    | jq '.results'</span>
+  <span style="color:var(--text-dim);">│ {"count": 42, "items": [...]}</span>
+  <span style="color:var(--accent);">$ FINAL="Found 42 results"</span>
+  <span style="color:var(--accent5);">Exit 0</span>
+
+<span style="color:var(--accent2);">▶ Final answer received</span>
+Found 42 results</pre>
+        <h3>Safety</h3>
+        <ul>
+          <li>Inactivity watchdog (30s default)</li>
+          <li>Docker sandboxing with broker mode</li>
+          <li>Package install interception</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 5: llm CLI -->
+  <div class="slide" data-title="llm — LLM Wrapper">
+    <span class="big-num">02</span>
+    <h2>llm <span class="badge">LLM API Wrapper</span></h2>
+    <p class="subtitle">One command to talk to any supported LLM provider. Auto-detects provider from model name.</p>
+    <div class="grid grid-3">
+      <div class="card">
+        <h3 class="highlight">Anthropic</h3>
+        <p><code>claude-opus-4-7</code><br><code>claude-sonnet-4-5</code><br><code>claude-haiku-4-5</code></p>
+        <br>
+        <span class="tag tag-purple">--thinking</span>
+        <span class="tag tag-purple">--effort</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight3">OpenAI</h3>
+        <p><code>gpt-5.5</code> &middot; <code>gpt-5</code><br><code>gpt-4o</code> &middot; <code>o1</code> &middot; <code>o3</code> &middot; <code>o4</code></p>
+        <br>
+        <span class="tag tag-red">--thinking LEVEL</span>
+      </div>
+      <div class="card">
+        <h3 class="highlight2">Gemini</h3>
+        <p><code>gemini-3.5-flash</code><br><code>gemini-2.0-flash</code></p>
+        <br>
+        <span class="tag tag-teal">--thinking LEVEL</span>
+      </div>
+    </div>
+    <br>
+    <pre style="max-width: 700px;">llm -m claude-sonnet-4-5 "explain quicksort"
+echo "summarize" | llm -m gpt-5 --thinking medium
+llm -m gemini-3.5-flash --system-prompt "Be concise" "hi"
+llm -M messages.json --raw   <span style="color:var(--text-dim);"># full API JSON</span></pre>
+  </div>
+
+  <!-- SLIDE 6: Trajectories -->
+  <div class="slide" data-title="Trajectories">
+    <span class="big-num">03</span>
+    <h2>Trajectories <span class="badge">traj</span></h2>
+    <p class="subtitle">Append-only JSONL step logs. Every action, thought, and observation is recorded.</p>
+    <div class="cols">
+      <div>
+        <h3>Step format</h3>
+        <pre>{
+  "<span style="color:var(--accent2)">type</span>": "reasoning",
+  "<span style="color:var(--accent)">step_id</span>": "abc12345-...",
+  "<span style="color:var(--text-dim)">ts</span>": "2026-06-16T14:30:22-0700",
+  "<span style="color:var(--accent4)">thought</span>": "I should check the API",
+  "<span style="color:var(--accent3)">cmd</span>": "curl https://..."
+}</pre>
+        <h3>Step types</h3>
+        <div style="display:flex; flex-wrap:wrap; gap:4px;">
+          <span class="tag tag-teal">trajectory</span>
+          <span class="tag tag-purple">prompt</span>
+          <span class="tag tag-purple">reasoning</span>
+          <span class="tag tag-red">shell-output</span>
+          <span class="tag tag-green">final</span>
+          <span class="tag tag-yellow">thought</span>
+          <span class="tag tag-yellow">observation</span>
+          <span class="tag tag-teal">fork</span>
+          <span class="tag tag-teal">merge</span>
+        </div>
+      </div>
+      <div>
+        <h3>Directory structure</h3>
+        <div class="tree"><span class="dir">trajectories/</span>
+├── <span class="dir">42a2c63d-root/</span>
+│   ├── <span class="file">trajectory.jsonl</span>  <span class="comment"># main log</span>
+│   ├── <span class="dir">blobs/</span>             <span class="comment"># large output</span>
+│   │   └── <span class="file">&lt;step_id&gt;.stdout</span>
+│   └── <span class="dir">920b79eb-subtask/</span>  <span class="comment"># child</span>
+│       └── <span class="file">trajectory.jsonl</span>
+└── <span class="dir">be610f6e-explain-quicksort/</span>
+    └── <span class="file">trajectory.jsonl</span></div>
+        <h3>Blob spilling</h3>
+        <p style="font-size:0.9em;">stdout/stderr &gt; 4KB &rarr; written to <code>blobs/</code>, inline truncated, <code>*_ref</code> field added.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 7: traj CLI -->
+  <div class="slide" data-title="traj CLI">
+    <h2>traj CLI <span class="badge">Commands</span></h2>
+    <div class="grid grid-2">
+      <div>
+        <table class="table">
+          <tr><th>Command</th><th>Purpose</th></tr>
+          <tr><td><code>traj new</code></td><td>Create trajectory, output UUID + path</td></tr>
+          <tr><td><code>traj append</code></td><td>Add step from JSON or <code>--field</code> flags</td></tr>
+          <tr><td><code>traj fork</code></td><td>Spawn child trajectory</td></tr>
+          <tr><td><code>traj merge</code></td><td>Reintegrate child</td></tr>
+          <tr><td><code>traj show</code></td><td>Display step or metadata</td></tr>
+          <tr><td><code>traj cat</code></td><td>All steps as JSONL</td></tr>
+          <tr><td><code>traj tail</code></td><td>Recent steps (like <code>tail -f</code>)</td></tr>
+          <tr><td><code>traj list</code></td><td>ASCII tree view</td></tr>
+          <tr><td><code>traj search</code></td><td>Search fields by pattern</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>Tree view (<code>traj list --steps</code>)</h3>
+        <pre style="font-size: 0.78em;"><span style="color:var(--accent);">>>> 42a2c63d: root</span>
+    ├── aaa111 <span style="color:var(--text-dim);">[shellm-run]</span> shellm 'task'
+    ├── aaa112 <span style="color:var(--text-dim);">[prompt]</span> explain quicksort
+    ├── aaa113 <span style="color:var(--accent2);">[fork]</span> -> 920b79eb
+    │   └── <span style="color:var(--accent2);">920b79eb: subtask</span>
+    │       ├── bbb111 <span style="color:var(--text-dim);">[reasoning]</span> ...
+    │       └── bbb112 <span style="color:var(--accent5);">[final]</span> done
+    ├── aaa114 <span style="color:var(--text-dim);">[merge]</span> <- 920b79eb
+    └── aaa115 <span style="color:var(--accent5);">[final]</span> complete</pre>
+        <h3>ID resolution</h3>
+        <ul>
+          <li>Full UUID: <code>42a2c63d-90e2-...</code></li>
+          <li>8-char prefix: <code>42a2c63d</code></li>
+          <li>Directory path: <code>42a2c63d-root/</code></li>
+          <li>Recursive glob search</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 8: context -->
+  <div class="slide" data-title="context — Context Builder">
+    <span class="big-num">04</span>
+    <h2>context <span class="badge">Context Builder</span></h2>
+    <p class="subtitle">Transforms trajectory JSONL into a JSON messages array for the LLM API.</p>
+    <div class="flow">
+      <div class="flow-step" style="border-color:var(--accent3)">trajectory.jsonl<br><span style="font-size:0.7em;color:var(--text-dim)">1,122 steps</span></div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step" style="border-color:var(--accent4)">Select<br><span style="font-size:0.7em;color:var(--text-dim)">head 1 + tail 50</span></div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step" style="border-color:var(--accent)">Assign roles<br><span style="font-size:0.7em;color:var(--text-dim)">user / assistant</span></div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step" style="border-color:var(--accent2)">Truncate<br><span style="font-size:0.7em;color:var(--text-dim)">per-step limit</span></div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step" style="border-color:var(--accent5)">Merge<br><span style="font-size:0.7em;color:var(--text-dim)">same-role merge</span></div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step" style="border-color:var(--accent3)">JSON array<br><span style="font-size:0.7em;color:var(--text-dim)">[{role, content}]</span></div>
+    </div>
+    <div class="cols">
+      <div>
+        <h3>Usage by shellm</h3>
+        <pre>context --traj_dir "$TRAJ_DIR" "$TRAJ_ID" \
+  --assistant-types reasoning,final \
+  --user-types prompt,shell-output,feedback \
+  --head 1 --tail 50</pre>
+      </div>
+      <div>
+        <h3>Key features</h3>
+        <ul>
+          <li>Blob restoration from <code>*_ref</code> paths</li>
+          <li>Elision markers: <code>[47 steps elided]</code></li>
+          <li>Budget enforcement via binary search on prompt limit</li>
+          <li>Consecutive-role merging (API requires alternation)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 9: Identities -->
+  <div class="slide" data-title="Identities">
+    <span class="big-num">05</span>
+    <h2>Identities <span class="badge">Personas</span></h2>
+    <p class="subtitle">Isolated agent personas, each with own memories, skills, trajectories, and thinkers.</p>
+    <div class="cols">
+      <div>
+        <div class="tree"><span class="dir">.identities/bobby/</span>
+├── <span class="file">info.txt</span>           <span class="comment"># name, model, root_traj</span>
+├── <span class="file">activate</span>           <span class="comment"># source to set env vars</span>
+├── <span class="dir">memories/</span>          <span class="comment"># MEM_DIR</span>
+├── <span class="dir">skills/</span>            <span class="comment"># SKILLS_DIR</span>
+│   ├── <span class="dir">web-fetch/</span>
+│   ├── <span class="dir">telegram/</span>
+│   └── <span class="file">.skillsrc</span>
+├── <span class="dir">kernel/</span>            <span class="comment"># core skills (mem, chat)</span>
+├── <span class="dir">thinkers/</span>          <span class="comment"># thought processes</span>
+│   ├── <span class="dir">executive/</span>
+│   ├── <span class="dir">actor/</span>
+│   └── <span class="dir">learning/</span>
+├── <span class="dir">trajectories/</span>      <span class="comment"># all run logs</span>
+│   └── <span class="dir">42a2c63d-root/</span>
+└── <span class="dir">.shellm/</span>           <span class="comment"># envs, workdirs, broker</span></div>
+      </div>
+      <div>
+        <h3>Commands</h3>
+        <pre>identity new bobby
+identity shell bobby    <span style="color:var(--text-dim);"># enter subshell</span>
+identity list
+identity prompt         <span style="color:var(--text-dim);"># system prompt</span>
+identity delete bobby</pre>
+        <h3>Environment on activation</h3>
+        <pre>IDENTITY_NAME=bobby
+IDENTITY_DIR=.identities/bobby
+MEM_DIR=.../memories
+SKILLS_DIR=.../skills
+TRAJ_DIR=.../trajectories
+TRAJ_ID=42a2c63d-...
+THINKERS_DIR=.../thinkers
+THINK_MODEL=claude-opus-4-7</pre>
+        <p style="font-size:0.85em;color:var(--text-dim);">All tools discover their context through these env vars.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 10: Skills -->
+  <div class="slide" data-title="Skills">
+    <span class="big-num">06</span>
+    <h2>Skills <span class="badge">Capabilities</span></h2>
+    <p class="subtitle">SKILL.md-based agent abilities. Markdown with YAML frontmatter. No code generation framework needed.</p>
+    <div class="cols">
+      <div>
+        <h3>SKILL.md format</h3>
+        <pre><span style="color:var(--text-dim);">---</span>
+<span style="color:var(--accent2);">name:</span> web-fetch
+<span style="color:var(--accent2);">description:</span> Fetch web content
+<span style="color:var(--accent2);">metadata:</span>
+  <span style="color:var(--accent2);">shellm:</span>
+    <span style="color:var(--accent2);">requires:</span>
+      <span style="color:var(--accent2);">bins:</span> ["curl", "jq"]
+<span style="color:var(--text-dim);">---</span>
+
+# web-fetch
+
+Fetch and parse web content from URLs.
+
+## Commands
+  <span style="color:var(--accent5);">fetch URL</span>          Fetch raw content
+  <span style="color:var(--accent5);">fetch --json URL</span>   Parse as JSON
+
+## Examples
+```bash
+#| eval: true
+curl https://example.com | head -5
+```</pre>
+      </div>
+      <div>
+        <h3>Commands</h3>
+        <pre>skills install ./my-skill
+skills install https://github.com/...
+skills list
+skills show web-fetch
+skills promote web-fetch  <span style="color:var(--text-dim);"># to kernel</span>
+skills search "web"</pre>
+        <h3>How skills work</h3>
+        <ul>
+          <li><code>skills prompt</code> outputs all skill descriptions</li>
+          <li>Included in system prompt for LLM calls</li>
+          <li>LLM reads skill docs and uses commands</li>
+          <li><strong>Kernel skills</strong> (mem, chat) always available</li>
+          <li><strong>Local skills</strong> installed per-identity</li>
+          <li>Executable bash blocks with <code>#| eval: true</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 11: Memory -->
+  <div class="slide" data-title="mem — Memory System">
+    <span class="big-num">07</span>
+    <h2>mem <span class="badge">Memory System</span></h2>
+    <p class="subtitle">File-based semantic memory. Markdown files with YAML frontmatter. No database.</p>
+    <div class="cols">
+      <div>
+        <h3>Memory file format</h3>
+        <pre><span style="color:var(--text-dim);"># Filename:</span>
+<span style="color:var(--accent2);">2026-06-16-14-30-22_a1b2c3d4_learned-xyz.md</span>
+
+<span style="color:var(--text-dim);">---</span>
+<span style="color:var(--accent);">type:</span> belief
+<span style="color:var(--accent);">tags:</span> [architecture, shellm]
+<span style="color:var(--accent);">created:</span> 2026-06-16T14:30:22
+<span style="color:var(--accent);">modified:</span> 2026-06-16T14:30:22
+<span style="color:var(--text-dim);">---</span>
+
+The thought-generation loop lacks a true
+no-op primitive. "Silence" has to be rendered
+as a thought, which becomes context that
+triggers the next thought.</pre>
+      </div>
+      <div>
+        <h3>Memory types</h3>
+        <div style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom: 12px;">
+          <span class="tag tag-purple">memory</span>
+          <span class="tag tag-teal">belief</span>
+          <span class="tag tag-red">todo</span>
+          <span class="tag tag-yellow">objective</span>
+          <span class="tag tag-green">fact</span>
+          <span class="tag tag-purple">value</span>
+          <span class="tag tag-teal">preference</span>
+          <span class="tag tag-red">note</span>
+          <span class="tag tag-yellow">goal</span>
+        </div>
+        <h3>Commands</h3>
+        <pre>mem add --type belief "text..."
+mem list --short
+mem search "idle spam"
+mem show a1b2c3d4
+mem edit a1b2c3d4 "new text"
+mem forget a1b2c3d4
+mem dump   <span style="color:var(--text-dim);"># all summaries</span></pre>
+        <h3>ID resolution</h3>
+        <p style="font-size:0.9em;">Match by 4-8 char hex prefix, filename, or slug substring.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 12: Thinkers -->
+  <div class="slide" data-title="Thinkers — Autonomous Thought">
+    <span class="big-num">08</span>
+    <h2>Thinkers <span class="badge">Autonomous Thought</span></h2>
+    <p class="subtitle">Modular concurrent thought processes that subscribe to trajectory steps and react independently.</p>
+    <div class="diagram">
+      <div class="diagram-row">
+        <div class="diagram-box purple" style="min-width: 180px;">Trajectory<br><span style="font-size:0.7em; color:var(--text-dim);">(shared bus)</span></div>
+      </div>
+      <div class="diagram-arrow" style="font-size:1.5em;">&darr; new steps &darr;</div>
+      <div class="diagram-row">
+        <div class="diagram-box teal">Dispatcher</div>
+      </div>
+      <div class="diagram-arrow" style="font-size:1.5em;">&darr; route by type + source &darr;</div>
+      <div class="diagram-row" style="flex-wrap: wrap; justify-content: center;">
+        <div class="diagram-box green">executive</div>
+        <div class="diagram-box red">actor</div>
+        <div class="diagram-box yellow">learning</div>
+        <div class="diagram-box purple">goals</div>
+        <div class="diagram-box teal">values</div>
+        <div class="diagram-box green">mind-wandering</div>
+      </div>
+      <div class="diagram-arrow" style="font-size:1.5em;">&#8635; write back to trajectory</div>
+    </div>
+  </div>
+
+  <!-- SLIDE 13: Thinker Details -->
+  <div class="slide" data-title="Thinker Structure">
+    <h2>Thinker Structure <span class="badge">Details</span></h2>
+    <div class="cols">
+      <div>
+        <h3>Directory layout</h3>
+        <div class="tree"><span class="dir">thinkers/executive/</span>
+├── <span class="file">step</span>                  <span class="comment"># receives step JSON on stdin</span>
+├── <span class="file">subscriptions.jsonl</span>   <span class="comment"># type filters</span>
+├── <span class="file">prompt.md</span>             <span class="comment"># system prompt template</span>
+├── <span class="file">start</span>                 <span class="comment"># optional: long-running setup</span>
+└── <span class="file">stop</span>                  <span class="comment"># optional: cleanup</span></div>
+        <h3>Subscriptions</h3>
+        <pre style="font-size:0.8em;"><span style="color:var(--text-dim);"># subscriptions.jsonl</span>
+{"types":["thought","action","observation",
+  "human-msg","agent-msg","merge"],
+ "trigger_self": false}</pre>
+        <h3>Self-triggering prevention</h3>
+        <p style="font-size:0.9em;">Every step must include <code>"source":"&lt;thinker-name&gt;"</code>. Dispatcher skips delivering a step to the thinker that wrote it (unless <code>trigger_self: true</code>).</p>
+      </div>
+      <div>
+        <h3>Core thinkers</h3>
+        <table class="table" style="font-size: 0.85em;">
+          <tr><th>Thinker</th><th>Role</th></tr>
+          <tr><td><code style="color:var(--accent5);">executive</code></td><td>Primary thought generator</td></tr>
+          <tr><td><code style="color:var(--accent3);">actor</code></td><td>Executes actions via shellm fork/merge</td></tr>
+          <tr><td><code style="color:var(--accent4);">learning</code></td><td>Extracts lessons &rarr; memories</td></tr>
+          <tr><td><code style="color:var(--accent);">goals-creator</code></td><td>Detects emerging goals</td></tr>
+          <tr><td><code style="color:var(--accent);">goals-enforcer</code></td><td>Redirects drift from goals</td></tr>
+          <tr><td><code style="color:var(--accent2);">values-creator</code></td><td>Notices emerging values/beliefs</td></tr>
+          <tr><td><code style="color:var(--accent2);">values-enforcer</code></td><td>Flags value misalignment</td></tr>
+          <tr><td><code style="color:var(--accent4);">mind-wandering</code></td><td>Background ideation &amp; recall</td></tr>
+          <tr><td><code style="color:var(--text-dim);">system-arch</code></td><td>Meta-cognition about system</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 14: Chat -->
+  <div class="slide" data-title="chat — Conversation">
+    <span class="big-num">09</span>
+    <h2>chat <span class="badge">Conversation</span></h2>
+    <p class="subtitle">Send messages into an identity's thought stream. Messages become trajectory steps that thinkers react to.</p>
+    <div class="cols">
+      <div>
+        <h3>How it works</h3>
+        <div class="flow" style="flex-direction: column; align-items: flex-start;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="flow-step" style="border-color:var(--accent5); min-width: 90px;">Human</div>
+            <div class="flow-arrow">&rarr;</div>
+            <code>chat send "hello"</code>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top: 8px;">
+            <div class="flow-arrow" style="padding-left: 40px;">&darr;</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="flow-step" style="border-color:var(--accent4); min-width: 90px;">traj append</div>
+            <div class="flow-arrow">&rarr;</div>
+            <code>type: human-msg</code> + <code>type: observation</code>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top: 8px;">
+            <div class="flow-arrow" style="padding-left: 40px;">&darr;</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="flow-step" style="border-color:var(--accent); min-width: 90px;">Dispatcher</div>
+            <div class="flow-arrow">&rarr;</div>
+            <span>Routes to subscribed thinkers</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top: 8px;">
+            <div class="flow-arrow" style="padding-left: 40px;">&darr;</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="flow-step" style="border-color:var(--accent2); min-width: 90px;">executive</div>
+            <div class="flow-arrow">&rarr;</div>
+            <span>Generates response thought/action</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <h3>Commands</h3>
+        <pre>chat send "What's on your mind?"
+chat send-file data.csv
+chat reply "I see the pattern..."
+chat history 10</pre>
+        <h3>Key design</h3>
+        <ul>
+          <li>No LLM call &mdash; just appends to trajectory</li>
+          <li>Thinkers subscribe to <code>human-msg</code></li>
+          <li>Always writes to <code>ROOT_TRAJ_ID</code></li>
+          <li>Observation wrapper adds <code>[chat]</code> prefix</li>
+          <li>Actor thinker handles <code>!chat reply</code> actions</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 15: Key Patterns -->
+  <div class="slide" data-title="Key Patterns">
+    <h2>Key Architectural Patterns <span class="badge">Design</span></h2>
+    <div class="grid grid-2">
+      <div class="card">
+        <h3 class="highlight">Text is the interface</h3>
+        <p>All state lives in files: JSONL, markdown, bash scripts. No databases. Everything is text that humans can read and LLMs can process.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight2">Environment-driven discovery</h3>
+        <p>Tools discover context via env vars set by <code>identity activate</code>. No config files to parse, no service discovery.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight4">Append-only logs</h3>
+        <p>Trajectories are immutable. Steps are never modified after creation. History is always complete and verifiable.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight5">Reactive composition</h3>
+        <p>Thinkers subscribe to step types. The trajectory is the event bus. Add/remove thinkers independently without changing the core.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight3">Isolation by default</h3>
+        <p>Each identity is a separate namespace. Docker provides process isolation. Workdirs provide filesystem isolation. Nothing bleeds.</p>
+      </div>
+      <div class="card">
+        <h3 class="highlight">Unix composability</h3>
+        <p>Each tool does one thing well. <code>shellm</code> + <code>traj</code> + <code>context</code> + <code>mem</code> + <code>skills</code> = full agent stack. Compose via stdin/stdout/files.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLIDE 16: Full Picture -->
+  <div class="slide" data-title="The Full Picture">
+    <h2>The Full Picture</h2>
+    <div class="diagram" style="gap: 16px;">
+      <div class="diagram-row">
+        <div class="diagram-box green" style="font-size:1em;padding:16px 30px;">Human</div>
+      </div>
+      <div class="diagram-row" style="gap: 20px;">
+        <div class="diagram-arrow">&darr;</div>
+        <span style="color:var(--text-dim);font-size:0.8em;">chat send / shellm prompt</span>
+      </div>
+      <div class="diagram-row" style="gap: 16px;">
+        <div class="diagram-box purple" style="padding: 16px 24px;">
+          <strong>Identity Shell</strong><br>
+          <span style="font-size:0.7em;color:var(--text-dim);">env vars &middot; activate</span>
+        </div>
+      </div>
+      <div class="diagram-row" style="gap: 8px;">
+        <div class="diagram-arrow">&darr;</div>
+      </div>
+      <div class="diagram-row" style="gap: 12px; flex-wrap: wrap; justify-content: center;">
+        <div class="diagram-box yellow" style="min-width: 100px;">
+          <strong>Trajectory</strong><br>
+          <span style="font-size:0.65em;color:var(--text-dim);">append-only JSONL</span>
+        </div>
+        <div class="diagram-arrow">&harr;</div>
+        <div class="diagram-box teal" style="min-width: 100px;">
+          <strong>Dispatcher</strong><br>
+          <span style="font-size:0.65em;color:var(--text-dim);">tail -F &rarr; route</span>
+        </div>
+        <div class="diagram-arrow">&harr;</div>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <div class="diagram-box green" style="padding:6px 14px; font-size:0.75em;">executive</div>
+          <div class="diagram-box red" style="padding:6px 14px; font-size:0.75em;">actor &rarr; shellm fork</div>
+          <div class="diagram-box yellow" style="padding:6px 14px; font-size:0.75em;">learning &rarr; mem add</div>
+        </div>
+      </div>
+      <div class="diagram-row" style="gap: 8px;">
+        <div class="diagram-arrow">&darr;</div>
+        <span style="color:var(--text-dim);font-size:0.8em;">context reads traj</span>
+        <div class="diagram-arrow">&darr;</div>
+      </div>
+      <div class="diagram-row" style="gap: 12px;">
+        <div class="diagram-box purple" style="min-width: 80px;">context</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box teal" style="min-width: 80px;">llm</div>
+        <div class="diagram-arrow">&rarr;</div>
+        <div class="diagram-box red" style="min-width: 130px;">Anthropic / OpenAI / Gemini</div>
+      </div>
+    </div>
+    <p style="text-align:center; color:var(--text-dim); margin-top: 12px; font-size: 0.95em;">
+      Everything is text. Everything is files. Everything composes.
+    </p>
+  </div>
+
+  <!-- SLIDE 17: Getting Started -->
+  <div class="slide" data-title="Getting Started">
+    <h2>Getting Started</h2>
+    <div class="cols">
+      <div>
+        <h3>Install</h3>
+        <pre>git clone https://github.com/andyk/shellm.git
+cd shellm
+./install.sh --symlinks</pre>
+        <h3>Quick start</h3>
+        <pre>export ANTHROPIC_API_KEY="sk-ant-..."
+
+<span style="color:var(--text-dim);"># Run a task</span>
+shellm what is the mass of jupiter
+
+<span style="color:var(--text-dim);"># Pipe data in</span>
+cat data.csv | shellm summarize this
+
+<span style="color:var(--text-dim);"># Create an identity</span>
+identity new myagent
+identity shell myagent
+
+<span style="color:var(--text-dim);"># Start thinking</span>
+thinkers start
+chat send "hello, what are you thinking?"</pre>
+      </div>
+      <div>
+        <h3>What gets installed</h3>
+        <table class="table" style="font-size:0.85em;">
+          <tr><td><code>shellm</code></td><td>Agent loop</td></tr>
+          <tr><td><code>llm</code></td><td>LLM API wrapper</td></tr>
+          <tr><td><code>traj</code></td><td>Trajectory manager</td></tr>
+          <tr><td><code>context</code></td><td>Context builder</td></tr>
+          <tr><td><code>identity</code></td><td>Persona manager</td></tr>
+          <tr><td><code>thinkers</code></td><td>Thought process manager</td></tr>
+          <tr><td><code>mem</code></td><td>Memory store</td></tr>
+          <tr><td><code>skills</code></td><td>Skill manager</td></tr>
+          <tr><td><code>chat</code></td><td>Conversation interface</td></tr>
+          <tr><td><code>shellm-explore</code></td><td>Run visualization</td></tr>
+        </table>
+        <br>
+        <p style="color:var(--accent); font-weight: 600;">
+          github.com/andyk/shellm
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="nav">
+  <button id="prevBtn" title="Previous (←)">&larr;</button>
+  <span class="counter" id="counter">1 / 18</span>
+  <button id="nextBtn" title="Next (→)">&rarr;</button>
+</div>
+
+<script>
+(function() {
+  const slides = document.querySelectorAll('.slide');
+  const total = slides.length;
+  let current = 0;
+
+  const counter = document.getElementById('counter');
+  const progress = document.getElementById('progress');
+  const toc = document.getElementById('toc');
+  const tocToggle = document.getElementById('tocToggle');
+
+  // Build TOC
+  slides.forEach((s, i) => {
+    const item = document.createElement('div');
+    item.className = 'toc-item';
+    item.textContent = s.dataset.title || `Slide ${i + 1}`;
+    item.addEventListener('click', () => { goTo(i); toc.classList.remove('open'); });
+    toc.appendChild(item);
+  });
+
+  function goTo(n) {
+    if (n < 0 || n >= total) return;
+    slides[current].classList.remove('active');
+    slides[current].classList.add('prev');
+    setTimeout(() => slides[current === n ? current : current].classList.remove('prev'), 500);
+
+    const old = current;
+    current = n;
+
+    slides.forEach((s, i) => {
+      s.classList.remove('active', 'prev');
+      if (i === old && old !== current) s.classList.add('prev');
+    });
+
+    slides[current].classList.add('active');
+    counter.textContent = `${current + 1} / ${total}`;
+    progress.style.width = `${((current + 1) / total) * 100}%`;
+
+    // Update TOC active state
+    toc.querySelectorAll('.toc-item').forEach((item, i) => {
+      item.classList.toggle('active', i === current);
+    });
+  }
+
+  function next() { goTo(current + 1); }
+  function prev() { goTo(current - 1); }
+
+  document.getElementById('nextBtn').addEventListener('click', next);
+  document.getElementById('prevBtn').addEventListener('click', prev);
+  tocToggle.addEventListener('click', () => toc.classList.toggle('open'));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'j') { e.preventDefault(); next(); }
+    if (e.key === 'ArrowLeft' || e.key === 'k') { e.preventDefault(); prev(); }
+    if (e.key === 'Home') { e.preventDefault(); goTo(0); }
+    if (e.key === 'End') { e.preventDefault(); goTo(total - 1); }
+    if (e.key === 't' || e.key === 'T') { toc.classList.toggle('open'); }
+    if (e.key === 'Escape') { toc.classList.remove('open'); }
+  });
+
+  // Touch support
+  let touchStartX = 0;
+  document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; });
+  document.addEventListener('touchend', (e) => {
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 50) { dx > 0 ? prev() : next(); }
+  });
+
+  // Initialize
+  goTo(0);
+})();
+</script>
+</body>
+</html>
