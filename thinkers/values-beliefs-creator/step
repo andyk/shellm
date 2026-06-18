@@ -46,13 +46,13 @@ mkdir -p "$run_dir"
 shellm_flags=()
 while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
-done < <(_build_shellm_flags "$IDENTITY_DIR")
+done < <(_build_shellm_flags "$IDENTITY_DIR" "$run_dir")
 
 
 printf '  thinker: %s...\n' "$THINKER_NAME" >&2
 thinker_response=$(_SHELLM_PARENT_TRAJ_ID="$TRAJ_ID" \
     SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
-    shellm --env "$IDENTITY_NAME" --workdir "$run_dir" \
+    shellm \
     "${shellm_flags[@]}" \
     "$thinker_message") || true
 

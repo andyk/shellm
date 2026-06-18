@@ -34,7 +34,7 @@ mkdir -p "$run_dir"
 shellm_flags=()
 while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
-done < <(_build_shellm_flags "$IDENTITY_DIR")
+done < <(_build_shellm_flags "$IDENTITY_DIR" "$run_dir")
 
 # Load thinker prompt
 prompt_file="$SCRIPT_DIR/prompt.md"
@@ -56,7 +56,7 @@ THINK_FAST_MODEL="${THINK_FAST_MODEL:-gemini-3.5-flash}"
 is_reply=$(printf 'Action: %s\n\nIs this action about replying, responding, or sending a message to someone in chat? Answer only YES or NO.' "$action_body" | \
     llm -m "$THINK_FAST_MODEL" -s "Answer only YES or NO." 2>/dev/null) || true
 
-if [[ "${is_reply^^}" == *"YES"* ]]; then
+if [[ "$(printf '%s' "$is_reply" | tr '[:lower:]' '[:upper:]')" == *"YES"* ]]; then
     printf '  fast reply...\n' >&2
     reply=$(printf '%s' "$act_prompt" | \
         llm -m "$THINK_FAST_MODEL" \
@@ -75,7 +75,7 @@ fi
 printf '  executing action...\n' >&2
 act_response=$(_SHELLM_PARENT_TRAJ_ID="$TRAJ_ID" \
     SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
-    shellm --env "$IDENTITY_NAME" --workdir "$run_dir" \
+    shellm \
     "${shellm_flags[@]}" \
     "$act_prompt") || true
 
