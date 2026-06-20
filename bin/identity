@@ -60,7 +60,7 @@ _ensure_kernel() {
     script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 
     local skill
-    for skill in mem chat; do
+    for skill in mem chat goals; do
         mkdir -p "$kernel_dir/$skill"
         if [[ ! -f "$kernel_dir/$skill/SKILL.md" ]]; then
             local bundled="$script_dir/../skills/$skill/SKILL.md"
@@ -93,7 +93,7 @@ _install_bundled_skills() {
     [[ -d "$bundled_dir" ]] || return 0
 
     # Kernel skills are handled by _ensure_kernel — skip them here
-    local kernel_skills=" mem chat "
+    local kernel_skills=" mem chat goals "
 
     local src_dir
     for src_dir in "$bundled_dir"/*/; do
@@ -265,6 +265,7 @@ export SHELLM_CONF_DIR="$_id_dir/.shellm"
 export THINK_MODEL="$_id_model"
 export THINK_TICK_INTERVAL="$_id_interval"
 export THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
+export CHATRC="$_id_dir/chat/.chatrc"
 
 # Source identity .env if present
 if [[ -f "$_id_dir/.env" ]]; then
@@ -281,7 +282,7 @@ PS1="($_id_name) ${PS1:-\$ }"
 deactivate_identity() {
     PS1="${_IDENTITY_OLD_PS1}"
     unset IDENTITY_NAME IDENTITY_DIR MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR
-    unset TRAJ_DIR TRAJ_ID THINKERS_DIR SKILLSRC SHELLM_TRAJ_DIR SHELLM_ENVS_DIR SHELLM_WORKDIRS_DIR SHELLM_BROKER_DIR SHELLM_CONF_DIR THINK_MODEL THINK_TICK_INTERVAL THINK_CONTEXT_TAIL
+    unset TRAJ_DIR TRAJ_ID THINKERS_DIR SKILLSRC SHELLM_TRAJ_DIR SHELLM_ENVS_DIR SHELLM_WORKDIRS_DIR SHELLM_BROKER_DIR SHELLM_CONF_DIR THINK_MODEL THINK_TICK_INTERVAL THINK_CONTEXT_TAIL CHATRC
     unset _IDENTITY_OLD_PS1
     unset -f deactivate_identity 2>/dev/null
 }
@@ -720,6 +721,7 @@ $matches"
     export THINK_MODEL="$think_model"
     export THINK_TICK_INTERVAL="$think_tick_interval"
     export THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
+    export CHATRC="$identity_dir/chat/.chatrc"
 
     # Source identity .env if present
     if [[ -f "$identity_dir/.env" ]]; then

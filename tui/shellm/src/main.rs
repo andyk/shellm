@@ -411,6 +411,12 @@ async fn run(
             return;
         }
         let (sender, is_agent) = match step_type {
+            "message" => {
+                let from = json["from"].as_str().unwrap_or("unknown").to_string();
+                let is_self = from == id;
+                (from, is_self)
+            }
+            // Legacy types for backward compat with old trajectories
             "human-msg" => (json["from"].as_str().unwrap_or("you").to_string(), false),
             "agent-msg" => (id.to_string(), true),
             _ => return,
@@ -431,7 +437,7 @@ async fn run(
             .or_else(|_| env::var("TRAJ_ID"))
             .unwrap_or_default();
         let cmd = format!(
-            "traj cat {} --filter type=human-msg,agent-msg --raw 2>/dev/null | tail -n 20",
+            "traj cat {} --filter type=message,human-msg,agent-msg --raw 2>/dev/null | tail -n 20",
             shell_escape(&traj_id)
         );
         let Ok(output) = tokio::process::Command::new("bash")
@@ -458,7 +464,7 @@ async fn run(
         let traj_id = env::var("ROOT_TRAJ_ID")
             .or_else(|_| env::var("TRAJ_ID"))
             .unwrap_or_default();
-        let mut args = vec!["tail", "-f", "--filter", "type=human-msg,agent-msg", "-n", "0", "--raw"];
+        let mut args = vec!["tail", "-f", "--filter", "type=message,human-msg,agent-msg", "-n", "0", "--raw"];
         let traj_id_owned;
         if !traj_id.is_empty() {
             traj_id_owned = traj_id;
@@ -523,16 +529,27 @@ async fn run(
         mouse_captured: true,
     };
 
+    let mut needs_clear = false;
+
     loop {
         while let Ok(msg) = rx.try_recv() {
             app.messages.push(msg);
             if app.mode == Mode::Chat {
                 app.scroll_offset = 0;
+                needs_clear = true;
             }
         }
 
         while let Ok(lines) = cmd_rx.try_recv() {
             app.cmd_output = lines;
+        }
+
+        // Force full redraw when chat messages change to avoid
+        // differential rendering artifacts (stale content bleeding
+        // across widget boundaries after scroll changes).
+        if needs_clear {
+            terminal.clear()?;
+            needs_clear = false;
         }
 
         terminal.draw(|f| draw(f, &app))?;

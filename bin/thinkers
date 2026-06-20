@@ -21,6 +21,7 @@ THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
 THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-30}"
 THINKERS_MAX_CONCURRENT="${THINKERS_MAX_CONCURRENT:-20}"
 VERBOSE=0
+NO_SELF_TRIGGER=0
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -173,6 +174,11 @@ _start_dispatcher() {
             sub_types=$(printf '%s' "$sub_line" | jq -r '(.types // []) | join("|")' 2>/dev/null) || true
             sub_trigger_self=$(printf '%s' "$sub_line" | jq -r '.trigger_self // false' 2>/dev/null) || true
 
+            # Override trigger_self when --no-self-trigger flag is set
+            if [[ "$NO_SELF_TRIGGER" -eq 1 ]]; then
+                sub_trigger_self="false"
+            fi
+
             # Default traj_id to $TRAJ_ID
             if [[ -z "$sub_traj_id" ]]; then sub_traj_id="$TRAJ_ID"; fi
 
@@ -207,7 +213,7 @@ _start_dispatcher() {
     # Export env for dispatcher subprocess
     export IDENTITY_DIR IDENTITY_NAME MEM_DIR SKILLS_DIR SKILLS_KERNEL_DIR
     export TRAJ_DIR TRAJ_ID THINKERS_DIR SHELLM_HOME THINK_MODEL THINK_CONTEXT_TAIL
-    export THINKERS_MAX_CONCURRENT
+    export THINKERS_MAX_CONCURRENT NO_SELF_TRIGGER
 
     # Start dispatcher in background
     (
@@ -402,6 +408,15 @@ _stop_dispatcher() {
 
 cmd_start() {
     _require_env
+
+    # Parse start-specific flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-self-trigger) NO_SELF_TRIGGER=1; shift ;;
+            -*) die "Unknown flag for start: $1" ;;
+            *) break ;;
+        esac
+    done
 
     local run_dir="$IDENTITY_DIR/run"
     mkdir -p "$run_dir"
@@ -866,6 +881,22 @@ cmd_watch() {
     done
 }
 
+cmd_logs() {
+    _require_env
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "logs requires <thinker-name>"
+
+    local log_file="$IDENTITY_DIR/run/logs/$name.log"
+    [[ -f "$log_file" ]] || die "No log file for thinker: $name (has it been started?)"
+
+    # Follow mode with -f flag
+    if [[ "${2:-}" == "-f" ]]; then
+        tail -f "$log_file"
+    else
+        cat "$log_file"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
@@ -879,18 +910,21 @@ usage() {
 thinkers — Modular reactive thought process manager
 
 Usage:
-  thinkers start [name ...]    Start all thinkers (or specific ones by name)
+  thinkers start [--no-self-trigger] [name ...]
+                               Start all thinkers (or specific ones by name)
   thinkers stop [name ...]     Stop all thinkers (or specific ones by name)
   thinkers status              Show dispatcher and per-thinker status
   thinkers list                List installed thinkers with subscriptions
   thinkers step <name>          Manually trigger a thinker's step
   thinkers watch [N]           Stream new steps (show last N first, default 0)
   thinkers new <name>          Scaffold a new thinker
+  thinkers logs <name> [-f]   Show logs for a thinker (-f to follow)
   thinkers repl                Interactive thinkers TUI
 
 Options:
-  -v, --verbose   Verbose/debug mode
-  -h, --help      Show this help
+  --no-self-trigger   Disable self-triggering for all started thinkers
+  -v, --verbose       Verbose/debug mode
+  -h, --help          Show this help
 
 Environment (set by `identity shell`):
   IDENTITY_DIR, IDENTITY_NAME, MEM_DIR, SKILLS_DIR,
@@ -926,6 +960,7 @@ case "$cmd" in
     step)     cmd_step "$@" ;;
     watch)    cmd_watch "$@" ;;
     new)      cmd_new "$@" ;;
+    logs)     cmd_logs "$@" ;;
     repl)     cmd_repl ;;
     help)     usage ;;
     "")       usage ;;

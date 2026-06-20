@@ -1,12 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# chat — Send messages to an activated identity's thought stream
+# chat — Send and receive messages on an activated identity's trajectory
 # Reads TRAJ_DIR + TRAJ_ID from environment (set by `identity shell`).
 # Always appends to the root trajectory (ROOT_TRAJ_ID), even when called
 # from a forked sub-trajectory (e.g. inside an actor step).
+#
+# Config file: $CHATRC (default: ./.chatrc)
+#   default_send_from=<name>   Default --from for `chat send`
 
 die() { printf 'chat: error: %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Config file (.chatrc)
+# ---------------------------------------------------------------------------
+
+CHATRC="${CHATRC:-./.chatrc}"
+
+# Read a key from the chatrc file. Returns empty string if not found.
+_chatrc_get() {
+    local key="$1"
+    [[ -f "$CHATRC" ]] || return 0
+    grep "^${key}=" "$CHATRC" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 # Append to the root trajectory, not the current (possibly forked) one
 _chat_append() {
@@ -19,12 +39,17 @@ case "${1:-}" in -h|--help|help) ;; *)
     [[ -n "${TRAJ_ID:-}" ]] || die "TRAJ_ID not set. Run: identity shell <name>"
     ;; esac
 
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
 cmd_send() {
-    local message="" from="human"
+    local message="" from="" to="${IDENTITY_NAME:-}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --from) from="${2:?--from requires a name}"; shift 2 ;;
-            *) message="${message:+$message }$1"; shift ;;
+            --to)   to="${2:?--to requires a name}"; shift 2 ;;
+            *)      message="${message:+$message }$1"; shift ;;
         esac
     done
 
@@ -32,24 +57,36 @@ cmd_send() {
     if [[ -z "$message" && ! -t 0 ]]; then
         message=$(cat)
     fi
-    [[ -z "$message" ]] && die "No message provided. Usage: chat send <message>"
+    [[ -z "$message" ]] && die "No message provided. Usage: chat send [--from <name>] [--to <name>] <message>"
 
-    # Append human-msg step to trajectory
-    local step='{"type":"human-msg","content":'
-    step+="$(printf '%s' "$message" | jq -Rsa .)"
-    [[ "$from" != "human" ]] && step+=',"from":'"$(printf '%s' "$from" | jq -Rsa .)"
-    step+='}'
-    printf '%s' "$step" | _chat_append
+    # Resolve --from default from .chatrc
+    if [[ -z "$from" ]]; then
+        from=$(_chatrc_get "default_send_from")
+        if [[ -z "$from" ]]; then
+            die "No --from specified and no default_send_from in $CHATRC.
+Create a .chatrc file with:
+  echo 'default_send_from=your-name' > $CHATRC"
+        fi
+    fi
 
-    # Append observation for thinkers
-    printf '{"type":"observation","content":%s,"source":"chat"}' \
-        "$(printf '[chat] %s: %s' "$from" "$message" | jq -Rsa .)" \
+    # Default --to to IDENTITY_NAME
+    [[ -z "$to" ]] && die "No --to specified and IDENTITY_NAME not set."
+
+    # Append message step to trajectory
+    printf '{"type":"message","content":%s,"from":%s,"to":%s}' \
+        "$(printf '%s' "$message" | jq -Rsa .)" \
+        "$(printf '%s' "$from" | jq -Rsa .)" \
+        "$(printf '%s' "$to" | jq -Rsa .)" \
         | _chat_append
 
     printf 'Message sent.\n' >&2
 }
 
 cmd_reply() {
+    local to_name="${1:-}"
+    [[ -z "$to_name" ]] && die "Usage: chat reply <to_name> [message]"
+    shift
+
     local message=""
     while [[ $# -gt 0 ]]; do
         message="${message:+$message }$1"; shift
@@ -57,47 +94,54 @@ cmd_reply() {
     if [[ -z "$message" && ! -t 0 ]]; then
         message=$(cat)
     fi
-    [[ -z "$message" ]] && die "No message provided. Usage: chat reply <message>"
+    [[ -z "$message" ]] && die "No message provided. Usage: chat reply <to_name> <message>"
 
-    printf '{"type":"agent-msg","content":%s}' \
+    local from="${IDENTITY_NAME:-}"
+    [[ -z "$from" ]] && die "IDENTITY_NAME not set. Run: identity shell <name>"
+
+    printf '{"type":"message","content":%s,"from":%s,"to":%s}' \
         "$(printf '%s' "$message" | jq -Rsa .)" \
-        | _chat_append
-
-    # Append observation for thinkers
-    printf '{"type":"observation","content":%s,"source":"chat"}' \
-        "$(printf '[chat] me: %s' "$message" | jq -Rsa .)" \
+        "$(printf '%s' "$from" | jq -Rsa .)" \
+        "$(printf '%s' "$to_name" | jq -Rsa .)" \
         | _chat_append
 
     printf 'Reply sent.\n' >&2
 }
 
 cmd_send_file() {
-    local from="human" filepath=""
+    local from="" to="${IDENTITY_NAME:-}" filepath=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --from) from="${2:?--from requires a name}"; shift 2 ;;
-            *) filepath="$1"; shift ;;
+            --to)   to="${2:?--to requires a name}"; shift 2 ;;
+            *)      filepath="$1"; shift ;;
         esac
     done
-    [[ -z "$filepath" ]] && die "Usage: chat send-file [--from <name>] <filename>"
+    [[ -z "$filepath" ]] && die "Usage: chat send-file [--from <name>] [--to <name>] <filename>"
     [[ -f "$filepath" ]] || die "File not found: $filepath"
+
+    # Resolve --from default from .chatrc
+    if [[ -z "$from" ]]; then
+        from=$(_chatrc_get "default_send_from")
+        if [[ -z "$from" ]]; then
+            die "No --from specified and no default_send_from in $CHATRC.
+Create a .chatrc file with:
+  echo 'default_send_from=your-name' > $CHATRC"
+        fi
+    fi
+
+    [[ -z "$to" ]] && die "No --to specified and IDENTITY_NAME not set."
 
     local filename
     filename=$(basename "$filepath")
     local content
     content=$(cat "$filepath")
 
-    local step='{"type":"human-msg","filename":'
-    step+="$(printf '%s' "$filename" | jq -Rsa .)"
-    step+=',"content":'
-    step+="$(printf '%s' "$content" | jq -Rsa .)"
-    [[ "$from" != "human" ]] && step+=',"from":'"$(printf '%s' "$from" | jq -Rsa .)"
-    step+='}'
-    printf '%s' "$step" | _chat_append
-
-    # Append observation for thinkers
-    printf '{"type":"observation","content":%s,"source":"chat"}' \
-        "$(printf '[chat] %s sent file %s: %s' "$from" "$filename" "$content" | jq -Rsa .)" \
+    printf '{"type":"message","filename":%s,"content":%s,"from":%s,"to":%s}' \
+        "$(printf '%s' "$filename" | jq -Rsa .)" \
+        "$(printf '%s' "$content" | jq -Rsa .)" \
+        "$(printf '%s' "$from" | jq -Rsa .)" \
+        "$(printf '%s' "$to" | jq -Rsa .)" \
         | _chat_append
 
     printf 'File sent: %s\n' "$filename" >&2
@@ -109,17 +153,23 @@ cmd_history() {
 
     local identity_name="${IDENTITY_NAME:-agent}"
 
-    traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --filter type=human-msg,agent-msg --raw 2>/dev/null \
+    # Support both new "message" type and legacy "human-msg"/"agent-msg" types
+    traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --filter type=message,human-msg,agent-msg --raw 2>/dev/null \
     | tail -n "$n" \
     | while IFS= read -r line; do
-        local step_type content from
+        local step_type content msg_from msg_to
         step_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
         content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null)
         [[ -z "$content" ]] && continue
         case "$step_type" in
+            message)
+                msg_from=$(printf '%s' "$line" | jq -r '.from // "unknown"' 2>/dev/null)
+                msg_to=$(printf '%s' "$line" | jq -r '.to // empty' 2>/dev/null)
+                printf '%s → %s: %s\n' "$msg_from" "${msg_to:-?}" "$content"
+                ;;
             human-msg)
-                from=$(printf '%s' "$line" | jq -r '.from // empty' 2>/dev/null)
-                printf '%s: %s\n' "${from:-you}" "$content"
+                msg_from=$(printf '%s' "$line" | jq -r '.from // empty' 2>/dev/null)
+                printf '%s: %s\n' "${msg_from:-you}" "$content"
                 ;;
             agent-msg)
                 printf '%s: %s\n' "$identity_name" "$content"
@@ -137,16 +187,25 @@ usage() {
 chat — Messaging for an activated identity
 
 Usage:
-  chat send [--from <name>] <message>    Human sends a message to the agent
-  chat send-file [--from <name>] <file> Send a file's contents as a message
-  chat reply <message>     Agent sends a message to the human
-  chat history [N]         Show last N messages (default 20)
-  chat repl                Interactive chat (shows agent replies inline)
+  chat send [--from <name>] [--to <name>] <message>
+                             Send a message (from defaults to .chatrc
+                             default_send_from, to defaults to $IDENTITY_NAME)
+  chat send-file [--from <name>] [--to <name>] <file>
+                             Send a file's contents as a message
+  chat reply <to_name> <message>
+                             Agent sends a reply (from is $IDENTITY_NAME)
+  chat history [N]           Show last N messages (default 20)
+  chat repl                  Interactive chat (shows agent replies inline)
+
+Config file ($CHATRC, default ./.chatrc):
+  default_send_from=<name>   Default --from for `chat send`
 
 Environment:
-  TRAJ_DIR + TRAJ_ID  Trajectory (set by `identity shell`)
-  IDENTITY_NAME       Identity name (for display)
-  IDENTITY_DIR        Identity directory (for repl history)
+  CHATRC          Path to config file (default: ./.chatrc)
+  TRAJ_DIR        Trajectory directory (set by `identity shell`)
+  TRAJ_ID         Trajectory ID (set by `identity shell`)
+  IDENTITY_NAME   Identity name (for reply attribution and --to default)
+  IDENTITY_DIR    Identity directory (for repl history)
 EOF
     exit 0
 }

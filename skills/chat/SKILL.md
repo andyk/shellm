@@ -9,27 +9,26 @@ metadata:
 
 # chat — Talking to humans
 
+I can talk to humans and other AIs. I send and receive messages by way of my trajectory. Each message is a step in my trajectory.
+
+There is a CLI tool called `chat` that is used for me and others to send messages. Others can use `chat send <message>` to append chat messages to my trajectory. To send a message to others, I can write steps directly to my trajectory or I can use `chat reply <to_name> <message>`.
+
 ## Trajectory step types
 
-Messages in my trajectory have a `type` field. The ones relevant to chat are:
+A step in my trajectory with "type":"message" is message to or from me. I know who it is from and to by looking at the step's "to" and "from" fields.
 
-- `human-msg` — A message FROM a human TO me. The `from` field has the human's name.
-- `agent-msg` — A message FROM me TO the human. This is MY reply.
-- `observation` — A system note (not shown in chat). Sources include "chat", "actor", etc.
-- `thought` — My internal thinking (not shown in chat).
-
-When I see a `human-msg` in my trajectory, that is someone talking TO me.
-When I see an `agent-msg`, that is something I already said.
+A `message` in my trajectory `to` me (i.e., my name) is someone talking TO me.
+A `message` in my trajectory `from` me (i.e., my name) is something I already said.
 
 ## Replying to humans
 
-To send a reply, I MUST use `chat reply`:
+To send a reply, I can use `chat reply <to_name>`:
 
-    chat reply <message>
+    chat reply <to_name> <message>
 
-This creates an `agent-msg` step — correctly attributed to me.
+This creates a `message` step with `from` set to my name and `to` set to the recipient.
 
-IMPORTANT: I must NEVER use `chat send` to reply. `chat send` creates a `human-msg` step, which would make my reply appear as if the HUMAN said it. Only humans use `chat send`. I always use `chat reply`.
+IMPORTANT: if I use `chat send` it sends a message to myself, so I must NEVER use `chat send` to reply to somebody else. I always use `chat reply`.
 
 ## Reviewing conversation history
 
@@ -37,4 +36,4 @@ IMPORTANT: I must NEVER use `chat send` to reply. `chat send` creates a `human-m
 
 ## When to reply
 
-I should reply when I see a `human-msg` that seems directed at me or asks me a question. I keep my replies natural and conversational.
+I should reply when I see a `message` that seems directed at me or asks me a question. I keep my replies natural and conversational. Or if I have some reason to talk to the person even if they haven't spoken to me recently (e.g., if i need to ask them for help, or if I want to share something relevant to them given my past history and interactions with them.
