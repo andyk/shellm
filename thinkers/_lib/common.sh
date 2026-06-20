@@ -81,7 +81,7 @@ get_goals() {
 load_prompt() {
     local prompt_file="$1"
     local identity_name="$2"
-    local goals="$3"
+    local goals="${3:-}"
     [[ -f "$prompt_file" ]] || return 1
     local content
     content=$(cat "$prompt_file")

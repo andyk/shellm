@@ -248,9 +248,9 @@ ALL_IDS=()
 ALL_TYPES=()
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    local_id=$(printf '%s' "$line" | jq -r '.step_id // empty' 2>/dev/null)
+    local_id=$(printf '%s' "$line" | jq -r '.step_id // empty' 2>/dev/null || true)
     [[ -n "$local_id" ]] || continue
-    local_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null)
+    local_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null || true)
     ALL_ROWS+=("$line")
     ALL_IDS+=("$local_id")
     ALL_TYPES+=("$local_type")

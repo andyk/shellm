@@ -21,8 +21,7 @@ prompt_file="$SCRIPT_DIR/prompt.md"
 # Build system prompt with identity context
 system_prompt=$(_build_system_prompt)
 
-goals=$(get_goals "$MEM_DIR")
-thinker_prompt=$(load_prompt "$prompt_file" "$IDENTITY_NAME" "$goals")
+thinker_prompt=$(load_prompt "$prompt_file" "$IDENTITY_NAME")
 
 # Build recent context
 recent_thoughts=""

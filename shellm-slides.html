@@ -502,7 +502,6 @@
     <div style="display:flex; gap:10px; flex-wrap: wrap;">
       <span class="tag tag-purple">pure bash</span>
       <span class="tag tag-teal">~5,000 lines</span>
-      <span class="tag tag-green">multi-provider LLM</span>
       <span class="tag tag-yellow">append-only logs</span>
       <span class="tag tag-red">text is the interface</span>
     </div>
@@ -517,7 +516,7 @@
         <p>Each tool does one thing well. Favor simplicity, clarity, and minimal, composable programs. <code>shellm</code> + <code>llm</code> + <code>traj</code> + <code>context</code> + <code>mem</code> + <code>skills</code> &mdash; each a standalone CLI, each composable via stdin/stdout/files.</p>
       </div>
       <div class="card">
-        <h3 class="highlight2">CLI implementation of RLM</h3>
+        <h3 class="highlight2">Bash CLI implementation of RLM</h3>
         <p>A Recursive Language Model agent implemented in bash. The LLM generates code, observes its output, and recurses. Collapses all tool calling into <strong>one tool</strong>: the shell itself. No need to explicitly declare tools &mdash; the entire Unix environment is the toolbox.</p>
       </div>
       <div class="card">
@@ -529,12 +528,12 @@
         <p>Agent inference context is a <strong>function of its trajectory</strong>. Append-only JSONL logs form a DAG with fork/merge. Non-destructive compaction: select head + tail steps, elide the middle. Full history preserved.</p>
       </div>
       <div class="card">
-        <h3 class="highlight5">pyenv-like agent semantics</h3>
-        <p><code>identity shell bobby</code> / <code>source activate</code> &mdash; a familiar paradigm. Trivial for humans and agents to co-work in the same shell. Switch identities like switching Python environments.</p>
+        <h3 class="highlight5">Python <code>venv</code>-like semantics</h3>
+        <p>Activate an agent similar to how you activate a Python env. Trivial for humans and agents to co-work in the same shell. Switch identities like switching Python virtual environments.</p>
       </div>
       <div class="card">
-        <h3 class="highlight">Turn-taking <em>and</em> autoregressive</h3>
-        <p>Supports both paradigms: traditional request/response <strong>and</strong> infinite thought generation where the model stays in a continuous loop. Human interactions are observations injected into the thought stream asynchronously.</p>
+        <h3 class="highlight">Persistent Agency</h3>
+        <p>Supports both traditional human/agent turn-taking and Persistent Agency where the agent thinks continuously and autonomously like a human does; human messages are observations injected into the stream asynchronously.</p>
       </div>
     </div>
   </div>
