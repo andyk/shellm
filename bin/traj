@@ -573,10 +573,11 @@ _find_step_in_dir() {
 }
 
 cmd_show() {
-    local target_id="" full=0 field="" traj_dir_opt=""
+    local target_id="" full=0 field="" traj_dir_opt="" pretty=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --full)      full=1; shift ;;
+            --pretty)    pretty=1; shift ;;
             --field)     field="${2:?--field requires a value}"; shift 2 ;;
             --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
             -*)          die "show: unknown option: $1" ;;
@@ -679,7 +680,18 @@ cmd_show() {
     fi
 
     # Pretty-print the step.
-    printf '%s' "$row" | jq .
+    if [[ "$pretty" -eq 1 ]]; then
+        printf '%s' "$row" | jq -r '
+            to_entries | .[] |
+            if (.value | type) == "string" then
+                "\u001b[36m\(.key)\u001b[0m:\n\(.value)\n"
+            else
+                "\u001b[36m\(.key)\u001b[0m: \(.value | tojson)\n"
+            end
+        '
+    else
+        printf '%s' "$row" | jq .
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -695,7 +707,7 @@ _collect_recursive_files() {
 
     local parent_dir fork_lines
     parent_dir=$(dirname "$traj_file")
-    fork_lines=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null) || return 0
+    fork_lines=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null) || true
     [[ -z "$fork_lines" ]] && return 0
 
     while IFS= read -r fork_line; do
@@ -774,7 +786,7 @@ TAILHELP
     local traj_file
     traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "tail")
 
-    [[ "$recursive" -eq 1 && "$follow" -eq 1 ]] && die "tail: --recursive and -f cannot be combined"
+    # recursive + follow is handled below
 
     # Build filter JSON array: [{key:"field", vals:["v1","v2"]}, ...]
     local _filter_json='[]'
@@ -1001,8 +1013,66 @@ TAILHELP
     # Exit cleanly on SIGINT/SIGPIPE
     trap 'exit 0' INT PIPE
 
-    if [[ "$follow" -eq 1 ]]; then
-        # Replay then follow
+    if [[ "$recursive" -eq 1 ]]; then
+        [[ -f "$traj_file" ]] || die "tail: trajectory file not found: $traj_file"
+        # Collect all trajectory files in the tree
+        local _all_files
+        _all_files=$(_collect_recursive_files "$traj_file") || true
+        [[ -z "$_all_files" ]] && return 0
+
+        # For each file: inject _traj_hex, convert ts to UTC epoch for sorting,
+        # then sort numerically and take last N.
+        local f hex
+        while IFS= read -r f; do
+            [[ -f "$f" ]] || continue
+            hex=$(_parse_hex_id "$f")
+            jq -r --arg h "$hex" --argjson filters "$_filter_json" '
+                def matches_filters($fs):
+                    . as $step |
+                    ($fs | length == 0) or all($fs[];
+                        .key as $k | .vals as $vs |
+                        ($step[$k] // null) as $fv |
+                        ($vs | any(. as $v | $v == ($fv | tostring)))
+                    );
+                def to_epoch:
+                    tostring |
+                    sub("\\.[0-9]+"; "") |
+                    (capture("^(?<dt>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?<sign>[+-])(?<oh>\\d{2}):?(?<om>\\d{2})$") //
+                     {dt: ., sign: "+", oh: "00", om: "00"}) |
+                    ((.oh | tonumber) * 3600 + (.om | tonumber) * 60) as $off |
+                    ((.dt + "Z") | fromdateiso8601) as $local_epoch |
+                    (if .sign == "-" then ($local_epoch + $off) else ($local_epoch - $off) end) |
+                    tostring;
+                . + {_traj_hex: $h} | select(matches_filters($filters))
+                | ((.ts // .timestamp // "0") | to_epoch) + "\t" + tojson
+            ' "$f" 2>/dev/null || true
+        done <<< "$_all_files" \
+            | sort -t$'\t' -k1,1n \
+            | tail -n "$n" \
+            | cut -f2- \
+            | while IFS= read -r line; do
+                _process_line "$line"
+            done
+
+        # Follow all files in the tree
+        if [[ "$follow" -eq 1 ]]; then
+            local -a _tail_pids=()
+            while IFS= read -r f; do
+                [[ -f "$f" ]] || continue
+                hex=$(_parse_hex_id "$f")
+                tail -n 0 -F "$f" 2>/dev/null | while IFS= read -r line; do
+                    local _tagged
+                    _tagged=$(printf '%s' "$line" | jq -c --arg h "$hex" '. + {_traj_hex: $h}' 2>/dev/null) || continue
+                    _process_line "$_tagged"
+                done &
+                _tail_pids+=($!)
+            done <<< "$_all_files"
+            # Wait for any signal; clean up on exit
+            trap 'for p in "${_tail_pids[@]}"; do kill "$p" 2>/dev/null; done; exit 0' INT PIPE TERM
+            wait
+        fi
+    elif [[ "$follow" -eq 1 ]]; then
+        # Replay then follow (single file)
         if [[ -f "$traj_file" ]] && [[ "$n" -gt 0 ]]; then
             tail -n "$n" "$traj_file" | while IFS= read -r line; do
                 _process_line "$line"
@@ -1015,37 +1085,6 @@ TAILHELP
         tail -n 0 -F "$traj_file" 2>/dev/null | while IFS= read -r line; do
             _process_line "$line"
         done
-    elif [[ "$recursive" -eq 1 ]]; then
-        [[ -f "$traj_file" ]] || die "tail: trajectory file not found: $traj_file"
-        # Collect all trajectory files in the tree
-        local _all_files
-        _all_files=$(_collect_recursive_files "$traj_file")
-        [[ -z "$_all_files" ]] && return 0
-
-        # For each file: inject _traj_hex, prepend ts for sorting, then
-        # sort lexicographically (ISO 8601 sorts correctly), take last N.
-        local f hex
-        while IFS= read -r f; do
-            [[ -f "$f" ]] || continue
-            hex=$(_parse_hex_id "$f")
-            jq -c --arg h "$hex" --argjson filters "$_filter_json" '
-                def matches_filters($fs):
-                    . as $step |
-                    ($fs | length == 0) or all($fs[];
-                        .key as $k | .vals as $vs |
-                        ($step[$k] // null) as $fv |
-                        ($vs | any(. as $v | $v == ($fv | tostring)))
-                    );
-                . + {_traj_hex: $h} | select(matches_filters($filters))
-            ' "$f" 2>/dev/null
-        done <<< "$_all_files" \
-            | jq -r '((.ts // .timestamp // "") | tostring) + "\t" + tojson' \
-            | sort -t$'\t' -k1,1 \
-            | tail -n "$n" \
-            | cut -f2- \
-            | while IFS= read -r line; do
-                _process_line "$line"
-            done
     else
         [[ -f "$traj_file" ]] || die "tail: trajectory file not found: $traj_file"
         tail -n "$n" "$traj_file" | while IFS= read -r line; do
@@ -1656,15 +1695,15 @@ CATHELP
     if [[ "$recursive" -eq 1 ]]; then
         # Collect all trajectory files in the tree
         local _all_files
-        _all_files=$(_collect_recursive_files "$traj_file")
+        _all_files=$(_collect_recursive_files "$traj_file") || true
         [[ -z "$_all_files" ]] && return 0
 
-        # For each file: inject _traj_hex, filter, prepend ts for sorting
+        # For each file: inject _traj_hex, filter, convert ts to UTC epoch for sorting
         local f hex
         while IFS= read -r f; do
             [[ -f "$f" ]] || continue
             hex=$(_parse_hex_id "$f")
-            jq -c --arg h "$hex" --argjson filters "$_filter_json" '
+            jq -r --arg h "$hex" --argjson filters "$_filter_json" '
                 def matches_filters($fs):
                     . as $step |
                     ($fs | length == 0) or all($fs[];
@@ -1672,11 +1711,20 @@ CATHELP
                         ($step[$k] // null) as $fv |
                         ($vs | any(. as $v | $v == ($fv | tostring)))
                     );
+                def to_epoch:
+                    tostring |
+                    sub("\\.[0-9]+"; "") |
+                    (capture("^(?<dt>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?<sign>[+-])(?<oh>\\d{2}):?(?<om>\\d{2})$") //
+                     {dt: ., sign: "+", oh: "00", om: "00"}) |
+                    ((.oh | tonumber) * 3600 + (.om | tonumber) * 60) as $off |
+                    ((.dt + "Z") | fromdateiso8601) as $local_epoch |
+                    (if .sign == "-" then ($local_epoch + $off) else ($local_epoch - $off) end) |
+                    tostring;
                 . + {_traj_hex: $h} | select(matches_filters($filters))
-            ' "$f" 2>/dev/null
+                | ((.ts // .timestamp // "0") | to_epoch) + "\t" + tojson
+            ' "$f" 2>/dev/null || true
         done <<< "$_all_files" \
-            | jq -r '((.ts // .timestamp // "") | tostring) + "\t" + tojson' \
-            | sort -t$'\t' -k1,1 \
+            | sort -t$'\t' -k1,1n \
             | cut -f2- \
             | while IFS= read -r line; do
                 _cat_output "$line"

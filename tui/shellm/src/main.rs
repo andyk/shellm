@@ -460,6 +460,7 @@ async fn run(
 
     // Phase 2: follow new messages via `traj tail -f -n 0`
     // Use ROOT_TRAJ_ID so we follow the root trajectory
+    let tx_err = tx.clone();
     let watcher = tokio::spawn(async move {
         let traj_id = env::var("ROOT_TRAJ_ID")
             .or_else(|_| env::var("TRAJ_ID"))
@@ -669,6 +670,7 @@ async fn run(
                                         app.scroll_offset = 0;
                                         let from = app.from.clone();
                                         let msg_owned = msg;
+                                        let err_tx = tx_err.clone();
                                         tokio::spawn(async move {
                                             let mut cmd = tokio::process::Command::new("chat");
                                             cmd.arg("send");
@@ -677,8 +679,19 @@ async fn run(
                                             }
                                             cmd.arg(&msg_owned)
                                                 .stdout(Stdio::null())
-                                                .stderr(Stdio::null());
-                                            let _ = cmd.status().await;
+                                                .stderr(Stdio::piped());
+                                            if let Ok(output) = cmd.output().await {
+                                                if !output.status.success() {
+                                                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                                                    if !stderr.is_empty() {
+                                                        let _ = err_tx.send(Message {
+                                                            sender: "system".into(),
+                                                            content: stderr,
+                                                            is_agent: false,
+                                                        });
+                                                    }
+                                                }
+                                            }
                                         });
                                     }
                                     Mode::Thinkers => {
