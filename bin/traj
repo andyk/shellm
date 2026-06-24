@@ -94,6 +94,10 @@ Commands:
 
   root [ID]                 Walk up parent links to find root. Print filename.
 
+  check [ID] [-r] [--fix]   Validate JSONL for malformed lines.
+                            -r checks sub-trajectories too.
+                            --fix removes bad lines in place.
+
   repl                      Interactive trajectory TUI
 
 EOF
@@ -247,7 +251,7 @@ _get_summary() {
 
     # Try run-summary step
     local summary_line
-    summary_line=$(jq -c 'select(.type == "run-summary")' "$traj_file" 2>/dev/null | head -1)
+    summary_line=$(jq -R -c 'fromjson? // empty | select(.type == "run-summary")' "$traj_file" 2>/dev/null | head -1)
     if [[ -n "$summary_line" ]]; then
         raw=$(printf '%s' "$summary_line" | jq -r '.tldr // empty')
     fi
@@ -255,7 +259,7 @@ _get_summary() {
     # Fallback: prompt step
     if [[ -z "$raw" ]]; then
         local prompt_line
-        prompt_line=$(jq -c 'select(.type == "prompt")' "$traj_file" 2>/dev/null | head -1)
+        prompt_line=$(jq -R -c 'fromjson? // empty | select(.type == "prompt")' "$traj_file" 2>/dev/null | head -1)
         if [[ -n "$prompt_line" ]]; then
             raw=$(printf '%s' "$prompt_line" | jq -r '.content // empty' | head -c 200)
         fi
@@ -562,7 +566,7 @@ _find_step_in_dir() {
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
         local row
-        row=$(jq -c --arg id "$step_id" 'select(.step_id == $id or (.step_id // "" | startswith($id)))' "$f" 2>/dev/null | head -1)
+        row=$(jq -R -c --arg id "$step_id" 'fromjson? // empty | select(.step_id == $id or (.step_id // "" | startswith($id)))' "$f" 2>/dev/null | head -1)
         if [[ -n "$row" ]]; then
             printf '%s\n%s\n' "$f" "$row"
             return 0
@@ -707,7 +711,7 @@ _collect_recursive_files() {
 
     local parent_dir fork_lines
     parent_dir=$(dirname "$traj_file")
-    fork_lines=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null) || true
+    fork_lines=$(jq -R -c 'fromjson? // empty | select(.type == "fork")' "$traj_file" 2>/dev/null) || true
     [[ -z "$fork_lines" ]] && return 0
 
     while IFS= read -r fork_line; do
@@ -920,7 +924,9 @@ TAILHELP
                         ($vs | any(. as $v | $v == ($fv | tostring)))
                     );
                 def preview:
-                    if   .type == "reasoning"    then ((.content // .thought // "")[0:100])
+                    if   .type == "reasoning"    then
+                        ((.content // .thought // "")[0:100]) +
+                        (if .cmd then " | " + (.cmd | gsub("\n"; " ") | gsub("\\s+"; " "))[0:120] else "" end)
                     elif .type == "shell-output"  then (.stdout // "")
                     elif .type == "shellm-run"    then (.command // "")
                     elif .type == "run-summary"   then (.tldr // "")
@@ -1026,7 +1032,8 @@ TAILHELP
         while IFS= read -r f; do
             [[ -f "$f" ]] || continue
             hex=$(_parse_hex_id "$f")
-            jq -r --arg h "$hex" --argjson filters "$_filter_json" '
+            jq -R -r --arg h "$hex" --argjson filters "$_filter_json" '
+                fromjson? // empty |
                 def matches_filters($fs):
                     . as $step |
                     ($fs | length == 0) or all($fs[];
@@ -1601,7 +1608,9 @@ CATHELP
                         ($vs | any(. as $v | $v == ($fv | tostring)))
                     );
                 def preview:
-                    if   .type == "reasoning"    then ((.content // .thought // "")[0:100])
+                    if   .type == "reasoning"    then
+                        ((.content // .thought // "")[0:100]) +
+                        (if .cmd then " | " + (.cmd | gsub("\n"; " ") | gsub("\\s+"; " "))[0:120] else "" end)
                     elif .type == "shell-output"  then (.stdout // "")
                     elif .type == "shellm-run"    then (.command // "")
                     elif .type == "run-summary"   then (.tldr // "")
@@ -1703,7 +1712,8 @@ CATHELP
         while IFS= read -r f; do
             [[ -f "$f" ]] || continue
             hex=$(_parse_hex_id "$f")
-            jq -r --arg h "$hex" --argjson filters "$_filter_json" '
+            jq -R -r --arg h "$hex" --argjson filters "$_filter_json" '
+                fromjson? // empty |
                 def matches_filters($fs):
                     . as $step |
                     ($fs | length == 0) or all($fs[];
@@ -1863,7 +1873,7 @@ _list_collect_children() {
     [[ "$cur_depth" -ge "$max_depth" ]] && return
 
     local fork_lines
-    fork_lines=$(jq -c 'select(.type == "fork")' "$traj_file" 2>/dev/null || true)
+    fork_lines=$(jq -R -c 'fromjson? // empty | select(.type == "fork")' "$traj_file" 2>/dev/null || true)
     [[ -z "$fork_lines" ]] && return
 
     local parent_dir
@@ -1902,7 +1912,8 @@ _render_steps_inline() {
     # Use \u001f (unit separator) as delimiter since tabs can appear in content.
     local step_total _all_steps _US=$'\x1f'
     step_total=$(wc -l < "$file" | tr -d ' ')
-    _all_steps=$(jq -r '
+    _all_steps=$(jq -R -r '
+        fromjson? // empty |
         (.step_id // "")[0:8] + "\u001f" +
         (.type // "?") + "\u001f" +
         (if .type == "fork" then (.child // "")
@@ -2190,7 +2201,7 @@ cmd_list() {
             # In --steps mode, children are rendered inline; check if any forks exist
             # by looking for fork steps in the self trajectory
             local has_forks
-            has_forks=$(jq -r 'select(.type=="fork") | .child' "$traj_file" 2>/dev/null | head -1)
+            has_forks=$(jq -R -r 'fromjson? // empty | select(.type=="fork") | .child' "$traj_file" 2>/dev/null | head -1)
             if [[ -n "$has_forks" ]]; then
                 printf '%s(showing direct children only; use --children all to expand full tree)%s\n' \
                     "$_c_dim" "$_c_reset"
@@ -2215,6 +2226,103 @@ cmd_repl() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# check — validate trajectory JSONL for malformed lines
+# ---------------------------------------------------------------------------
+
+cmd_check() {
+    local traj_dir_opt="" traj_id_opt="" recursive=0 fix=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --traj_dir)  traj_dir_opt="${2:?--traj_dir requires DIR}"; shift 2 ;;
+            -r|--recursive) recursive=1; shift ;;
+            --fix)       fix=1; shift ;;
+            -h|--help)
+                cat <<'CHECKHELP'
+traj check — Validate trajectory JSONL for malformed lines
+
+Usage:
+  traj check [ID]         Check a single trajectory file
+  traj check [ID] -r      Check all files in the trajectory tree
+  traj check [ID] --fix   Remove malformed lines (writes file in place)
+
+Options:
+  [ID]               Trajectory ID (positional)
+  -r, --recursive    Check all sub-trajectory files too
+  --fix              Remove malformed lines from the file(s)
+  --traj_dir DIR     Trajectory directory
+  -h, --help         Show this help
+
+Environment:
+  TRAJ_DIR + TRAJ_ID   Default trajectory
+CHECKHELP
+                return 0
+                ;;
+            -*)  die "check: unknown option: $1" ;;
+            *)
+                if [[ -z "$traj_id_opt" ]]; then
+                    traj_id_opt="$1"
+                else
+                    die "check: unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    local traj_file
+    traj_file=$(require_traj_file "$traj_dir_opt" "$traj_id_opt" "check")
+
+    local -a files=("$traj_file")
+    if [[ "$recursive" -eq 1 ]]; then
+        local _all
+        _all=$(_collect_recursive_files "$traj_file") || true
+        if [[ -n "$_all" ]]; then
+            mapfile -t files <<< "$_all"
+        fi
+    fi
+
+    local total_bad=0 total_files=0 total_fixed=0
+    local f
+    for f in "${files[@]}"; do
+        [[ -f "$f" ]] || continue
+        total_files=$((total_files + 1))
+        local line_num=0 bad=0 bad_lines=""
+        while IFS= read -r line; do
+            line_num=$((line_num + 1))
+            if ! printf '%s' "$line" | jq empty 2>/dev/null; then
+                bad=$((bad + 1))
+                bad_lines="${bad_lines:+$bad_lines }$line_num"
+                local preview="${line:0:80}"
+                printf '%s:%d: %s\n' "$f" "$line_num" "$preview"
+            fi
+        done < "$f"
+
+        if [[ "$bad" -gt 0 ]]; then
+            total_bad=$((total_bad + bad))
+            if [[ "$fix" -eq 1 ]]; then
+                local tmp="${f}.check_tmp"
+                jq -R -c 'fromjson? // empty' "$f" > "$tmp" 2>/dev/null
+                mv "$tmp" "$f"
+                total_fixed=$((total_fixed + bad))
+                printf '  fixed: removed %d malformed line(s)\n' "$bad"
+            fi
+        fi
+    done
+
+    if [[ "$total_bad" -eq 0 ]]; then
+        printf 'OK: %d file(s) checked, no malformed lines\n' "$total_files"
+    else
+        printf '%d malformed line(s) in %d file(s)\n' "$total_bad" "$total_files"
+        if [[ "$fix" -eq 1 ]]; then
+            printf 'Fixed: removed %d line(s)\n' "$total_fixed"
+        else
+            printf 'Run with --fix to remove them\n'
+        fi
+        [[ "$fix" -eq 1 ]] || return 1
+    fi
+}
+
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -2236,6 +2344,7 @@ case "$cmd" in
     list)     cmd_list "$@" ;;
     isroot)   cmd_isroot "$@" ;;
     root)     cmd_root "$@" ;;
+    check)    cmd_check "$@" ;;
     repl)     cmd_repl ;;
     all)      cmd_all "$@" ;;
     parents)  cmd_parents "$@" ;;
