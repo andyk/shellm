@@ -63,19 +63,32 @@ if [[ "${is_reply^^}" == *"YES"* ]]; then
         -s "Write a short, natural reply. Output ONLY the message text, nothing else." \
         2>/dev/null) || true
     if [[ -n "$reply" ]]; then
-        chat reply "$reply"
-        printf '{"type":"observation","content":%s,"source":"actor"}' \
-            "$(printf 'Replied: %s' "$reply" | jq -Rsa .)" | traj append
-        printf '  [reply] %s\n' "$(printf '%s' "$reply" | head -1)" >&2
-        exit 0
+        reply_to=$(printf '%s' "$step_json" | jq -r '.to // .recipient // empty' 2>/dev/null) || true
+        if [[ -z "$reply_to" ]]; then
+            reply_to=$(traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --filter type=message,human-msg --raw 2>/dev/null | \
+                jq -sr --arg me "${IDENTITY_NAME:-}" '
+                    reverse
+                    | map(select(
+                        (.type == "message" and (.to // "") == $me and (.from // "") != "")
+                        or (.type == "human-msg" and (.from // "") != "")
+                    ))
+                    | .[0].from // empty
+                ' 2>/dev/null) || true
+        fi
+
+        if [[ -n "$reply_to" ]] && printf '%s' "$reply" | chat reply "$reply_to"; then
+            printf '{"type":"observation","content":%s,"source":"actor"}' \
+                "$(printf 'Replied to %s: %s' "$reply_to" "$reply" | jq -Rsa .)" | traj append
+            printf '  [reply -> %s] %s\n' "$reply_to" "$(printf '%s' "$reply" | head -1)" >&2
+            exit 0
+        fi
     fi
 fi
 
-# Full shellm agentic loop for non-chat actions (fork/merge via _SHELLM_PARENT_TRAJ_ID)
+# Full shellm agentic loop for non-chat actions (writes to root trajectory)
 printf '  executing action...\n' >&2
-act_response=$(_SHELLM_PARENT_TRAJ_ID="$TRAJ_ID" \
-    SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
-    shellm --env "$IDENTITY_NAME" --workdir "$run_dir" \
+act_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+    shellm --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
     "$act_prompt") || true
 

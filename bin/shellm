@@ -136,7 +136,8 @@ Options:
   --system-prompt-file FILE Override the default system prompt with contents of FILE
   --docker-image IMAGE Docker image to use (default: ubuntu:latest)
   --docker-access MODE Docker access for generated code: none, broker, socket, dind
-  --resume [TRAJ_ID]     Resume a previous run (default: most recent trajectory)
+  --traj TRAJ_ID         Write steps to an existing trajectory (no child traj or fork)
+  --resume               Shorthand for --traj with the most recent trajectory
   --traj-dir DIR         Trajectory directory (default: $HOME/.shellm/trajectories)
   --var NAME=VALUE       Set env var for generated code (repeatable)
   --bin PATH             Make binary available on PATH (repeatable)
@@ -1621,47 +1622,38 @@ run_loop() {
 
     local _run_traj_id _new_output run_name
 
-    if [[ -n "${_resume_traj:-}" ]]; then
-        # --- Resume path ---
-        # Resolve "latest" to actual ID
-        if [[ "$_resume_traj" == "__latest__" ]]; then
-            _resume_traj=$(_find_latest_traj "$_run_traj_dir") \
+    if [[ -n "$_use_traj" ]]; then
+        # --- Use existing trajectory (--traj / --resume) ---
+        # Resolve "latest" for --resume
+        if [[ "$_use_traj" == "__latest__" ]]; then
+            _use_traj=$(_find_latest_traj "$_run_traj_dir") \
                 || die "No trajectories found in $_run_traj_dir"
         fi
 
-        # Validate trajectory exists
-        traj exists --traj_dir "$_run_traj_dir" "$_resume_traj" 2>/dev/null \
-            || die "Cannot find trajectory: $_resume_traj"
+        traj exists --traj_dir "$_run_traj_dir" "$_use_traj" 2>/dev/null \
+            || die "Cannot find trajectory: $_use_traj"
 
-        _run_traj_id="$_resume_traj"
+        _run_traj_id="$_use_traj"
 
-        # Extract workdir and env from the shellm-run step
+        # Inherit workdir and env from the trajectory if not explicitly provided
         local _orig_meta
-        _orig_meta=$(traj tail -n 50 --raw --traj_dir "$_run_traj_dir" "$_resume_traj" \
-            | jq -c 'select(.type=="shellm-run")' 2>/dev/null | head -1)
-        local _orig_workdir _orig_env
-        _orig_workdir=$(printf '%s' "$_orig_meta" | jq -r '.workdir // empty')
-        _orig_env=$(printf '%s' "$_orig_meta" | jq -r '.env.name // empty')
-
-        # Validate --workdir and --env match original
-        if [[ -n "$_SHELLM_WORKDIR_USER" && "$_SHELLM_WORKDIR_USER" != "$_orig_workdir" ]]; then
-            die "Cannot change workdir on resume (original: $_orig_workdir, requested: $_SHELLM_WORKDIR_USER)"
+        _orig_meta=$(traj tail -n 50 --raw --traj_dir "$_run_traj_dir" "$_use_traj" \
+            | jq -c 'select(.type=="shellm-run")' 2>/dev/null | tail -1)
+        if [[ -n "$_orig_meta" ]]; then
+            local _orig_workdir _orig_env
+            _orig_workdir=$(printf '%s' "$_orig_meta" | jq -r '.workdir // empty')
+            _orig_env=$(printf '%s' "$_orig_meta" | jq -r '.env.name // empty')
+            [[ -z "$_SHELLM_WORKDIR_USER" && -n "$_orig_workdir" ]] && _SHELLM_WORKDIR_USER="$_orig_workdir"
+            [[ -z "$_SHELLM_ENV_NAME" && -n "$_orig_env" ]] && _SHELLM_ENV_NAME="$_orig_env"
         fi
-        if [[ -n "$_SHELLM_ENV_NAME" && "$_SHELLM_ENV_NAME" != "$_orig_env" ]]; then
-            die "Cannot change env on resume (original: $_orig_env, requested: $_SHELLM_ENV_NAME)"
-        fi
-
-        # Use original workdir and env
-        _SHELLM_WORKDIR_USER="${_orig_workdir:-}"
-        [[ -n "$_orig_env" ]] && _SHELLM_ENV_NAME="$_orig_env"
 
         # Resolve run_name from trajectory dir
-        local _resume_file
-        _resume_file=$(traj show "$_resume_traj" --traj_dir "$_run_traj_dir" 2>/dev/null \
+        local _traj_file
+        _traj_file=$(traj show "$_use_traj" --traj_dir "$_run_traj_dir" 2>/dev/null \
             | grep '^File:' | awk '{print $2}') || true
-        run_name=$(basename "$(dirname "$_resume_file")")
+        run_name=$(basename "$(dirname "$_traj_file")")
 
-        progress "Resuming trajectory: $_run_traj_id"
+        progress "Using trajectory: $_run_traj_id"
     else
         # --- New trajectory path ---
         # Create the trajectory via traj new
@@ -1828,29 +1820,30 @@ run_loop() {
 
     local _ctx_summary_pid=""
 
-    if [[ -z "${_resume_traj:-}" ]]; then
-        # Build context_files JSON array
-        local _ctx_files_json="[]"
-        for _cf in "${context_files[@]+"${context_files[@]}"}"; do
-            _ctx_files_json=$(printf '%s' "$_ctx_files_json" | jq --arg f "$_cf" '. + [$f]')
-        done
+    # Build context_files JSON array
+    local _ctx_files_json="[]"
+    for _cf in "${context_files[@]+"${context_files[@]}"}"; do
+        _ctx_files_json=$(printf '%s' "$_ctx_files_json" | jq --arg f "$_cf" '. + [$f]')
+    done
 
-        # Write shellm-run step as the first step in the trajectory
-        local _shellm_run_json
-        _shellm_run_json=$(jq -nc \
-            --arg cmd "$_SHELLM_ORIGINAL_CMD" \
-            --arg wd "$workdir" \
-            --arg model "$SHELLM_MODEL" \
-            --arg effort "$SHELLM_EFFORT" \
-            --arg max_iter "${SHELLM_MAX_ITERATIONS:-}" \
-            --arg max_tok "${SHELLM_MAX_TOKENS:-}" \
-            --arg inactivity_timeout "$SHELLM_INACTIVITY_TIMEOUT" \
-            --argjson ctx "$_ctx_files_json" \
-            --argjson env "$_env_json" \
-            '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env}')
-        printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
+    # Write shellm-run step
+    local _shellm_run_json
+    _shellm_run_json=$(jq -nc \
+        --arg cmd "$_SHELLM_ORIGINAL_CMD" \
+        --arg wd "$workdir" \
+        --arg model "$SHELLM_MODEL" \
+        --arg effort "$SHELLM_EFFORT" \
+        --arg max_iter "${SHELLM_MAX_ITERATIONS:-}" \
+        --arg max_tok "${SHELLM_MAX_TOKENS:-}" \
+        --arg inactivity_timeout "$SHELLM_INACTIVITY_TIMEOUT" \
+        --argjson ctx "$_ctx_files_json" \
+        --argjson env "$_env_json" \
+        --argjson resumed "$(if [[ -n "$_use_traj" ]]; then echo true; else echo false; fi)" \
+        '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env, resumed:$resumed}')
+    printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
 
-        # Kick off async run-summary generation (background)
+    if [[ -z "$_use_traj" ]]; then
+        # New trajectory — kick off async run-summary generation
         local stdin_ctx_file=""
         if [[ -n "$stdin_context" ]]; then
             stdin_ctx_file="$rundir/.stdin_context"
@@ -1860,13 +1853,11 @@ run_loop() {
             "${context_files[@]+"${context_files[@]}"}" &
         _ctx_summary_pid=$!
         debug "Run summary generation started (PID: $_ctx_summary_pid)"
+    fi
 
-        # Write initial prompt to trajectory
+    # Write prompt step
+    if [[ -n "$prompt" ]]; then
         printf '%s' "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" \
-            | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
-    elif [[ -n "$prompt" ]]; then
-        # Resuming with new prompt — append as feedback step
-        printf '%s' "$(jq -n --arg p "$prompt" '{type:"feedback",content:$p}')" \
             | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
     fi
 
@@ -2237,7 +2228,8 @@ exit \$__shellm_rc
             [[ "$QUIET" -eq 0 ]] && echo >&2
             progress_dim "Trajectory: $_run_traj_id"
             # Write thought step to parent traj referencing this sub-traj
-            if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+            # Skip when using --traj (steps already went to the shared traj)
+            if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" && -z "$_use_traj" ]]; then
                 local _last_step_id _child_dir_name _from_traj_ref
                 _last_step_id=$(traj last --traj_dir "$_run_traj_dir" "$_run_traj_id" --field step_id 2>/dev/null) || true
                 _child_dir_name=$(basename "$run_name")
@@ -2293,7 +2285,8 @@ exit \$__shellm_rc
     [[ "$QUIET" -eq 0 ]] && echo >&2
     progress "\033[1;31mMax iterations ($SHELLM_MAX_ITERATIONS) reached without final answer\033[0m"
     # Write thought step to parent traj (even on failure)
-    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" ]]; then
+    # Skip when using --traj (steps already went to the shared traj)
+    if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" && -z "$_use_traj" ]]; then
         local _last_step_id _child_dir_name _from_traj_ref
         _last_step_id=$(traj last --traj_dir "$_run_traj_dir" "$_run_traj_id" --field step_id 2>/dev/null) || true
         _child_dir_name=$(basename "$run_name")
@@ -2319,7 +2312,7 @@ main() {
     local print_prompt=0
     local _SHELLM_ENV_NAME="${SHELLM_ENV:-}"
     local _new_env=0
-    local _resume_traj=""
+    local _use_traj=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2394,18 +2387,17 @@ main() {
                 SHELLM_DOCKER_ACCESS="${2:?--docker-access requires a value}"
                 shift 2
                 ;;
+            --traj)
+                _use_traj="${2:?--traj requires TRAJ_ID}"
+                shift 2
+                ;;
             --traj-dir)
                 SHELLM_TRAJ_DIR="${2:?--traj-dir requires DIR}"
                 shift 2
                 ;;
             --resume)
-                _resume_traj="${2:-}"
-                if [[ -n "$_resume_traj" && "$_resume_traj" != -* ]]; then
-                    shift 2
-                else
-                    _resume_traj="__latest__"
-                    shift
-                fi
+                _use_traj="__latest__"
+                shift
                 ;;
             --var)
                 _SHELLM_EXTRA_VARS+=("${2:?--var requires NAME=VALUE}")
@@ -2439,7 +2431,7 @@ main() {
         exit 0
     fi
 
-    [[ -z "$prompt" && -z "$_resume_traj" ]] && { usage; }
+    [[ -z "$prompt" && -z "$_use_traj" ]] && { usage; }
 
     if [[ "${#context_files[@]}" -gt 0 ]]; then
         run_loop "$prompt" "${context_files[@]}"
