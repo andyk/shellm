@@ -34,7 +34,7 @@ mkdir -p "$run_dir"
 shellm_flags=()
 while IFS= read -r _flag; do
     [[ -n "$_flag" ]] && shellm_flags+=("$_flag")
-done < <(_build_shellm_flags "$IDENTITY_DIR")
+done < <(_build_shellm_flags "$IDENTITY_DIR" "$run_dir")
 
 # Load thinker prompt
 prompt_file="$SCRIPT_DIR/prompt.md"
