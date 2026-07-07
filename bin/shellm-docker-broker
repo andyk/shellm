@@ -69,34 +69,37 @@ path_under() {
 
 symlink_mounts() {
     local workdir="$1"
-    local -A mount_dirs=()
-    while IFS= read -r -d '' link; do
-        local target
-        target=$(readlink -f "$link" 2>/dev/null) || continue
-        path_under "$target" "$workdir" && continue
-        [[ -e "$target" ]] || continue
-        local parent
-        parent=$(dirname "$target")
-        mount_dirs["$parent"]=1
-    done < <(find "$workdir" -type l -print0 2>/dev/null)
+
+    # bash 3.2 lacks associative arrays, so dedupe via sort -u.
+    local -a mount_dirs=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && mount_dirs+=("$line")
+    done < <(
+        while IFS= read -r -d '' link; do
+            local target
+            target=$(readlink -f "$link" 2>/dev/null) || continue
+            path_under "$target" "$workdir" && continue
+            [[ -e "$target" ]] || continue
+            dirname "$target"
+        done < <(find "$workdir" -type l -print0 2>/dev/null) \
+        | sort -u
+    )
+
+    [[ "${#mount_dirs[@]}" -eq 0 ]] && return 0
 
     # Remove dirs that are subdirs of other dirs in the set
-    local -a unique=()
-    local dir other
-    for dir in "${!mount_dirs[@]}"; do
-        local dominated=false
-        for other in "${!mount_dirs[@]}"; do
+    local dir other dominated
+    for dir in "${mount_dirs[@]}"; do
+        dominated=0
+        for other in "${mount_dirs[@]}"; do
             [[ "$dir" == "$other" ]] && continue
             if path_under "$dir" "$other"; then
-                dominated=true
+                dominated=1
                 break
             fi
         done
-        $dominated || unique+=("$dir")
-    done
-
-    for dir in "${unique[@]}"; do
-        printf -- '-v\n%s:%s:ro\n' "$dir" "$dir"
+        [[ "$dominated" -eq 0 ]] && printf -- '-v\n%s:%s:ro\n' "$dir" "$dir"
     done
 }
 
