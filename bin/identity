@@ -11,6 +11,7 @@ set -euo pipefail
 
 IDENTITY_VERSION="0.1.0"
 VERBOSE=0
+KERNEL_SKILLS=(mem chat goals)
 
 # Inside an identity shell, IDENTITY_DIR points to the specific identity
 # (e.g., .identities/andy). This CLI needs the root (e.g., .identities).
@@ -53,23 +54,42 @@ _destroy_containers() {
     done
 }
 
-# Bootstrap the kernel directory (mem + chat)
-_ensure_kernel() {
-    local kernel_dir="$1"
+# Locate a bundled skill either from the repo checkout (when tools are symlinked)
+# or from the installed core-skills directory (when tools are copied).
+_bundled_skill_dir() {
+    local skill="$1"
     local script_dir
     script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 
+    local candidate
+    for candidate in "$script_dir/../skills/$skill" "$HOME/.skills/core-skills/$skill"; do
+        if [[ -f "$candidate/SKILL.md" ]]; then
+            (cd "$candidate" && pwd)
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Bootstrap the kernel directory with symlinks to bundled core skills.
+_ensure_kernel() {
+    local kernel_dir="$1"
+    mkdir -p "$kernel_dir"
+
     local skill
-    for skill in mem chat goals; do
-        mkdir -p "$kernel_dir/$skill"
-        if [[ ! -f "$kernel_dir/$skill/SKILL.md" ]]; then
-            local bundled="$script_dir/../skills/$skill/SKILL.md"
-            if [[ -f "$bundled" ]]; then
-                cp "$bundled" "$kernel_dir/$skill/SKILL.md"
-                debug "Bootstrapped $skill kernel skill"
-            elif [[ "$skill" == "mem" ]]; then
-                debug "Warning: bundled mem skill not found at $bundled; creating minimal bootstrap"
-                cat > "$kernel_dir/$skill/SKILL.md" << 'MEMSKILL'
+    for skill in "${KERNEL_SKILLS[@]}"; do
+        local bundled=""
+        bundled=$(_bundled_skill_dir "$skill" 2>/dev/null) || bundled=""
+
+        if [[ -n "$bundled" ]]; then
+            rm -rf "$kernel_dir/$skill"
+            ln -s "$bundled" "$kernel_dir/$skill"
+            debug "Linked $skill kernel skill -> $bundled"
+        elif [[ "$skill" == "mem" && ! -f "$kernel_dir/$skill/SKILL.md" ]]; then
+            mkdir -p "$kernel_dir/$skill"
+            debug "Warning: bundled mem skill not found; creating minimal bootstrap"
+            cat > "$kernel_dir/$skill/SKILL.md" << 'MEMSKILL'
 ---
 name: mem
 description: Life context and memory system
@@ -77,8 +97,9 @@ description: Life context and memory system
 # mem — Life context system
 Commands: mem add --type TYPE <text> | mem search <query> | mem list | mem show <name> | mem forget <name> | mem edit <name> <text>
 MEMSKILL
-                debug "Bootstrapped mem kernel skill (minimal)"
-            fi
+            debug "Bootstrapped mem kernel skill (minimal)"
+        else
+            debug "Warning: bundled $skill skill not found; skipping"
         fi
     done
 }
@@ -121,12 +142,16 @@ _ensure_thinkers() {
     local script_dir
     script_dir="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 
-    # Source: repo thinkers/ or installed ~/.shelly-thinkers/
+    # Source: repo thinkers/ or installed ~/.shellm-thinkers/
     local bundled_dir="$script_dir/../thinkers"
     if [[ ! -d "$bundled_dir" ]]; then
-        bundled_dir="$HOME/.shelly-thinkers"
+        bundled_dir="$HOME/.shellm-thinkers"
     fi
     [[ -d "$bundled_dir" ]] || return 0
+
+    # Check if install was done with --symlinks
+    local use_symlinks=0
+    [[ -f "$HOME/.shellm-thinkers/.use-symlinks" ]] && use_symlinks=1
 
     mkdir -p "$thinkers_dir"
 
@@ -137,20 +162,52 @@ _ensure_thinkers() {
         name=$(basename "$src_dir")
         local dest="$thinkers_dir/$name"
 
-        # Skip if already exists
-        [[ -d "$dest" ]] && continue
+        # Resolve src_dir through symlinks (bundled_dir entries may be symlinks)
+        local real_src
+        real_src="$(cd "$src_dir" && pwd -P)"
 
-        cp -R "$src_dir" "$dest"
+        if [[ "$use_symlinks" -eq 1 ]]; then
+            # Symlink mode: link code files, copy subscriptions.jsonl
+            mkdir -p "$dest"
 
-        # Ensure executables
-        for script in "$dest"/{step,start,stop}; do
-            [[ -f "$script" ]] && chmod +x "$script"
-        done
+            # Symlink code files (step, start, stop, *.md, *.sh)
+            local src_file
+            for src_file in "$real_src"/*; do
+                [[ -e "$src_file" ]] || continue
+                local fname
+                fname=$(basename "$src_file")
+
+                # subscriptions.jsonl is per-identity — only copy if missing
+                if [[ "$fname" == "subscriptions.jsonl" ]]; then
+                    [[ -f "$dest/$fname" ]] || cp "$src_file" "$dest/$fname"
+                    continue
+                fi
+
+                # For everything else, ensure it's a symlink to the source
+                if [[ -L "$dest/$fname" ]]; then
+                    local cur_target
+                    cur_target=$(readlink "$dest/$fname") || true
+                    [[ "$cur_target" == "$src_file" ]] && continue
+                fi
+                # Replace regular file or stale symlink with correct symlink
+                rm -f "$dest/$fname"
+                ln -s "$src_file" "$dest/$fname"
+            done
+        else
+            # Copy mode: skip if already exists
+            [[ -d "$dest" ]] && continue
+            cp -R "$src_dir" "$dest"
+
+            # Ensure executables
+            for script in "$dest"/{step,start,stop}; do
+                [[ -f "$script" ]] && chmod +x "$script"
+            done
+        fi
 
         # Update subscriptions.jsonl with identity's TRAJ_ID if present
         local root_traj
         root_traj=$(grep '^root_trajectory=' "$identity_dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
-        if [[ -n "$root_traj" && -f "$dest/subscriptions.jsonl" ]]; then
+        if [[ -n "$root_traj" && -f "$dest/subscriptions.jsonl" && ! -L "$dest/subscriptions.jsonl" ]]; then
             # Add traj_id to subscriptions that don't have one
             local tmp_subs
             tmp_subs=$(mktemp)
@@ -472,6 +529,36 @@ cmd_list() {
     done <<< "$dirs"
 }
 
+_resolve_identity_path() {
+    local target="${1:-}"
+    local identity_path
+
+    if [[ -n "$target" ]]; then
+        if [[ -d "$IDENTITY_DIR/$target" ]]; then
+            identity_path=$(cd "$IDENTITY_DIR/$target" && pwd)
+        else
+            local matches
+            matches=$(ls -1 "$IDENTITY_DIR" 2>/dev/null | grep -v '^default$' | grep "$target" || true)
+            local count
+            count=$(printf '%s' "$matches" | grep -c . 2>/dev/null) || count=0
+            if [[ "$count" -eq 1 ]]; then
+                identity_path=$(cd "$IDENTITY_DIR/$matches" && pwd)
+            elif [[ "$count" -gt 1 ]]; then
+                die "Ambiguous: '$target' matches multiple identities:
+$matches"
+            else
+                die "No identity matching: $target"
+            fi
+        fi
+    elif [[ -n "$_ACTIVE_IDENTITY_DIR" ]]; then
+        identity_path="$_ACTIVE_IDENTITY_DIR"
+    else
+        identity_path=$(_resolve_default)
+    fi
+
+    printf '%s\n' "$identity_path"
+}
+
 cmd_info() {
     local mode="full"
     while [[ $# -gt 0 ]]; do
@@ -576,6 +663,57 @@ $matches"
         traj_count=$(TRAJ_DIR="$identity_dir/trajectories" TRAJ_ID="$_info_root_traj" traj count 2>/dev/null) || traj_count=0
     fi
     printf 'Traj:     %d steps\n' "$traj_count"
+}
+
+cmd_sync_kernel() {
+    local all=0 target=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all) all=1; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: identity sync-kernel [name|--all]
+
+Replace bundled kernel skills (mem, chat, goals) with symlinks to the installed
+core skill directories, so repo updates are reflected automatically.
+EOF
+                return 0
+                ;;
+            -*)
+                die "sync-kernel: unknown option: $1"
+                ;;
+            *)
+                [[ -n "$target" ]] && die "Usage: identity sync-kernel [name|--all]"
+                target="$1"; shift
+                ;;
+        esac
+    done
+
+    if [[ "$all" -eq 1 ]]; then
+        [[ -n "$target" ]] && die "sync-kernel: pass either a name or --all, not both"
+        [[ -d "$IDENTITY_DIR" ]] || die "No identities found"
+
+        local d identity_path synced=0
+        for d in "$IDENTITY_DIR"/*; do
+            [[ -d "$d" ]] || continue
+            [[ "$(basename "$d")" == "default" ]] && continue
+            identity_path=$(cd "$d" && pwd)
+            _ensure_kernel "$identity_path/kernel"
+            printf 'Synced kernel skills: %s\n' "$(basename "$identity_path")" >&2
+            synced=$((synced + 1))
+        done
+        [[ "$synced" -gt 0 ]] || die "No identities found"
+        return 0
+    fi
+
+    local identity_path identity_name
+    identity_path=$(_resolve_identity_path "$target")
+    identity_name=$(grep '^name=' "$identity_path/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$identity_name" ]] && identity_name=$(basename "$identity_path")
+
+    _ensure_kernel "$identity_path/kernel"
+    printf 'Synced kernel skills: %s\n' "$identity_name" >&2
 }
 
 cmd_default() {
@@ -688,6 +826,9 @@ $matches"
 
     # Ensure activate script exists (for identities created before this feature)
     [[ -f "$identity_dir/activate" ]] || _write_activate_script "$identity_dir"
+
+    # Sync thinker files (replaces stale copies with symlinks when installed with --symlinks)
+    _ensure_thinkers "$identity_dir"
 
     # Read model defaults from info.txt
     local think_model think_tick_interval
@@ -850,6 +991,7 @@ Usage:
   identity new <name> [--default] [--memories DIR]  Create a new identity
   identity list [-a]         List all identities (-a: show directories)
   identity info [name] [-n|-p]  Show identity info (default: default; -n: name, -p: dir)
+  identity sync-kernel [name|--all]  Symlink bundled kernel skills into identities
   identity default [name]     Show or set the default identity
   identity delete <name>     Delete an identity
   identity shell [name]      Start a subshell with identity env vars set
@@ -918,6 +1060,10 @@ main() {
             ;;
         info)
             cmd_info "$@"
+            ;;
+        sync-kernel)
+            _require_identity
+            cmd_sync_kernel "$@"
             ;;
         default)
             cmd_default "$@"

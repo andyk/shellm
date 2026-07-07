@@ -98,6 +98,7 @@ if [[ -d "thinkers" ]]; then
             [[ -d "$td" ]] || continue
             ln -sfn "$(pwd)/$td" "$THINKERS_PREFIX/$(basename "$td")"
         done
+        touch "$THINKERS_PREFIX/.use-symlinks"
     else
         for td in thinkers/*/; do
             [[ -d "$td" ]] || continue
@@ -105,6 +106,7 @@ if [[ -d "thinkers" ]]; then
             rm -rf "$THINKERS_PREFIX/$name"
             cp -R "$td" "$THINKERS_PREFIX/$name"
         done
+        rm -f "$THINKERS_PREFIX/.use-symlinks"
     fi
     echo "Installed thinker templates → $THINKERS_PREFIX"
 fi

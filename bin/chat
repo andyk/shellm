@@ -65,7 +65,7 @@ cmd_send() {
         if [[ -z "$from" ]]; then
             die "No --from specified and no default_send_from in $CHATRC.
 Create a .chatrc file with:
-  echo 'default_send_from=your-name' > $CHATRC"
+  mkdir -p \$(dirname $CHATRC) && echo 'default_send_from=your-name' > $CHATRC"
         fi
     fi
 
@@ -126,7 +126,7 @@ cmd_send_file() {
         if [[ -z "$from" ]]; then
             die "No --from specified and no default_send_from in $CHATRC.
 Create a .chatrc file with:
-  echo 'default_send_from=your-name' > $CHATRC"
+  mkdir -p \$(dirname $CHATRC) && echo 'default_send_from=your-name' > $CHATRC"
         fi
     fi
 
