@@ -161,9 +161,11 @@ _build_skill_var_flags() {
     fi
 }
 
-# Build common --var and --bin flags for shellm calls
+# Build common shellm flags: --env, --workdir, --var, --bin.
+# Honors SHELLM_THINKER_ENV to override the env (e.g. =local to skip Docker).
 _build_shellm_flags() {
     local identity_dir="$1"
+    local run_dir="${2:-$identity_dir/workdir}"
     local abs_mem_dir abs_skills_dir abs_kernel_dir abs_traj_dir
 
     abs_mem_dir=$(_abs_path "$MEM_DIR")
@@ -171,6 +173,8 @@ _build_shellm_flags() {
     abs_kernel_dir=$(_abs_path "$SKILLS_KERNEL_DIR")
     abs_traj_dir=$(_abs_path "$TRAJ_DIR")
 
+    printf '%s\n' "--env" "${SHELLM_THINKER_ENV:-$IDENTITY_NAME}"
+    printf '%s\n' "--workdir" "$run_dir"
     printf '%s\n' "--var" "MEM_DIR=$abs_mem_dir"
     printf '%s\n' "--var" "SKILLS_DIR=$abs_skills_dir"
     printf '%s\n' "--var" "SKILLS_KERNEL_DIR=$abs_kernel_dir"
