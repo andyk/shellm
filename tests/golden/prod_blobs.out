@@ -1,0 +1,6 @@
+[
+  {
+    "role": "user",
+    "content": "```bash\necho a\n```\n\n[stdout]\nblob line one\nblob line two\ntrailing newlines follow\n---\n```bash\necho b\n```\n\n[stdout]\n[inline kept]\n---\n```bash\necho c\n```\n\n[stderr]\nerror output from blob"
+  }
+]

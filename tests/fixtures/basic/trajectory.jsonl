@@ -1,0 +1,90 @@
+{"type": "prompt", "content": "You are a test agent. Solve the task.", "step_id": "b-000", "ts": "2026-07-07T10:00:00+0800"}
+{"type": "shell-output", "cmd": "echo step-1", "stdout": "step-1\n", "exit_code": 0, "step_id": "b-001", "ts": "2026-07-07T10:00:01+0800"}
+{"type": "thought", "content": "thought 2 about the state of things.", "source": "executive", "step_id": "b-002", "ts": "2026-07-07T10:00:02+0800"}
+{"type": "final", "content": "intermediate answer 3.", "step_id": "b-003", "ts": "2026-07-07T10:00:03+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 4 (should be excluded)", "step_id": "b-004", "ts": "2026-07-07T10:00:04+0800"}
+{"type": "message", "content": "hello from nick, message 5", "from": "nick", "to": "bot", "step_id": "b-005", "ts": "2026-07-07T10:00:05+0800"}
+{"type": "feedback", "content": "feedback item 6", "step_id": "b-006", "ts": "2026-07-07T10:00:06+0800"}
+{"type": "weird-type", "content": "unrecognized type 7 defaults to user", "step_id": "b-007", "ts": "2026-07-07T10:00:07+0800"}
+{"type": "reasoning", "content": "reasoning step 8: considering options.", "step_id": "b-008", "ts": "2026-07-07T10:00:08+0800"}
+{"type": "shell-output", "cmd": "echo step-9", "stdout": "step-9\n", "exit_code": 0, "step_id": "b-009", "ts": "2026-07-07T10:00:09+0800"}
+{"type": "thought", "content": "thought 10 about the state of things.", "source": "executive", "step_id": "b-010", "ts": "2026-07-07T10:00:10+0800"}
+{"type": "final", "content": "intermediate answer 11.", "step_id": "b-011", "ts": "2026-07-07T10:00:11+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 12 (should be excluded)", "step_id": "b-012", "ts": "2026-07-07T10:00:12+0800"}
+{"type": "message", "content": "hello from nick, message 13", "from": "nick", "to": "bot", "step_id": "b-013", "ts": "2026-07-07T10:00:13+0800"}
+{"type": "feedback", "content": "feedback item 14", "step_id": "b-014", "ts": "2026-07-07T10:00:14+0800"}
+{"type": "weird-type", "content": "unrecognized type 15 defaults to user", "step_id": "b-015", "ts": "2026-07-07T10:00:15+0800"}
+{"type": "reasoning", "content": "reasoning step 16: considering options.", "step_id": "b-016", "ts": "2026-07-07T10:00:16+0800"}
+{"type": "shell-output", "cmd": "echo step-17", "stdout": "step-17\n", "exit_code": 0, "step_id": "b-017", "ts": "2026-07-07T10:00:17+0800"}
+{"type": "thought", "content": "thought 18 about the state of things.", "source": "executive", "step_id": "b-018", "ts": "2026-07-07T10:00:18+0800"}
+{"type": "final", "content": "intermediate answer 19.", "step_id": "b-019", "ts": "2026-07-07T10:00:19+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 20 (should be excluded)", "step_id": "b-020", "ts": "2026-07-07T10:00:20+0800"}
+{"type": "message", "content": "hello from nick, message 21", "from": "nick", "to": "bot", "step_id": "b-021", "ts": "2026-07-07T10:00:21+0800"}
+{"type": "feedback", "content": "feedback item 22", "step_id": "b-022", "ts": "2026-07-07T10:00:22+0800"}
+{"type": "weird-type", "content": "unrecognized type 23 defaults to user", "step_id": "b-023", "ts": "2026-07-07T10:00:23+0800"}
+{"type": "reasoning", "content": "reasoning step 24: considering options.", "step_id": "b-024", "ts": "2026-07-07T10:00:24+0800"}
+{"type": "shell-output", "cmd": "echo step-25", "stdout": "step-25\n", "exit_code": 0, "step_id": "b-025", "ts": "2026-07-07T10:00:25+0800"}
+{"type": "thought", "content": "thought 26 about the state of things.", "source": "executive", "step_id": "b-026", "ts": "2026-07-07T10:00:26+0800"}
+{"type": "final", "content": "intermediate answer 27.", "step_id": "b-027", "ts": "2026-07-07T10:00:27+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 28 (should be excluded)", "step_id": "b-028", "ts": "2026-07-07T10:00:28+0800"}
+{"type": "message", "content": "hello from nick, message 29", "from": "nick", "to": "bot", "step_id": "b-029", "ts": "2026-07-07T10:00:29+0800"}
+{"type": "feedback", "content": "feedback item 30", "step_id": "b-030", "ts": "2026-07-07T10:00:30+0800"}
+{"type": "weird-type", "content": "unrecognized type 31 defaults to user", "step_id": "b-031", "ts": "2026-07-07T10:00:31+0800"}
+{"type": "reasoning", "content": "reasoning step 32: considering options.", "step_id": "b-032", "ts": "2026-07-07T10:00:32+0800"}
+{"type": "shell-output", "cmd": "echo step-33", "stdout": "step-33\n", "exit_code": 0, "step_id": "b-033", "ts": "2026-07-07T10:00:33+0800"}
+{"type": "thought", "content": "thought 34 about the state of things.", "source": "executive", "step_id": "b-034", "ts": "2026-07-07T10:00:34+0800"}
+{"type": "final", "content": "intermediate answer 35.", "step_id": "b-035", "ts": "2026-07-07T10:00:35+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 36 (should be excluded)", "step_id": "b-036", "ts": "2026-07-07T10:00:36+0800"}
+{"type": "message", "content": "hello from nick, message 37", "from": "nick", "to": "bot", "step_id": "b-037", "ts": "2026-07-07T10:00:37+0800"}
+{"type": "feedback", "content": "feedback item 38", "step_id": "b-038", "ts": "2026-07-07T10:00:38+0800"}
+{"type": "weird-type", "content": "unrecognized type 39 defaults to user", "step_id": "b-039", "ts": "2026-07-07T10:00:39+0800"}
+{"type": "reasoning", "content": "reasoning step 40: considering options.", "step_id": "b-040", "ts": "2026-07-07T10:00:40+0800"}
+{"type": "shell-output", "cmd": "echo step-41", "stdout": "step-41\n", "exit_code": 0, "step_id": "b-041", "ts": "2026-07-07T10:00:41+0800"}
+{"type": "thought", "content": "thought 42 about the state of things.", "source": "executive", "step_id": "b-042", "ts": "2026-07-07T10:00:42+0800"}
+{"type": "final", "content": "intermediate answer 43.", "step_id": "b-043", "ts": "2026-07-07T10:00:43+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 44 (should be excluded)", "step_id": "b-044", "ts": "2026-07-07T10:00:44+0800"}
+{"type": "message", "content": "hello from nick, message 45", "from": "nick", "to": "bot", "step_id": "b-045", "ts": "2026-07-07T10:00:45+0800"}
+{"type": "feedback", "content": "feedback item 46", "step_id": "b-046", "ts": "2026-07-07T10:00:46+0800"}
+{"type": "weird-type", "content": "unrecognized type 47 defaults to user", "step_id": "b-047", "ts": "2026-07-07T10:00:47+0800"}
+{"type": "reasoning", "content": "reasoning step 48: considering options.", "step_id": "b-048", "ts": "2026-07-07T10:00:48+0800"}
+{"type": "shell-output", "cmd": "echo step-49", "stdout": "step-49\n", "exit_code": 0, "step_id": "b-049", "ts": "2026-07-07T10:00:49+0800"}
+{"type": "thought", "content": "thought 50 about the state of things.", "source": "executive", "step_id": "b-050", "ts": "2026-07-07T10:00:50+0800"}
+{"type": "final", "content": "intermediate answer 51.", "step_id": "b-051", "ts": "2026-07-07T10:00:51+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 52 (should be excluded)", "step_id": "b-052", "ts": "2026-07-07T10:00:52+0800"}
+{"type": "message", "content": "hello from nick, message 53", "from": "nick", "to": "bot", "step_id": "b-053", "ts": "2026-07-07T10:00:53+0800"}
+{"type": "feedback", "content": "feedback item 54", "step_id": "b-054", "ts": "2026-07-07T10:00:54+0800"}
+{"type": "weird-type", "content": "unrecognized type 55 defaults to user", "step_id": "b-055", "ts": "2026-07-07T10:00:55+0800"}
+{"type": "reasoning", "content": "reasoning step 56: considering options.", "step_id": "b-056", "ts": "2026-07-07T10:00:56+0800"}
+{"type": "shell-output", "cmd": "echo step-57", "stdout": "step-57\n", "exit_code": 0, "step_id": "b-057", "ts": "2026-07-07T10:00:57+0800"}
+{"type": "thought", "content": "thought 58 about the state of things.", "source": "executive", "step_id": "b-058", "ts": "2026-07-07T10:00:58+0800"}
+{"type": "final", "content": "intermediate answer 59.", "step_id": "b-059", "ts": "2026-07-07T10:00:59+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 60 (should be excluded)", "step_id": "b-060", "ts": "2026-07-07T10:01:00+0800"}
+{"type": "message", "content": "hello from nick, message 61", "from": "nick", "to": "bot", "step_id": "b-061", "ts": "2026-07-07T10:01:01+0800"}
+{"type": "feedback", "content": "feedback item 62", "step_id": "b-062", "ts": "2026-07-07T10:01:02+0800"}
+{"type": "weird-type", "content": "unrecognized type 63 defaults to user", "step_id": "b-063", "ts": "2026-07-07T10:01:03+0800"}
+{"type": "reasoning", "content": "reasoning step 64: considering options.", "step_id": "b-064", "ts": "2026-07-07T10:01:04+0800"}
+{"type": "shell-output", "cmd": "echo step-65", "stdout": "step-65\n", "exit_code": 0, "step_id": "b-065", "ts": "2026-07-07T10:01:05+0800"}
+{"type": "thought", "content": "thought 66 about the state of things.", "source": "executive", "step_id": "b-066", "ts": "2026-07-07T10:01:06+0800"}
+{"type": "final", "content": "intermediate answer 67.", "step_id": "b-067", "ts": "2026-07-07T10:01:07+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 68 (should be excluded)", "step_id": "b-068", "ts": "2026-07-07T10:01:08+0800"}
+{"type": "message", "content": "hello from nick, message 69", "from": "nick", "to": "bot", "step_id": "b-069", "ts": "2026-07-07T10:01:09+0800"}
+{"type": "feedback", "content": "feedback item 70", "step_id": "b-070", "ts": "2026-07-07T10:01:10+0800"}
+{"type": "weird-type", "content": "unrecognized type 71 defaults to user", "step_id": "b-071", "ts": "2026-07-07T10:01:11+0800"}
+{"type": "reasoning", "content": "reasoning step 72: considering options.", "step_id": "b-072", "ts": "2026-07-07T10:01:12+0800"}
+{"type": "shell-output", "cmd": "echo step-73", "stdout": "step-73\n", "exit_code": 0, "step_id": "b-073", "ts": "2026-07-07T10:01:13+0800"}
+{"type": "thought", "content": "thought 74 about the state of things.", "source": "executive", "step_id": "b-074", "ts": "2026-07-07T10:01:14+0800"}
+{"type": "final", "content": "intermediate answer 75.", "step_id": "b-075", "ts": "2026-07-07T10:01:15+0800"}
+{"type": "sub-run", "content": "sub-run bookkeeping 76 (should be excluded)", "step_id": "b-076", "ts": "2026-07-07T10:01:16+0800"}
+{"type": "message", "content": "hello from nick, message 77", "from": "nick", "to": "bot", "step_id": "b-077", "ts": "2026-07-07T10:01:17+0800"}
+{"type": "feedback", "content": "feedback item 78", "step_id": "b-078", "ts": "2026-07-07T10:01:18+0800"}
+{"type": "weird-type", "content": "unrecognized type 79 defaults to user", "step_id": "b-079", "ts": "2026-07-07T10:01:19+0800"}
+{"type": "fork", "child": "cafef00d-child", "child_ref": "cafef00d/trajectory.jsonl", "step_id": "b-080", "ts": "2026-07-07T10:01:20+0800"}
+{"type": "merge", "from_branch": "branch-a", "content": "merged summary", "step_id": "b-081", "ts": "2026-07-07T10:01:21+0800"}
+{"type": "merge", "from_branch": "branch-b", "step_id": "b-082", "ts": "2026-07-07T10:01:22+0800"}
+{"type": "trajectory", "content": "internal bookkeeping, never rendered", "step_id": "b-083", "ts": "2026-07-07T10:01:23+0800"}
+{"type": "thought", "content": "", "source": "executive", "step_id": "b-084", "ts": "2026-07-07T10:01:24+0800"}
+{"type": "thought", "content": "relay-style empty thought", "from_traj": "deadbeef", "from_step": "beef-1", "from_traj_ref": "deadbeef-x", "step_id": "b-085", "ts": "2026-07-07T10:01:25+0800"}
+{"type": "shell-output", "cmd": "cat bigfile", "stdout": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "exit_code": 0, "step_id": "b-086", "ts": "2026-07-07T10:01:26+0800"}
+{"type": "note", "thought": "a step with a literal thought FIELD plus another key", "extra": "other value", "step_id": "b-087", "ts": "2026-07-07T10:01:27+0800"}
+{"type": "shell-output", "cmd": "false", "stdout": "", "exit_code": 1, "flag": false, "count": 42, "step_id": "b-088", "ts": "2026-07-07T10:01:28+0800"}
+{"type": "final", "content": "the final answer.", "step_id": "b-089", "ts": "2026-07-07T10:01:29+0800"}

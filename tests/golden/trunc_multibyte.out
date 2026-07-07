@@ -1,0 +1,6 @@
+[
+  {
+    "role": "user",
+    "content": "héllo wörld 日本語テキスト日本語テキ\n[... truncated: 854 bytes total. read with: traj show mb-1 --full]\nスト日本語テキスト日本語テキスト\n---\nplain ascii xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[... truncated: 3012 bytes total. read with: traj show mb-2 --full]\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n---\nemoji 🎉🎊 🎈🎈🎈🎈🎈🎈🎈🎈\n[... truncated: 3615 bytes total. read with: traj show mb-3 --full]\n🎈🎈🎈🎈🎈🎈🎈🎈🎈🎈🎈🎈"
+  }
+]

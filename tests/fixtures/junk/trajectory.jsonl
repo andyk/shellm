@@ -1,0 +1,6 @@
+not json at all
+{"type":"thought","content":"no step id, dropped"}
+{"type": "thought", "content": "valid one", "step_id": "j-1", "ts": "2026-07-07T10:00:00+0800"}
+
+{"broken json":
+{"type": "shell-output", "cmd": "echo hi", "stdout": "hi\n", "exit_code": 0, "step_id": "j-2", "ts": "2026-07-07T10:00:01+0800"}

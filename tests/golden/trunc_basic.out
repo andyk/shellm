@@ -1,0 +1,90 @@
+[
+  {
+    "role": "user",
+    "content": "You are a test agent. Solve the task.\n---\n[34 steps elided]"
+  },
+  {
+    "role": "assistant",
+    "content": "reasoning step 40: considering options."
+  },
+  {
+    "role": "user",
+    "content": "```bash\necho step-41\n```\n\n[exit_code]\n0\n\n[stdout]\nstep-41\n---\n[content]\nthought 42 about the state of things.\n\n[source]\nexecutive"
+  },
+  {
+    "role": "assistant",
+    "content": "intermediate answer 43."
+  },
+  {
+    "role": "user",
+    "content": "[content]\nhello from nick, message 45\n\n[from]\nnick\n\n[to]\nbot\n---\nfeedback item 46\n---\nunrecognized type 47 defaults to user"
+  },
+  {
+    "role": "assistant",
+    "content": "reasoning step 48: considering options."
+  },
+  {
+    "role": "user",
+    "content": "```bash\necho step-49\n```\n\n[exit_code]\n0\n\n[stdout]\nstep-49\n---\n[content]\nthought 50 about the state of things.\n\n[source]\nexecutive"
+  },
+  {
+    "role": "assistant",
+    "content": "intermediate answer 51."
+  },
+  {
+    "role": "user",
+    "content": "[content]\nhello from nick, message 53\n\n[from]\nnick\n\n[to]\nbot\n---\nfeedback item 54\n---\nunrecognized type 55 defaults to user"
+  },
+  {
+    "role": "assistant",
+    "content": "reasoning step 56: considering options."
+  },
+  {
+    "role": "user",
+    "content": "```bash\necho step-57\n```\n\n[exit_code]\n0\n\n[stdout]\nstep-57\n---\n[content]\nthought 58 about the state of things.\n\n[source]\nexecutive"
+  },
+  {
+    "role": "assistant",
+    "content": "intermediate answer 59."
+  },
+  {
+    "role": "user",
+    "content": "[content]\nhello from nick, message 61\n\n[from]\nnick\n\n[to]\nbot\n---\nfeedback item 62\n---\nunrecognized type 63 defaults to user"
+  },
+  {
+    "role": "assistant",
+    "content": "reasoning step 64: considering options."
+  },
+  {
+    "role": "user",
+    "content": "```bash\necho step-65\n```\n\n[exit_code]\n0\n\n[stdout]\nstep-65\n---\n[content]\nthought 66 about the state of things.\n\n[source]\nexecutive"
+  },
+  {
+    "role": "assistant",
+    "content": "intermediate answer 67."
+  },
+  {
+    "role": "user",
+    "content": "[content]\nhello from nick, message 69\n\n[from]\nnick\n\n[to]\nbot\n---\nfeedback item 70\n---\nunrecognized type 71 defaults to user"
+  },
+  {
+    "role": "assistant",
+    "content": "reasoning step 72: considering options."
+  },
+  {
+    "role": "user",
+    "content": "```bash\necho step-73\n```\n\n[exit_code]\n0\n\n[stdout]\nstep-73\n---\n[content]\nthought 74 about the state of things.\n\n[source]\nexecutive"
+  },
+  {
+    "role": "assistant",
+    "content": "intermediate answer 75."
+  },
+  {
+    "role": "user",
+    "content": "[content]\nhello from nick, message 77\n\n[from]\nnick\n\n[to]\nbot\n---\nfeedback item 78\n---\nunrecognized type 79 defaults to user\n---\n[Forked child: cafef00d-child]\n---\n[Merged from branch-a: merged summary]\n---\n[Merged from branch-b]\n---\n[source]\nexecutive\n---\n[content]\nrelay-style empty thought\n\n[from_step]\nbeef-1\n\n[from_traj]\ndeadbeef\n---\n```bash\ncat bigfile\n```\n\n[exit_code]\n0\n\n[stdout]\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[... truncated: 5000 bytes total. read with: traj show b-086 --full]\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n---\n[extra]\nother value\n\na step with a literal thought FIELD plus another key\n---\n```bash\nfalse\n```\n\n[count]\n42\n\n[exit_code]\n1"
+  },
+  {
+    "role": "assistant",
+    "content": "the final answer."
+  }
+]
