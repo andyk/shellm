@@ -537,6 +537,25 @@ skills                       Skill manager
 
 All pure bash. No dependencies beyond bash, jq, and curl. Six tools, each a single file.
 
+## Tests
+
+```bash
+tests/test_context.sh
+```
+
+Golden-output tests for `context`, the tool that renders a trajectory into an
+LLM messages array. Fixture trajectories in `tests/fixtures/` (elision,
+truncation, blob refs, corrupt lines, multibyte content) are rendered with a
+matrix of flags and diffed against checked-in goldens in `tests/golden/`,
+followed by structural invariants: valid JSON with alternating roles, valid
+UTF-8 output, budget enforcement, and a fork-count guard that keeps rendering
+O(1) processes instead of O(trajectory length).
+
+```bash
+tests/test_context.sh --regen          # rebuild goldens after an intended behavior change
+CONTEXT_BIN=path/to/context tests/test_context.sh   # test an alternate implementation
+```
+
 ## Acknowledgements
 
 shellm is a port of [Recursive Language Models (RLM)](https://alexzhang13.github.io/blog/2025/rlm/) by Alex Zhang to bash, for bash.

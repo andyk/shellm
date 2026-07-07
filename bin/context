@@ -4,6 +4,9 @@ set -euo pipefail
 # context — Policy layer that reads a trajectory and outputs a JSON messages
 # array with role assignment driven by flags.  The caller passes the output
 # to `llm -M` and provides its own system prompt via `llm -s`.
+#
+# Rendering is a single jq pass over the trajectory (plus one prepass to
+# discover blob refs), so cost stays flat as trajectories grow.
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -168,378 +171,293 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Build type sets for role assignment (pipe-delimited for bash 3.2 compat)
+# The jq program
+#
+# Two modes:
+#   refs   — print blob refs (stdout_ref/stderr_ref) of selected, non-excluded
+#            steps, one per line, so bash can load the blob files.
+#   render — print the row total, then the pretty-printed messages array.
+#
+# Semantics mirror the original bash implementation, including its
+# command-substitution behavior (trailing newlines stripped from every
+# rendered value).
 # ---------------------------------------------------------------------------
 
-_ASSISTANT_SET=""
-if [[ -n "$CTX_ASSISTANT_TYPES" ]]; then
-    IFS=',' read -ra _types <<< "$CTX_ASSISTANT_TYPES"
-    for _t in "${_types[@]}"; do
-        _ASSISTANT_SET="${_ASSISTANT_SET}|${_t}|"
-    done
-fi
+JQ_PROG=$(cat <<'JQEOF'
+def rtrim: sub("\n+$"; "");
 
-_USER_SET=""
-if [[ -n "$CTX_USER_TYPES" ]]; then
-    IFS=',' read -ra _types <<< "$CTX_USER_TYPES"
-    for _t in "${_types[@]}"; do
-        _USER_SET="${_USER_SET}|${_t}|"
-    done
-fi
+def rep($s; $n): if $n <= 0 then "" else ($s * $n) end;
 
-_EXCLUDE_SET=""
-if [[ -n "$CTX_EXCLUDE_TYPES" ]]; then
-    IFS=',' read -ra _types <<< "$CTX_EXCLUDE_TYPES"
-    for _t in "${_types[@]}"; do
-        _EXCLUDE_SET="${_EXCLUDE_SET}|${_t}|"
-    done
-fi
+# Pretty-print a JSON value the way `jq -r` prints non-string values
+# (default jq pretty format: 2-space indent).
+def pp:
+  def go($d):
+    if type == "object" then
+      if length == 0 then "{}"
+      else "{\n"
+        + ([to_entries[] | rep("  "; $d+1) + (.key | tojson) + ": " + (.value | go($d+1))] | join(",\n"))
+        + "\n" + rep("  "; $d) + "}"
+      end
+    elif type == "array" then
+      if length == 0 then "[]"
+      else "[\n"
+        + ([.[] | rep("  "; $d+1) + go($d+1)] | join(",\n"))
+        + "\n" + rep("  "; $d) + "]"
+      end
+    else tojson end;
+  go(0);
 
-is_assistant_type() { [[ "$_ASSISTANT_SET" == *"|$1|"* ]]; }
-is_user_type()      { [[ "$_USER_SET" == *"|$1|"* ]]; }
-is_excluded_type()  { [[ -n "$_EXCLUDE_SET" ]] && [[ "$_EXCLUDE_SET" == *"|$1|"* ]]; }
+# Equivalent of val=$(printf row | jq -r '.key // empty'):
+# null/false -> "", non-strings stringified, trailing newlines stripped by $().
+def jqr_empty:
+  if . == null or . == false then ""
+  elif type == "string" then .
+  elif type == "object" or type == "array" then pp
+  else tostring
+  end;
 
-# Determine role for a step type.
-role_for_type() {
-    local step_type="$1"
-    if is_excluded_type "$step_type"; then
-        echo "exclude"
-    elif is_assistant_type "$step_type"; then
-        echo "assistant"
-    elif is_user_type "$step_type"; then
-        echo "user"
-    else
-        # Default: user for unrecognized types
-        echo "user"
-    fi
-}
+# Byte-aware truncation helpers (limit is in UTF-8 bytes).
+def btrunc_head($n):
+  if utf8bytelength <= $n then .
+  else .[0:$n] | until(utf8bytelength <= $n; .[0:length-1])
+  end;
+def btrunc_tail($n):
+  if utf8bytelength <= $n then .
+  else (if length > $n then .[length-$n:] else . end) | until(utf8bytelength <= $n; .[1:])
+  end;
 
-# Build pin set as delimited string for lookup.
-_PIN_SET=""
-for _p in "${CTX_PINS[@]+"${CTX_PINS[@]}"}"; do
-    _PIN_SET="${_PIN_SET}|${_p}|"
-done
+def truncate_field($limit; $sid):
+  utf8bytelength as $vb |
+  if $vb <= $limit then .
+  elif $limit <= 1 then "[... truncated: \($vb) bytes total. read with: traj show \($sid) --full]"
+  else
+    ([($limit / 2 | floor), 1] | max) as $half |
+    ((btrunc_head($half) | rtrim)
+     + "\n[... truncated: \($vb) bytes total. read with: traj show \($sid) --full]\n"
+     + (btrunc_tail($half) | rtrim))
+  end;
 
-pin_match() {
-    [[ "$_PIN_SET" == *"|$1|"* ]]
-}
+# Metadata keys skipped when rendering step content.
+def is_meta($k):
+  ($k == "step_id" or $k == "ts" or $k == "type" or $k == "fork_parent")
+  or ($k | endswith("_ref"))
+  or ($k | endswith("_bytes"))
+  or ($k | endswith("_truncated"));
 
-# ---------------------------------------------------------------------------
-# Metadata keys to skip when rendering step content
-# ---------------------------------------------------------------------------
+def role_for($t; $A; $U; $E):
+  if ($E | index($t)) != null then "exclude"
+  elif ($A | index($t)) != null then "assistant"
+  elif ($U | index($t)) != null then "user"
+  else "user"
+  end;
 
-_META_KEYS="|step_id|ts|type|fork_parent|"
-is_meta_key() {
-    local key="$1"
-    # Skip step_id, ts, type, and any key ending in _ref, _bytes, _truncated
-    [[ "$_META_KEYS" == *"|$key|"* ]] && return 0
-    case "$key" in
-        *_ref|*_bytes|*_truncated) return 0 ;;
-    esac
-    return 1
-}
+def selected($i; $sid; $N; $head; $tail; $pins):
+  ($i < $head) or ($i >= ($N - $tail)) or (($pins | index($sid)) != null);
 
-# ---------------------------------------------------------------------------
-# Phase 1: Load trajectory rows via traj cat
-# ---------------------------------------------------------------------------
-
-ALL_ROWS=()
-ALL_IDS=()
-ALL_TYPES=()
-while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    local_id=$(printf '%s' "$line" | jq -r '.step_id // empty' 2>/dev/null || true)
-    [[ -n "$local_id" ]] || continue
-    local_type=$(printf '%s' "$line" | jq -r '.type // empty' 2>/dev/null || true)
-    ALL_ROWS+=("$line")
-    ALL_IDS+=("$local_id")
-    ALL_TYPES+=("$local_type")
-done < <(traj cat --raw --traj_dir "$RESOLVED_TRAJ_DIR" "${RESOLVED_TRAJ_FILE#$RESOLVED_TRAJ_DIR/}" 2>/dev/null)
-
-TOTAL=${#ALL_ROWS[@]}
-
-# ---------------------------------------------------------------------------
-# Phase 2: Step selection (head / tail / pins)
-# ---------------------------------------------------------------------------
-
-_SELECTED=""
-
-# Head: first N steps.
-for ((i=0; i<TOTAL && i<CTX_HEAD; i++)); do
-    _SELECTED="${_SELECTED}|${i}|"
-done
-
-# Tail: last N steps.
-tail_start=$((TOTAL - CTX_TAIL))
-[[ "$tail_start" -lt 0 ]] && tail_start=0
-for ((i=tail_start; i<TOTAL; i++)); do
-    _SELECTED="${_SELECTED}|${i}|"
-done
-
-# Pins: find by step_id.
-for ((i=0; i<TOTAL; i++)); do
-    if pin_match "${ALL_IDS[$i]}"; then
-        _SELECTED="${_SELECTED}|${i}|"
-    fi
-done
-
-is_selected() {
-    [[ "$_SELECTED" == *"|$1|"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# Phase 3: Truncation helper
-# ---------------------------------------------------------------------------
-
-truncate_field() {
-    local value="$1" limit="$2" step_id="$3"
-    local val_bytes
-    val_bytes=$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d ' ')
-
-    if [[ "$val_bytes" -le "$limit" ]]; then
-        printf '%s' "$value"
-        return
-    fi
-
-    if [[ "$limit" -le 1 ]]; then
-        printf '[... truncated: %s bytes total. read with: traj show %s --full]' \
-            "$val_bytes" "$step_id"
-        return
-    fi
-
-    local half=$(( limit / 2 ))
-    [[ "$half" -lt 1 ]] && half=1
-    local head_part tail_part
-    head_part=$(printf '%s' "$value" | head -c "$half")
-    tail_part=$(printf '%s' "$value" | tail -c "$half")
-
-    printf '%s' "$head_part"
-    printf '\n[... truncated: %s bytes total. read with: traj show %s --full]\n' \
-        "$val_bytes" "$step_id"
-    printf '%s' "$tail_part"
-}
-
-# ---------------------------------------------------------------------------
-# Phase 4: Render steps into role+content pairs, with elision
-# ---------------------------------------------------------------------------
-
-# Render a single step row into text content for a message.
-render_step() {
-    local row="$1" prompt_limit="$2"
-    local step_id
-    step_id=$(printf '%s' "$row" | jq -r '.step_id')
-    local step_type
-    step_type=$(printf '%s' "$row" | jq -r '.type')
-
-    # Handle fork/merge/trajectory step types.
-    case "$step_type" in
-        fork)
-            local fork_child
-            fork_child=$(printf '%s' "$row" | jq -r '.child // empty')
-            printf '[Forked child: %s]' "$fork_child"
-            return
-            ;;
-        trajectory)
-            # Internal bookkeeping — skip entirely.
-            return
-            ;;
-        merge)
-            local merge_branch merge_content
-            merge_branch=$(printf '%s' "$row" | jq -r '.from_branch // empty')
-            merge_content=$(printf '%s' "$row" | jq -r '.content // empty')
-            if [[ -n "$merge_content" ]]; then
-                printf '[Merged from %s: %s]' "$merge_branch" "$merge_content"
-            else
-                printf '[Merged from %s]' "$merge_branch"
-            fi
-            return
-            ;;
-    esac
-
-    # Load blob content for truncated stdout/stderr before rendering.
-    local blob_base
-    blob_base="$(dirname "$RESOLVED_TRAJ_FILE")"
-    local _ref_field _ref_val
-    for _ref_field in stdout stderr; do
-        _ref_val=$(printf '%s' "$row" | jq -r ".${_ref_field}_ref // empty" 2>/dev/null)
-        if [[ -n "$_ref_val" ]] && [[ -f "$blob_base/$_ref_val" ]]; then
-            local _blob_content
-            _blob_content=$(cat "$blob_base/$_ref_val")
-            row=$(printf '%s' "$row" | jq --arg v "$_blob_content" ".${_ref_field} = \$v | del(.${_ref_field}_truncated)")
-        fi
-    done
-
-    # Get all non-metadata keys and their values.
-    local keys
-    keys=$(printf '%s' "$row" | jq -r 'keys[]')
-
-    # Count non-metadata keys to decide on wrapper format.
-    local content_keys=()
-    local k
-    while IFS= read -r k; do
-        [[ -z "$k" ]] && continue
-        is_meta_key "$k" && continue
-        content_keys+=("$k")
-    done <<< "$keys"
-
-    local output=""
-    local num_content=${#content_keys[@]}
-
-    for k in "${content_keys[@]}"; do
-        local val
-        val=$(printf '%s' "$row" | jq -r ".${k} // empty")
-        [[ -n "$val" ]] || continue
-
-        # Truncate large values.
-        local val_bytes
-        val_bytes=$(printf '%s' "$val" | LC_ALL=C wc -c | tr -d ' ')
-        if [[ "$val_bytes" -gt "$prompt_limit" ]]; then
-            val=$(truncate_field "$val" "$prompt_limit" "$step_id")
-        fi
-
-        if [[ "$num_content" -eq 1 ]]; then
-            # Single content key: just the value.
-            output="$val"
-        elif [[ "$k" == "cmd" ]]; then
-            # Render commands as fenced code blocks so the model sees
-            # its own output format in history, not [cmd] markers.
-            output+='```bash'$'\n'"${val}"$'\n```\n\n'
-        elif [[ "$k" == "thought" ]]; then
-            output+="${val}"$'\n\n'
+# Render one step row into message text content.
+def render_step($limit; $blobs):
+  . as $row |
+  ($row.step_id | tostring) as $sid |
+  (($row.type // "") | tostring) as $t |
+  if $t == "fork" then "[Forked child: \($row.child | jqr_empty)]"
+  elif $t == "trajectory" then ""
+  elif $t == "merge" then
+    ($row.from_branch | jqr_empty) as $b |
+    ($row.content | jqr_empty) as $c |
+    if $c != "" then "[Merged from \($b): \($c)]" else "[Merged from \($b)]" end
+  else
+    # Load blob content for truncated stdout/stderr.
+    (reduce ("stdout", "stderr") as $f ($row;
+        (.[$f + "_ref"] // "") as $ref |
+        if ($ref | type) == "string" and $ref != "" and ($blobs | has($ref)) then
+            .[$f] = ($blobs[$ref] | rtrim) | del(.[$f + "_truncated"])
+        else .
+        end
+    )) as $row2 |
+    ($row2 | keys | map(select(is_meta(.) | not))) as $cks |
+    ($cks | length) as $nc |
+    reduce $cks[] as $k ("";
+        . as $acc |
+        ($row2[$k] | jqr_empty | rtrim) as $v0 |
+        if $v0 == "" then $acc
         else
-            # Generic fallback for other multi-key steps.
-            output+="[${k}]"$'\n'"${val}"$'\n\n'
-        fi
-    done
-
-    printf '%s' "$output"
-}
-
-# Build the messages array.
-# Returns a list of (role, content) pairs as a JSON array.
-build_messages() {
-    local prompt_limit="$1"
-
-    # Accumulate messages as a JSON array.
-    local messages="[]"
-    local elided_count=0
-
-    for ((i=0; i<TOTAL; i++)); do
-        local step_type="${ALL_TYPES[$i]}"
-        local role
-        role=$(role_for_type "$step_type")
-
-        # Skip excluded types entirely.
-        [[ "$role" == "exclude" ]] && continue
-
-        if is_selected "$i"; then
-            # Flush elision marker.
-            if [[ "$elided_count" -gt 0 && "$CTX_ELISION_STYLE" != "none" ]]; then
-                local elision_text="[$elided_count steps elided]"
-                # Elision markers become user messages.
-                messages=$(printf '%s' "$messages" | jq --arg c "$elision_text" '. + [{"role":"user","content":$c}]')
-                elided_count=0
-            fi
-
-            # Render the step.
-            local content
-            content=$(render_step "${ALL_ROWS[$i]}" "$prompt_limit")
-            [[ -n "$content" ]] || continue
-
-            messages=$(printf '%s' "$messages" | jq --arg r "$role" --arg c "$content" '. + [{"role":$r,"content":$c}]')
-        else
-            elided_count=$((elided_count + 1))
-        fi
-    done
-
-    # Flush trailing elision.
-    if [[ "$elided_count" -gt 0 && "$CTX_ELISION_STYLE" != "none" ]]; then
-        local elision_text="[$elided_count steps elided]"
-        messages=$(printf '%s' "$messages" | jq --arg c "$elision_text" '. + [{"role":"user","content":$c}]')
-    fi
-
-    printf '%s' "$messages"
-}
-
-# ---------------------------------------------------------------------------
-# Phase 5: Consecutive-role merging
-# ---------------------------------------------------------------------------
-
-# Anthropic API requires alternating user/assistant roles.
-# Merge consecutive messages with the same role.
-merge_consecutive_roles() {
-    local messages="$1"
-    printf '%s' "$messages" | jq '
-        reduce .[] as $msg ([];
-            if (length > 0) and (.[-1].role == $msg.role) then
-                .[-1].content += ("\n---\n" + $msg.content)
-            else
-                . + [$msg]
+            ($v0 | if utf8bytelength > $limit then truncate_field($limit; $sid) else . end) as $v |
+            if $nc == 1 then $v
+            elif $k == "cmd" then $acc + "```bash\n" + $v + "\n```\n\n"
+            elif $k == "thought" then $acc + $v + "\n\n"
+            else $acc + "[" + $k + "]\n" + $v + "\n\n"
             end
-        )
-    '
+        end
+    )
+  end;
+
+def build_messages($rows; $limit; $blobs; $head; $tail; $pins; $A; $U; $E; $elision):
+  ($rows | length) as $N |
+  reduce range(0; $N) as $i ({msgs: [], el: 0};
+      $rows[$i] as $r |
+      (($r.type // "") | tostring) as $t |
+      role_for($t; $A; $U; $E) as $role |
+      if $role == "exclude" then .
+      elif selected($i; ($r.step_id | tostring); $N; $head; $tail; $pins) then
+          (if .el > 0 and $elision != "none" then
+              {msgs: (.msgs + [{role: "user", content: "[\(.el) steps elided]"}]), el: 0}
+           else . end) as $st |
+          ($r | render_step($limit; $blobs) | rtrim) as $c |
+          if $c == "" then $st
+          else {msgs: ($st.msgs + [{role: $role, content: $c}]), el: 0}
+          end
+      else .el += 1
+      end
+  ) |
+  (if .el > 0 and $elision != "none" then
+      .msgs + [{role: "user", content: "[\(.el) steps elided]"}]
+   else .msgs end);
+
+# Merge consecutive same-role messages (Anthropic API requires alternation).
+def merge_roles:
+  reduce .[] as $msg ([];
+      if (length > 0) and (.[-1].role == $msg.role) then
+          .[-1].content += ("\n---\n" + $msg.content)
+      else . + [$msg]
+      end
+  );
+
+# --- main ---
+($astr | if . == "" then [] else split(",") end) as $A |
+($ustr | if . == "" then [] else split(",") end) as $U |
+($estr | if . == "" then [] else split(",") end) as $E |
+($blobsraw[0] // {}) as $blobs |
+(split("\n")
+ | map(fromjson? // null)
+ | map(select(. != null))
+ | map(select(((.step_id // "") | tostring) != ""))) as $rows |
+($rows | length) as $N |
+if $mode == "refs" then
+    [ range(0; $N) as $i |
+      $rows[$i] |
+      select(role_for(((.type // "") | tostring); $A; $U; $E) != "exclude") |
+      select(selected($i; (.step_id | tostring); $N; $head; $tail; $pins)) |
+      ((.stdout_ref // empty), (.stderr_ref // empty)) |
+      select((type == "string") and . != "")
+    ] | unique | .[]
+else
+    $N,
+    (build_messages($rows; $limit; $blobs; $head; $tail; $pins; $A; $U; $E; $elision) | merge_roles)
+end
+JQEOF
+)
+
+# ---------------------------------------------------------------------------
+# Load trajectory rows once
+# ---------------------------------------------------------------------------
+
+RAW_ROWS=$(traj cat --raw --traj_dir "$RESOLVED_TRAJ_DIR" "${RESOLVED_TRAJ_FILE#$RESOLVED_TRAJ_DIR/}" 2>/dev/null) || RAW_ROWS=""
+
+# Pins as a JSON array
+PINS_JSON='[]'
+if [[ ${#CTX_PINS[@]} -gt 0 ]]; then
+    PINS_JSON=$(printf '%s\n' "${CTX_PINS[@]}" | jq -R . | jq -s -c .)
+fi
+
+_ctx_jq() {
+    # _ctx_jq <mode> <prompt_limit> <blobs_file>
+    printf '%s\n' "$RAW_ROWS" | jq -R -s -r \
+        --arg mode "$1" \
+        --argjson head "$CTX_HEAD" \
+        --argjson tail "$CTX_TAIL" \
+        --argjson limit "$2" \
+        --argjson pins "$PINS_JSON" \
+        --arg astr "$CTX_ASSISTANT_TYPES" \
+        --arg ustr "$CTX_USER_TYPES" \
+        --arg estr "$CTX_EXCLUDE_TYPES" \
+        --arg elision "$CTX_ELISION_STYLE" \
+        --slurpfile blobsraw "$3" \
+        "$JQ_PROG"
 }
 
 # ---------------------------------------------------------------------------
-# Phase 6: Budget enforcement
+# Blob prepass: load stdout/stderr blob files referenced by selected steps
 # ---------------------------------------------------------------------------
 
-enforce_budget() {
-    local result
-    result=$(build_messages "$CTX_PROMPT_LIMIT")
-    result=$(merge_consecutive_roles "$result")
+BLOBS_FILE=/dev/null
+_BLOBS_TMP=""
+cleanup() { if [[ -n "$_BLOBS_TMP" ]]; then rm -f "$_BLOBS_TMP"; fi; }
+trap cleanup EXIT
 
-    if [[ -z "$CTX_MAX_BYTES" ]]; then
-        printf '%s' "$result"
-        return
+_blob_base="$(dirname "$RESOLVED_TRAJ_FILE")"
+_refs=$(_ctx_jq refs "$CTX_PROMPT_LIMIT" /dev/null)
+if [[ -n "$_refs" ]]; then
+    _blobs_json='{}'
+    while IFS= read -r _ref; do
+        [[ -n "$_ref" && -f "$_blob_base/$_ref" ]] || continue
+        _blobs_json=$(printf '%s' "$_blobs_json" \
+            | jq --arg k "$_ref" --rawfile v "$_blob_base/$_ref" '. + {($k): $v}')
+    done <<< "$_refs"
+    if [[ "$_blobs_json" != '{}' ]]; then
+        _BLOBS_TMP=$(mktemp)
+        printf '%s' "$_blobs_json" > "$_BLOBS_TMP"
+        BLOBS_FILE="$_BLOBS_TMP"
     fi
+fi
 
-    local result_bytes
-    result_bytes=$(printf '%s' "$result" | LC_ALL=C wc -c | tr -d ' ')
+# ---------------------------------------------------------------------------
+# Render (with optional --max-bytes budget enforcement)
+# ---------------------------------------------------------------------------
 
-    if [[ "$result_bytes" -le "$CTX_MAX_BYTES" ]]; then
-        printf '%s' "$result"
-        return
-    fi
-
-    # Binary search for the right prompt_limit to fit the budget.
-    local lo=0 hi="$CTX_PROMPT_LIMIT"
-    local best_result="$result"
-    local best_bytes="$result_bytes"
-
-    while [[ "$lo" -le "$hi" ]]; do
-        local mid=$(( (lo + hi) / 2 ))
-        local try_result
-        try_result=$(build_messages "$mid")
-        try_result=$(merge_consecutive_roles "$try_result")
-        local try_bytes
-        try_bytes=$(printf '%s' "$try_result" | LC_ALL=C wc -c | tr -d ' ')
-
-        if [[ "$try_bytes" -le "$CTX_MAX_BYTES" ]]; then
-            best_result="$try_result"
-            best_bytes="$try_bytes"
-            lo=$((mid + 1))
-        else
-            hi=$((mid - 1))
-        fi
-    done
-
-    if [[ "$best_bytes" -gt "$CTX_MAX_BYTES" ]]; then
-        printf '%s' "$best_result" | head -c "$CTX_MAX_BYTES"
-        printf '[budget exceeded: trajectory too dense]' >&2
-    else
-        printf '%s' "$best_result"
-    fi
+# render_at <prompt_limit>: sets RENDER_TOTAL and RENDER_MSGS
+render_at() {
+    local out
+    out=$(_ctx_jq render "$1" "$BLOBS_FILE")
+    RENDER_TOTAL="${out%%$'\n'*}"
+    RENDER_MSGS="${out#*$'\n'}"
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+render_at "$CTX_PROMPT_LIMIT"
 
-if [[ "$TOTAL" -eq 0 ]]; then
+if [[ "$RENDER_TOTAL" -eq 0 ]]; then
     # Empty trajectory: output empty messages array.
     printf '[]\n'
     exit 0
 fi
 
-enforce_budget
+result="$RENDER_MSGS"
+
+if [[ -z "$CTX_MAX_BYTES" ]]; then
+    printf '%s' "$result"
+    exit 0
+fi
+
+result_bytes=$(printf '%s' "$result" | LC_ALL=C wc -c | tr -d ' ')
+
+if [[ "$result_bytes" -le "$CTX_MAX_BYTES" ]]; then
+    printf '%s' "$result"
+    exit 0
+fi
+
+# Binary search for the right prompt_limit to fit the budget.
+lo=0
+hi="$CTX_PROMPT_LIMIT"
+best_result="$result"
+best_bytes="$result_bytes"
+
+while [[ "$lo" -le "$hi" ]]; do
+    mid=$(( (lo + hi) / 2 ))
+    render_at "$mid"
+    try_result="$RENDER_MSGS"
+    try_bytes=$(printf '%s' "$try_result" | LC_ALL=C wc -c | tr -d ' ')
+
+    if [[ "$try_bytes" -le "$CTX_MAX_BYTES" ]]; then
+        best_result="$try_result"
+        best_bytes="$try_bytes"
+        lo=$((mid + 1))
+    else
+        hi=$((mid - 1))
+    fi
+done
+
+if [[ "$best_bytes" -gt "$CTX_MAX_BYTES" ]]; then
+    printf '%s' "$best_result" | head -c "$CTX_MAX_BYTES"
+    printf '[budget exceeded: trajectory too dense]' >&2
+else
+    printf '%s' "$best_result"
+fi

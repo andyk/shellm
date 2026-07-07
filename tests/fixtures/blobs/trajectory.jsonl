@@ -1,0 +1,3 @@
+{"type": "shell-output", "cmd": "echo a", "stdout": "[truncated]", "stdout_ref": "blobs/b1.stdout", "stdout_truncated": true, "step_id": "bl-1", "ts": "2026-07-07T10:00:00+0800"}
+{"type": "shell-output", "cmd": "echo b", "stdout": "[inline kept]", "stdout_ref": "blobs/missing.stdout", "stdout_truncated": true, "step_id": "bl-2", "ts": "2026-07-07T10:00:01+0800"}
+{"type": "shell-output", "cmd": "echo c", "stderr": "[truncated]", "stderr_ref": "blobs/b2.stderr", "stderr_truncated": true, "step_id": "bl-3", "ts": "2026-07-07T10:00:02+0800"}

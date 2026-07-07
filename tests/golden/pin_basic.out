@@ -1,0 +1,10 @@
+[
+  {
+    "role": "user",
+    "content": "You are a test agent. Solve the task.\n---\n[8 steps elided]\n---\n[content]\nthought 10 about the state of things.\n\n[source]\nexecutive\n---\n[67 steps elided]\n---\n[extra]\nother value\n\na step with a literal thought FIELD plus another key\n---\n```bash\nfalse\n```\n\n[count]\n42\n\n[exit_code]\n1"
+  },
+  {
+    "role": "assistant",
+    "content": "the final answer."
+  }
+]
