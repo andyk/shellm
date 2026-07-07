@@ -148,6 +148,10 @@ response=$(printf '%s' "$full_message" | \
 step_type="thought"
 step_content="$response"
 case "$response" in
+    "idle"|"action: idle"|"action:idle")
+        step_type="idle"
+        step_content="idle"
+        ;;
     "action: "*)
         step_type="action"
         step_content="${response#action: }"

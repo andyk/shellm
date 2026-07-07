@@ -1,6 +1,9 @@
 *.swp
 .DS_Store
 .env
+__pycache__/
+.chatrc
+.harbor-jobs/
 .shelly/
 .memories/
 .skills/

@@ -49,9 +49,8 @@ done < <(_build_shellm_flags "$IDENTITY_DIR")
 
 
 printf '  thinker: %s...\n' "$THINKER_NAME" >&2
-thinker_response=$(_SHELLM_PARENT_TRAJ_ID="$TRAJ_ID" \
-    SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
-    shellm --env "$IDENTITY_NAME" --workdir "$run_dir" \
+thinker_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+    shellm --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
     "$thinker_message") || true
 

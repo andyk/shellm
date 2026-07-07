@@ -1,4 +1,4 @@
-use std::{env, io, mem, process::Stdio, time::Duration};
+use std::{env, io, mem, process::Stdio, time::{Duration, Instant}};
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
@@ -37,7 +37,10 @@ struct App {
     from: Option<String>,
     scroll_offset: usize,
     kill_ring: String,
-    history: Vec<String>,
+    chat_history: Vec<String>,
+    thinkers_history: Vec<String>,
+    traj_history: Vec<String>,
+    command_history: Vec<String>,
     history_idx: Option<usize>,
     stashed_input: String,
     mode: Mode,
@@ -45,6 +48,8 @@ struct App {
     cmd_scroll: usize,
     cmd_base: String,
     mouse_captured: bool,
+    quit_armed: Option<Instant>,
+    refresh_paused: bool,
 }
 
 impl App {
@@ -69,6 +74,55 @@ impl App {
             Mode::Chat => self.scroll_offset = self.scroll_offset.saturating_sub(n),
             _ => self.cmd_scroll = self.cmd_scroll.saturating_sub(n),
         }
+    }
+
+    /// History bucket for the current mode.
+    fn history(&self) -> &Vec<String> {
+        match self.mode {
+            Mode::Chat => &self.chat_history,
+            Mode::Thinkers => &self.thinkers_history,
+            Mode::Traj => &self.traj_history,
+            Mode::Command => &self.command_history,
+        }
+    }
+
+    fn history_mut(&mut self) -> &mut Vec<String> {
+        match self.mode {
+            Mode::Chat => &mut self.chat_history,
+            Mode::Thinkers => &mut self.thinkers_history,
+            Mode::Traj => &mut self.traj_history,
+            Mode::Command => &mut self.command_history,
+        }
+    }
+
+    fn history_prev(&mut self) {
+        if self.history().is_empty() {
+            return;
+        }
+        let idx = match self.history_idx {
+            None => {
+                self.stashed_input = self.input.clone();
+                self.history().len() - 1
+            }
+            Some(i) if i > 0 => i - 1,
+            Some(i) => i,
+        };
+        self.history_idx = Some(idx);
+        self.input = self.history()[idx].clone();
+        self.cursor = self.input.chars().count();
+    }
+
+    fn history_next(&mut self) {
+        let Some(idx) = self.history_idx else { return };
+        if idx + 1 < self.history().len() {
+            let next = idx + 1;
+            self.history_idx = Some(next);
+            self.input = self.history()[next].clone();
+        } else {
+            self.history_idx = None;
+            self.input = mem::take(&mut self.stashed_input);
+        }
+        self.cursor = self.input.chars().count();
     }
 }
 
@@ -269,6 +323,8 @@ fn help_text() -> Vec<String> {
         "Keys:".into(),
         "  Ctrl+C/D       Exit".into(),
         "  Shift+Enter    Newline in input".into(),
+        "  Up/Down        Command history (from top/bottom line)".into(),
+        "  Enter (empty)  Return to live view after a command (thinkers/traj)".into(),
         "  PageUp/Down    Scroll output".into(),
         "  Ctrl+G         Toggle mouse (scroll vs. text select)".into(),
         "  Option+click   Select text (iTerm2) without toggling".into(),
@@ -520,7 +576,10 @@ async fn run(
         from,
         scroll_offset: 0,
         kill_ring: String::new(),
-        history: Vec::new(),
+        chat_history: Vec::new(),
+        thinkers_history: Vec::new(),
+        traj_history: Vec::new(),
+        command_history: Vec::new(),
         history_idx: None,
         stashed_input: String::new(),
         mode: initial_mode,
@@ -528,6 +587,8 @@ async fn run(
         cmd_scroll: 0,
         cmd_base: String::new(),
         mouse_captured: true,
+        quit_armed: None,
+        refresh_paused: false,
     };
 
     let mut needs_clear = false;
@@ -543,6 +604,10 @@ async fn run(
 
         while let Ok(lines) = cmd_rx.try_recv() {
             app.cmd_output = lines;
+        }
+
+        if app.quit_armed.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
+            app.quit_armed = None;
         }
 
         // Force full redraw when chat messages change to avoid
@@ -565,8 +630,15 @@ async fn run(
                 }
             }
             if let Event::Key(key) = ev {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if app.quit_armed.is_some() {
+                        break;
+                    }
+                    app.quit_armed = Some(Instant::now());
+                    continue;
+                }
+                app.quit_armed = None;
                 match key.code {
-                    KeyCode::Char('c') | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Esc => break,
                     KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.mouse_captured = !app.mouse_captured;
@@ -582,14 +654,44 @@ async fn run(
                         app.cursor += 1;
                     }
                     KeyCode::Enter => {
-                        if !app.input.is_empty() {
+                        if app.input.is_empty() {
+                            // Empty Enter resumes the live view after a one-off command
+                            if app.refresh_paused {
+                                app.refresh_paused = false;
+                                app.cmd_scroll = 0;
+                                app.cmd_output = vec!["Loading...".into()];
+                                if let Some(h) = auto_refresh.take() {
+                                    h.abort();
+                                }
+                                auto_refresh = Some(match app.mode {
+                                    Mode::Thinkers => spawn_auto_refresh(
+                                        cmd_tx.clone(),
+                                        "thinkers".into(),
+                                        vec!["status".into()],
+                                        Duration::from_secs(2),
+                                    ),
+                                    _ => spawn_auto_refresh(
+                                        cmd_tx.clone(),
+                                        "traj".into(),
+                                        vec!["tail".into(), "-r".into(), "-n".into(), "50".into()],
+                                        Duration::from_secs(2),
+                                    ),
+                                });
+                            }
+                        } else {
                             let msg = mem::take(&mut app.input);
                             app.cursor = 0;
                             app.history_idx = None;
-                            app.history.push(msg.clone());
+                            let hist = app.history_mut();
+                            if hist.last() != Some(&msg) {
+                                hist.push(msg.clone());
+                            }
                             let trimmed = msg.trim();
 
                             // Slash command handling (available in all modes)
+                            if trimmed.starts_with('/') {
+                                app.refresh_paused = false;
+                            }
                             if trimmed == "/thinkers" {
                                 app.mode = Mode::Thinkers;
                                 app.cmd_output = vec!["Loading...".into()];
@@ -698,6 +800,7 @@ async fn run(
                                         if let Some(h) = auto_refresh.take() {
                                             h.abort();
                                         }
+                                        app.refresh_paused = true;
                                         let tx = cmd_tx.clone();
                                         let args_str = msg;
                                         tokio::spawn(async move {
@@ -710,6 +813,7 @@ async fn run(
                                         if let Some(h) = auto_refresh.take() {
                                             h.abort();
                                         }
+                                        app.refresh_paused = true;
                                         let tx = cmd_tx.clone();
                                         let args_str = msg;
                                         tokio::spawn(async move {
@@ -787,19 +891,9 @@ async fn run(
                         if cy > 0 {
                             // Move cursor up one display row
                             app.cursor = char_at_xy(&app.input, cx, cy - 1, inner_w);
-                        } else if !app.history.is_empty() {
+                        } else {
                             // At top line — cycle history
-                            let idx = match app.history_idx {
-                                None => {
-                                    app.stashed_input = app.input.clone();
-                                    app.history.len() - 1
-                                }
-                                Some(i) if i > 0 => i - 1,
-                                Some(i) => i,
-                            };
-                            app.history_idx = Some(idx);
-                            app.input = app.history[idx].clone();
-                            app.cursor = app.input.chars().count();
+                            app.history_prev();
                         }
                     }
                     KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -809,18 +903,9 @@ async fn run(
                         if cy + 1 < total {
                             // Move cursor down one display row
                             app.cursor = char_at_xy(&app.input, cx, cy + 1, inner_w);
-                        } else if let Some(idx) = app.history_idx {
+                        } else {
                             // At bottom line — cycle history
-                            if idx + 1 < app.history.len() {
-                                let next = idx + 1;
-                                app.history_idx = Some(next);
-                                app.input = app.history[next].clone();
-                                app.cursor = app.input.chars().count();
-                            } else {
-                                app.history_idx = None;
-                                app.input = mem::take(&mut app.stashed_input);
-                                app.cursor = app.input.chars().count();
-                            }
+                            app.history_next();
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -852,12 +937,14 @@ async fn run(
                         }
                     }
                     KeyCode::Up => {
-                        // Move cursor up one display row
+                        // Move cursor up one display row; recall history from the top row
                         let inner_w = terminal.size().map_or(78, |s| s.width.saturating_sub(2)) as usize;
                         if inner_w > 0 {
                             let (cx, cy) = cursor_xy(&app.input, app.cursor, inner_w);
                             if cy > 0 {
                                 app.cursor = char_at_xy(&app.input, cx, cy - 1, inner_w);
+                            } else {
+                                app.history_prev();
                             }
                         }
                     }
@@ -868,6 +955,8 @@ async fn run(
                             let total = wrap_input(&app.input, inner_w).len() as u16;
                             if cy + 1 < total {
                                 app.cursor = char_at_xy(&app.input, cx, cy + 1, inner_w);
+                            } else {
+                                app.history_next();
                             }
                         }
                     }
@@ -951,7 +1040,11 @@ fn draw(f: &mut Frame, app: &App) {
         .split(f.size());
 
     // Title bar — inverted (white on dark) full-width bar
-    let title_text = app.mode_title();
+    let title_text = if app.quit_armed.is_some() {
+        format!("{}— press ctrl+c again to quit ", app.mode_title())
+    } else {
+        app.mode_title()
+    };
     let bar_width = chunks[0].width as usize;
     let padded = format!("{:<width$}", title_text, width = bar_width);
     let title = Line::from(Span::styled(
@@ -1018,7 +1111,14 @@ fn draw(f: &mut Frame, app: &App) {
         0
     };
 
-    let input_text: Vec<Line> = wrapped.iter().map(|l| Line::from(l.as_str())).collect();
+    let input_text: Vec<Line> = if app.input.is_empty() && app.refresh_paused {
+        vec![Line::from(Span::styled(
+            "press enter to return to the live view",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        wrapped.iter().map(|l| Line::from(l.as_str())).collect()
+    };
     let input = Paragraph::new(input_text)
         .block(Block::default().borders(Borders::ALL).title(" > "))
         .scroll((input_scroll, 0));
