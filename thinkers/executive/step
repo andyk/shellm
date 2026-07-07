@@ -142,7 +142,14 @@ response=$(printf '%s' "$full_message" | \
     -s "Output only a single thought or action. No explanation, no commands, no preamble." \
     2>/dev/null) || true
 
-[[ -z "$response" ]] && { printf 'executive/step: empty response from shellm\n' >&2; exit 1; }
+# The executive is an infinite loop via trigger_self: it must ALWAYS append
+# something to the traj so the dispatcher re-fires.  Empty/duplicate responses
+# are degraded but still emit a thought to keep the loop alive.
+if [[ -z "$response" ]]; then
+    printf 'executive/step: empty response from llm — emitting placeholder\n' >&2
+    response="(executive received an empty response from the LLM; continuing)"
+    sleep 1   # brief backoff so transient API failures don't tight-loop
+fi
 
 # Determine step type and strip prefix from content
 step_type="thought"
@@ -162,16 +169,18 @@ case "$response" in
         ;;
 esac
 
-# Write to traj
+# Write to traj — always append (even duplicates) to keep trigger_self alive
 last_content=""
 if traj exists 2>/dev/null; then
     last_content=$(traj last --field content 2>/dev/null) || true
 fi
 
-if [[ "$last_content" != "$step_content" ]]; then
-    printf '{"type":"%s","content":%s,"source":"executive"}' \
-        "$step_type" "$(printf '%s' "$step_content" | jq -Rsa .)" \
-        | traj append >/dev/null
+if [[ "$response" == "$last_content" ]]; then
+    step_content="$step_content (repeat)"
 fi
+
+printf '{"type":"%s","content":%s,"source":"executive"}' \
+    "$step_type" "$(printf '%s' "$step_content" | jq -Rsa .)" \
+    | traj append >/dev/null
 
 printf '[%s] %s\n' "$step_type" "$step_content"
