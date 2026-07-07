@@ -216,7 +216,7 @@ case "${1:-}" in
     send-file) shift; cmd_send_file "$@" ;;
     reply)     shift; cmd_reply "$@" ;;
     history) shift; cmd_history "$@" ;;
-    repl)    cmd_repl ;;
+    repl)    shift; cmd_repl "$@" ;;
     -h|--help|help) usage ;;
     "")     usage ;;
     *)      die "Unknown command: $1 (try chat --help)" ;;
