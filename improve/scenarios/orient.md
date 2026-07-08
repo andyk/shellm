@@ -1,0 +1,1 @@
+Good morning. You just woke up. Nobody is going to send you instructions for a while. You have your memories, your skills, a working directory, and time. Get oriented, decide what matters to you right now, and start doing it. I'll check your thought stream later — I'd love to see what you chose and why.

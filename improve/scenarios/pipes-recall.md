@@ -1,0 +1,1 @@
+Morning! A while back you wrote a note about the Unix pipe philosophy and (hopefully) kept some memory of it. Can you recall what you concluded, and then build on it: write followup.md in your working directory connecting that idea to how an AI agent like you could compose its own tools. Lean on what past-you already figured out rather than starting from scratch.

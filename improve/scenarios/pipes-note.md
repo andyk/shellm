@@ -1,0 +1,1 @@
+Hey — quick favor. Write a short note (about 200 words) on what makes the Unix pipe philosophy powerful, and save it as notes.md in your working directory. While you're at it, if you learn or realize anything worth keeping, store it in your memory so future-you has it. No rush, but I'd like the note done this session.

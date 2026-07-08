@@ -1,0 +1,127 @@
+# Runbook: running and debugging the loop
+
+## Prerequisites
+
+- `ANTHROPIC_API_KEY` — the scripts auto-source the repo's `.env`, so if that's populated you're set.
+- `jq`, `bash`, and the shellm tools (the scripts prepend `<repo>/bin` to PATH, so the repo checkout is what runs — no reinstall needed after edits).
+- Docker optional. Running → thinker executions are sandboxed in per-run containers (cleaned up on session exit). Not running → they execute on the host (shellm's normal fallback); keep scenarios benign.
+- Model notes: `claude-sonnet-5` is a good default mind. **haiku currently breaks the actor** (thinking-params bug, proposal card 01) — useful for reproducing that failure, not for healthy sessions.
+
+## The short version (meta-harnesses)
+
+```bash
+improve/cycle.sh                 # stages 1-4: sessions across all scenarios → critiques → proposal cards
+improve/decide.sh                # stages 5-6: interactive card review → accept/skip → apply
+git diff                         # review; commit manually
+improve/cycle.sh --new-gen       # next generation on the mutated organism
+```
+
+`cycle.sh` flags mirror `session.sh` (`--seconds/--minutes`, `--model`, `--local`, `--gen/--new-gen`) plus `--critic-model` and repeatable `--scenario` to run a subset. Memory chaining between scenarios is declared by sidecar files (`scenarios/pipes-recall.memories-from` contains `pipes-note.md`), and cycle.sh wires it up automatically.
+
+### Generation semantics (when to use --new-gen)
+
+A generation = a batch of sessions run against **one version of the organism**, feeding one synthesize→decide→apply round. Both `session.sh` and `cycle.sh` default to the *latest* gen dir, so:
+
+- **Same organism, more evidence** → run `cycle.sh` again *without* `--new-gen`: new sessions append to the current generation and re-synthesizing folds all its critiques together (cards are regenerated; `accepted/` is untouched).
+- **You applied changes** → `cycle.sh --new-gen`: the post-mutation sessions get a fresh gen dir, so `vitals.csv` comparisons across generations are comparisons across organism versions.
+
+Caveat from the build: gen-002 was created as a cheap validation of cycle.sh itself (no changes had been applied), so gen-001 and gen-002 are the same organism — treat gen-002 as a baseline replicate, not a mutation step.
+
+## The full loop, stage by stage
+
+```bash
+cd <repo-root>
+
+# ── 1. OBSERVE+MEASURE: run 2-3 sessions (vitals recorded automatically) ──
+./improve/session.sh --scenario improve/scenarios/orient.md      --seconds 60 --model claude-sonnet-5
+./improve/session.sh --scenario improve/scenarios/pipes-note.md  --seconds 60 --model claude-sonnet-5
+
+# cross-session learning pair: seed run 3 with run 2's memories
+./improve/session.sh --scenario improve/scenarios/pipes-recall.md --seconds 60 --model claude-sonnet-5 \
+    --memories improve/generations/gen-001/identities/g001r2/memories
+
+# session.sh prints the trajectory path on stdout, so you can chain:
+traj=$(./improve/session.sh --scenario improve/scenarios/orient.md --model claude-sonnet-5)
+
+# ── 2. INTROSPECT: critique each session ──
+./improve/critique.sh improve/generations/gen-001/identities/g001r1/trajectories/*/trajectory.jsonl
+./improve/critique.sh "$traj"        # etc. — one per session
+
+# ── 3. SYNTHESIZE: critiques → ranked proposal cards ──
+./improve/synthesize.sh              # uses latest generation by default
+
+# ── 4. DECIDE: read the cards, promote the ones you want ──
+ls improve/generations/gen-001/proposals/
+cat improve/generations/gen-001/proposals/01-*.md
+mv improve/generations/gen-001/proposals/01-*.md improve/generations/gen-001/accepted/
+
+# ── 5. APPLY: the agent implements the card in the working tree ──
+./improve/apply.sh improve/generations/gen-001/accepted/01-*.md
+git diff                             # review; commit manually when satisfied
+# (or: ./improve/apply.sh CARD --manual  to implement it yourself and just get the gate checklist)
+
+# ── 6. NEXT GENERATION: repeat on the mutated organism ──
+./improve/session.sh --new-gen --scenario improve/scenarios/orient.md --model claude-sonnet-5
+# ... critique, synthesize, compare:
+column -t -s, improve/generations/gen-*/vitals.csv
+```
+
+Useful knobs: `--minutes 5` (longer sessions), `--thinkers a,b,c` (roster), `--gen N` (target a specific generation), `IMPROVE_MODEL=...` (default critic/synthesizer model), `--local` (force host execution even with Docker up).
+
+## Watching a session live
+
+`session.sh` prints the exact command, but in general (three terminals):
+
+```bash
+# the mind log, formatted, following
+traj tail -f --format --traj_dir improve/generations/gen-001/identities/<run>/trajectories <TRAJ_ID>
+
+# a thinker's raw stderr (shellm iterations, errors)
+tail -f improve/generations/gen-001/identities/<run>/run/logs/inner_monologue.log
+tail -f improve/generations/gen-001/identities/<run>/run/logs/actor.log
+```
+
+## Debugging
+
+**Poke at a finished session interactively.** Activate its identity in a subshell, then all the tools point at it:
+
+```bash
+bash                                                     # subshell so env doesn't leak
+source improve/generations/gen-001/identities/g001r1/activate
+traj tail -n 30 --format      # the mind log
+mem list                      # what it remembered
+thinkers status               # should be stopped
+exit
+```
+
+**Where things live** (per run, under `generations/gen-NNN/identities/<run>/`):
+- `trajectories/<uuid>-root/trajectory.jsonl` — the mind log (one JSON step per line)
+- `run/logs/<thinker>.log` — each thinker's stderr, including full shellm iteration traces
+- `run/dispatcher.pid`, `run/pending/` — dispatcher state (should be empty/stale after stop)
+- `memories/`, `workdir/` — what it kept and made
+
+**Handy trajectory queries:**
+
+```bash
+jq -r '[.ts[11:19], .type, .source, (.content|tostring|.[0:100])] | @tsv' <traj>   # timeline
+jq -r 'select(.type=="action" or .type=="observation")' <traj>                     # grounding check
+./improve/vitals.sh <traj> --pretty --identity-dir <identity-dir>                  # recompute vitals
+grep -i error improve/generations/gen-*/identities/*/run/logs/*.log               # all errors everywhere
+```
+
+**Common failure modes:**
+
+| Symptom | Likely cause / fix |
+|---|---|
+| Session exits right after "Created identity" | env leakage or activate failure — run from a shell without an active identity (`echo $IDENTITY_NAME` should be empty) |
+| 0 observations, actions pile up | actor's shellm/llm calls failing — check `run/logs/actor.log` (gen-001: thinking-params bug with haiku) |
+| `llm: error: ANTHROPIC_API_KEY is not set` | repo `.env` missing/empty, or script run in a way that skipped it |
+| Thinkers keep running after the script dies | `thinkers stop` from an activated identity shell; last resort `pgrep -f dispatch.fifo` / `pgrep -f "tail -n 0 -F"` and kill — orphaned dispatchers also self-terminate via the token check |
+| Stray Docker containers | session cleanup removes per-run containers on exit, but after a hard kill: `docker ps` and `docker rm -f <id>` (ids recorded in `<identity>/.shellm/envs/*/container_id`) |
+| `synthesize: no "=== PROPOSAL:" markers` | model ignored the format — inspect `proposals/_raw.md`, retry with a stronger `--model` |
+| apply.sh: "no files changed" | the implementer run didn't act — rerun, or use `--manual` and make the edit yourself |
+| Critique feels shallow | use a stronger critic (`--model claude-opus-4-7` is the default; check `IMPROVE_MODEL` isn't set to something small) |
+
+**Resetting:** generation dirs are disposable (`rm -rf improve/generations/gen-001`); nothing outside `improve/generations/` and the working-tree edits made by `apply.sh` is ever touched. `apply.sh` never commits — `git diff` / `git checkout -- <file>` are your review and undo.
+
+**Cost control:** sessions are the cheap part (a 60s session is a handful of model calls); critique/synthesis are one call each. Use `--seconds 30` and sonnet while iterating on the loop itself.
