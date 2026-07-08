@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # improve/decide.sh — Decide stage: review proposal cards one at a time,
-# accept or skip each, then optionally run apply.sh on the accepted ones.
+# accept or skip each, then hand the accepted ones off to Claude Code via
+# handoff.sh (which prints the bootstrap command to run).
 #
 # This is the deliberately-human stage of the loop. Interactive by design.
 
@@ -12,8 +13,7 @@ Usage: improve/decide.sh [options]
 
 Options:
   --gen DIR          Generation directory (default: latest improve/generations/gen-*)
-  --apply-model M    Model for apply.sh runs (default: apply.sh default)
-  --no-apply         Review and sort cards only; skip the apply step
+  --no-handoff       Review and sort cards only; skip generating the handoff prompt
   -h, --help         Show this help
 USAGE
     exit "${1:-0}"
@@ -25,16 +25,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMPROVE_DIR="$REPO_ROOT/improve"
 
 GEN_DIR=""
-APPLY_MODEL=""
-NO_APPLY=0
+NO_HANDOFF=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gen)         GEN_DIR="${2:?--gen requires a directory}"; shift 2 ;;
-        --apply-model) APPLY_MODEL="${2:?--apply-model requires a value}"; shift 2 ;;
-        --no-apply)    NO_APPLY=1; shift ;;
-        -h|--help)     usage ;;
-        *)             die "unknown option: $1" ;;
+        --gen)        GEN_DIR="${2:?--gen requires a directory}"; shift 2 ;;
+        --no-handoff) NO_HANDOFF=1; shift ;;
+        -h|--help)    usage ;;
+        *)            die "unknown option: $1" ;;
     esac
 done
 
@@ -88,29 +86,17 @@ printf '\n════════ decision summary ════════\n'
 printf 'Accepted: %d of %d card(s)\n' "${#accepted[@]}" "$total"
 [[ ${#accepted[@]} -gt 0 ]] || exit 0
 
-if [[ "$NO_APPLY" -eq 1 ]]; then
-    printf 'Apply later with:\n'
-    for card in "${accepted[@]}"; do
-        printf '  improve/apply.sh %s\n' "$card"
-    done
+if [[ "$NO_HANDOFF" -eq 1 ]]; then
+    printf 'Generate the implementation handoff later with:\n'
+    printf '  improve/handoff.sh --gen %s\n' "$GEN_DIR"
     exit 0
 fi
 
-apply_args=()
-if [[ -n "$APPLY_MODEL" ]]; then apply_args+=(--model "$APPLY_MODEL"); fi
+# Bundle everything currently in accepted/ (including cards accepted in
+# earlier decide runs) into the Claude Code handoff prompt.
+printf '\n'
+"$IMPROVE_DIR/handoff.sh" --gen "$GEN_DIR" >/dev/null
 
-for card in "${accepted[@]}"; do
-    printf '\nApply %s now? [y/N] > ' "$(basename "$card")"
-    read -r ans < /dev/tty
-    case "$ans" in
-        y|Y)
-            "$IMPROVE_DIR/apply.sh" "$card" "${apply_args[@]+"${apply_args[@]}"}" \
-                || printf 'decide: apply failed for %s — fix or revert before continuing\n' "$(basename "$card")" >&2
-            ;;
-        *) printf '  → deferred (apply later: improve/apply.sh %s)\n' "$card" ;;
-    esac
-done
-
-printf '\nDone. Review the working tree with: git diff\n'
-printf 'Commit manually when satisfied, then start the next generation:\n'
-printf '  improve/cycle.sh --new-gen\n'
+printf 'After Claude Code finishes: review with `git diff`, commit manually,\n' >&2
+printf 'paste its per-card report into improve/log.md, then:\n' >&2
+printf '  improve/cycle.sh --new-gen\n' >&2

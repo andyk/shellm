@@ -28,11 +28,14 @@ A recursive self-improvement loop for the shellm organism: run the agent autonom
                               proposal cards, one component per card
                               (prompts/synthesizer.md).
 5. decide      human          mv chosen cards from proposals/ to accepted/.
-6. apply       apply.sh       a shellm run implements the card in the working
-                              tree (agent modifies itself). Gates: bash -n,
-                              shellcheck (if installed), test_context.sh if
-                              bin/context touched. NO git automation — human
-                              reviews the diff and commits.
+6. apply       handoff.sh     accepted cards → PROMPT.md + a claude command.
+                              Claude Code independently verifies each card
+                              against the codebase (IMPLEMENT/REVISE/REJECT),
+                              implements survivors, runs gates (bash -n,
+                              shellcheck, test_context.sh). NO git automation
+                              — human reviews the diff and commits.
+                              (apply.sh: experimental shellm-self-modifies
+                              alternative, not the default path.)
 ```
 
 Artifacts per generation live in `generations/gen-NNN/`: `identities/<run>/` (trajectories, memories, thinker logs), `sessions.csv`, `vitals.csv`, `critiques/`, `proposals/`, `accepted/`.

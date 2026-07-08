@@ -25,8 +25,12 @@ North star: a more human-like agent (24/7 on-rails, self-set goals, learning, le
 # Stages 1-4: run the whole scenario battery, critique each session, synthesize cards
 improve/cycle.sh
 
-# Stages 5-6: review each card interactively, accept/skip, apply the accepted ones
+# Stage 5: review each card interactively, accept/skip. Prints a claude command.
 improve/decide.sh
+
+# Stage 6: run the printed command — Claude Code independently verifies each
+# card against the codebase, implements the survivors, runs the gates:
+cd <repo> && claude "$(cat improve/generations/gen-001/accepted/PROMPT.md)"
 
 # Review, commit manually, then iterate on the mutated organism:
 git diff && git add -p ...
@@ -40,8 +44,10 @@ improve/session.sh --scenario improve/scenarios/orient.md      # observe+measure
 improve/critique.sh <trajectory.jsonl>                         # introspect (one session)
 improve/synthesize.sh                                          # critiques → proposal cards
 mv .../proposals/01-*.md .../accepted/                         # decide, by hand
-improve/apply.sh .../accepted/01-*.md                          # apply one card
+improve/handoff.sh                                             # bundle accepted/ → PROMPT.md + claude command
 ```
+
+(`apply.sh` — the agent implementing cards on itself via shellm — still exists as an experimental alternative, but the Claude Code handoff is the default: fresh eyes verify the card before any edit.)
 
 Useful flags:
 - `session.sh --minutes 2 --model claude-haiku-4-5-20251001` — longer session, cheaper mind
@@ -55,7 +61,8 @@ Useful flags:
 ```
 improve/
   cycle.sh      meta-harness: stages 1-4 (sessions → critiques → proposals)
-  decide.sh     meta-harness: stages 5-6 (interactive card review → apply)
+  decide.sh     meta-harness: stage 5 (interactive card review → handoff command)
+  handoff.sh    stage 6: accepted cards → PROMPT.md + claude bootstrap command
   session.sh vitals.sh critique.sh synthesize.sh apply.sh
   prompts/      critic.md, synthesizer.md
   scenarios/    seed stimuli ("training instances"); <name>.memories-from
