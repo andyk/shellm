@@ -100,3 +100,14 @@ Optionally trim `improve/log.md` back to its header. Nothing else is touched by 
 
 * Lilian Weng - Harness Engineering for Self-Improvement. https://lilianweng.github.io/posts/2026-07-04-harness/
 * Agrawal, A. et al. “GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning.” arXiv preprint. https://arxiv.org/abs/2507.19457
+
+## Cheatsheet
+
+```bash
+improve/cycle.sh
+improve/decide.sh
+
+# Review, commit manually, then iterate on the mutated organism
+
+improve/cycle.sh --new-gen
+```
