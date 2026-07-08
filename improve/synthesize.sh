@@ -121,6 +121,5 @@ fi
 
 printf '▶ %s proposal card(s):\n' "$count" >&2
 ls -1 "$PROPOSALS_DIR" | grep -v '^_' >&2
-printf '\nReview the cards, then move the ones to act on:\n' >&2
-printf '  mv %s/<card>.md %s/accepted/\n' "$PROPOSALS_DIR" "$GEN_DIR" >&2
-printf '  improve/apply.sh %s/accepted/<card>.md\n' "$GEN_DIR" >&2
+printf '\nReview and accept/skip them interactively (records to the decision ledger):\n' >&2
+printf '  improve/decide.sh\n' >&2

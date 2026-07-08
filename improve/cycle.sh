@@ -161,7 +161,5 @@ printf '\n═══ cycle complete: %s ═══\n' "$(basename "$GEN_DIR")" >&2
 printf 'Sessions:  %d/%d succeeded\n' "${#TRAJS[@]}" "$total" >&2
 printf 'Critiques: %d\n' "$CRITIQUES" >&2
 printf 'Vitals:    %s/vitals.csv\n' "$GEN_DIR" >&2
-printf '\nYour turn (decide + apply):\n' >&2
-printf '  cat %s/proposals/*.md\n' "$GEN_DIR" >&2
-printf '  mv %s/proposals/<card>.md %s/accepted/\n' "$GEN_DIR" "$GEN_DIR" >&2
-printf '  improve/apply.sh %s/accepted/<card>.md\n' "$GEN_DIR" >&2
+printf '\nYour turn — review the cards and generate the implementation handoff:\n' >&2
+printf '  improve/decide.sh\n' >&2
