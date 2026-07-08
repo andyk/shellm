@@ -39,6 +39,25 @@ _kill_tree() {
     kill -"$sig" "$pid" 2>/dev/null || true
 }
 
+# Kill leaked `tail -n 0 -F <traj_file>` feeders by argv pattern. PID-tree
+# kills race against pipeline-wrapper death (orphaned stages reparent to init
+# and escape pgrep -P), so this sweeps by the traj-file list written at
+# dispatcher start. Takes an optional pre-read list (snapshot taken before
+# the dispatcher's own trap cleanup removes the file). Caveat: if another
+# identity's dispatcher tails the same file, its feeder is killed too —
+# acceptable while trajectories are per-identity.
+_kill_traj_tails() {
+    local run_dir="$1" list="${2:-}"
+    if [[ -z "$list" && -f "$run_dir/traj_files" ]]; then
+        list=$(cat "$run_dir/traj_files" 2>/dev/null) || true
+    fi
+    [[ -z "$list" ]] && return 0
+    local tf
+    while IFS= read -r tf; do
+        [[ -n "$tf" ]] && pkill -f "tail -n 0 -F $tf" 2>/dev/null || true
+    done <<< "$list"
+}
+
 debug() {
     if [[ "$VERBOSE" -eq 1 ]]; then
         printf '[thinkers debug] %s\n' "$*" >&2
@@ -447,6 +466,13 @@ _cleanup_dispatcher() {
         rm -f "$tail_pids_file"
     fi
 
+    # Belt-and-suspenders: the PID-tree kill above races against wrapper
+    # death — once the pipeline wrapper dies, its tail/tagger stages reparent
+    # to init and escape pgrep -P, leaking a tail -F per trajectory. The
+    # tail's argv embeds the traj file path, so kill by exact pattern; the
+    # tagger stage then exits on EOF from the dead tail.
+    _kill_traj_tails "$run_dir"
+
     # Remove FIFO
     rm -f "$fifo"
 
@@ -460,6 +486,13 @@ _cleanup_dispatcher() {
 _stop_dispatcher() {
     local run_dir="$IDENTITY_DIR/run"
     local pid_file="$run_dir/dispatcher.pid"
+
+    # Snapshot the traj-file list now: the dispatcher's trap cleanup removes
+    # run/traj_files, and we need it below to sweep leaked tail feeders.
+    local traj_files_snapshot=""
+    if [[ -f "$run_dir/traj_files" ]]; then
+        traj_files_snapshot=$(cat "$run_dir/traj_files" 2>/dev/null) || true
+    fi
 
     # Stop dispatcher process
     if [[ -f "$pid_file" ]]; then
@@ -494,6 +527,9 @@ _stop_dispatcher() {
         done < "$tail_pids_file"
         rm -f "$tail_pids_file"
     fi
+
+    # Sweep tail feeders that escaped the PID-tree kill (see _kill_traj_tails)
+    _kill_traj_tails "$run_dir" "$traj_files_snapshot"
 
     # Clean up FIFO, sub_map, traj_files, pending-trigger flags, and ownership
     # token (removing the token also makes any stray dispatcher instance exit
