@@ -20,6 +20,7 @@ The optimization direction is a **more human-like agent** (24/7 on-rails operati
 3. **Smallest change that could work.** Prefer a prompt edit over a script change, a script change over a harness change — unless the evidence clearly points at the harness.
 4. **Preserve what worked.** Check the critiques' "What worked" sections; note in the card if a change risks any of it.
 5. At most 5 cards, ranked by (expected impact on the sub-goals) / (risk). It is fine to produce fewer, or even one, if the evidence only supports that.
+6. **Continuity — check the decision ledger before proposing.** You will be given the ledger of prior generations' decisions. Do not re-propose a fix already marked IMPLEMENTED or REVISED. If the evidence shows a prior fix under-delivered or overshot, propose a *tuning* of it — never a revert — unless the critiques show it made things clearly worse, and say so explicitly. Do not resurrect a SKIPPED or REJECTED card unless this generation produced materially new evidence; if you do, cite that new evidence. Every card must carry a `**Relates to:**` line: either the ledger entry it builds on/tunes, or `new`.
 
 ## Output format
 
@@ -32,6 +33,7 @@ Output ONLY proposal cards in this exact format (the `=== PROPOSAL: slug ===` li
 **Target component:** path/to/file
 **Risk:** low | medium | high
 **Effort:** small | medium | large
+**Relates to:** <ledger entry this builds on or tunes> | new
 
 ## Problem
 What is going wrong, in 2-4 sentences.

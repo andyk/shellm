@@ -56,6 +56,19 @@ shopt -u nullglob
 
 mkdir -p "$GEN_DIR/accepted"
 
+GEN_NAME=$(basename "$GEN_DIR")
+LEDGER="$IMPROVE_DIR/decisions.md"
+
+# Append a decision line to the committed ledger (anti-whiplash memory).
+record_decision() {
+    local verdict="$1" card="$2" note="$3"
+    local slug target
+    slug=$(basename "$card" .md)
+    target=$(grep -m1 '^\*\*Target component:\*\*' "$card" | sed 's/^\*\*Target component:\*\* *//') || true
+    printf -- '- %s %s %s %s → %s — %s\n' \
+        "$(date +%Y-%m-%d)" "$GEN_NAME" "$verdict" "$slug" "${target:-unknown}" "$note" >> "$LEDGER"
+}
+
 accepted=()
 total=${#cards[@]}
 n=0
@@ -71,11 +84,17 @@ for card in "${cards[@]}"; do
         read -r ans < /dev/tty
         case "$ans" in
             a|A)
+                record_decision ACCEPTED "$card" "pending implementation"
                 mv "$card" "$GEN_DIR/accepted/"
                 accepted+=("$GEN_DIR/accepted/$(basename "$card")")
                 printf '  → accepted\n'
                 break ;;
-            s|S) printf '  → skipped (stays in proposals/)\n'; break ;;
+            s|S)
+                printf '  optional one-line reason (enter to skip): '
+                read -r why < /dev/tty
+                record_decision SKIPPED "$card" "${why:-no reason given}"
+                printf '  → skipped (stays in proposals/)\n'
+                break ;;
             q|Q) printf '  → quitting review\n'; break 2 ;;
             *)   printf '  (a, s, or q)\n' ;;
         esac

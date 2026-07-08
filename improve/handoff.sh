@@ -82,16 +82,19 @@ Give each card a verdict: IMPLEMENT (as proposed), REVISE (implement the intent,
 ## Step 2 — Implement the survivors
 
 - One card at a time; keep each card's diff minimal and in the style of the surrounding code.
-- Never touch improve/ or tests/ unless a card explicitly targets them (none should — reject any that do).
+- Never touch improve/ or tests/ unless a card explicitly targets them (none should — reject any that do). Exception: the decision ledger update in Step 4.
+- Check $REPO_ROOT/improve/decisions.md before implementing: if a card duplicates or contradicts an earlier IMPLEMENTED/REVISED entry, prefer REJECT (duplicate) or a tuning REVISE over reverting prior work.
 - Do NOT run any git write commands (no add/commit/branch/checkout). The human reviews the diff and commits.
 
 ## Step 3 — Gates
 
 After implementing, for every file you changed: run \`bash -n\` on shell scripts, \`shellcheck -S warning\` if shellcheck is installed, and \`tests/test_context.sh\` if you touched bin/context.
 
-## Step 4 — Report
+## Step 4 — Record and report
 
-Finish with a per-card summary: verdict, files changed, gate results, and anything you noticed that the next loop generation should know (this gets pasted into improve/log.md).
+Update the decision ledger at $REPO_ROOT/improve/decisions.md: each card below already has an entry ending in "pending implementation" — replace that suffix with your verdict, formatted as \`IMPLEMENTED: <one-line summary>\`, \`REVISED: <what you did instead and why>\`, or \`REJECTED: <why the card was wrong>\`. (This ledger is the only improve/ file you may edit; it is what keeps future generations from re-proposing or reverting this work.)
+
+Then finish with a per-card summary: verdict, files changed, gate results, and anything you noticed that the next loop generation should know (this gets pasted into improve/log.md).
 
 ---
 

@@ -99,6 +99,14 @@ materials() {
         printf '## Seed scenario\n\n(unknown — infer from the trajectory'"'"'s message step)\n\n'
     fi
 
+    if [[ -f "$IMPROVE_DIR/decisions.md" ]]; then
+        local ledger_tail
+        ledger_tail=$(awk '/^## Entries/{found=1; next} found' "$IMPROVE_DIR/decisions.md" | tail -15)
+        if [[ -n "$ledger_tail" ]]; then
+            printf '## Recently applied fixes (decision ledger)\n\n```\n%s\n```\n\n' "$ledger_tail"
+        fi
+    fi
+
     printf '## Vitals (mechanical)\n\n```\n'
     "$IMPROVE_DIR/vitals.sh" "$TRAJ_FILE" --label "$LABEL" --pretty \
         ${IDENTITY_HOME:+--identity-dir "$IDENTITY_HOME"} 2>/dev/null \

@@ -125,7 +125,8 @@ grep -i error improve/generations/gen-*/identities/*/run/logs/*.log             
 | Stray Docker containers | session cleanup removes per-run containers on exit, but after a hard kill: `docker ps` and `docker rm -f <id>` (ids recorded in `<identity>/.shellm/envs/*/container_id`) |
 | `synthesize: no "=== PROPOSAL:" markers` | model ignored the format — inspect `proposals/_raw.md`, retry with a stronger `--model` |
 | handoff.sh: "no accepted cards" | nothing in `<gen>/accepted/` — run decide.sh (or `mv` cards there) first |
-| Claude Code rejects a card | good — that's the independent verification working; note the rejection in log.md so the next synthesis learns |
+| Claude Code rejects a card | good — that's the independent verification working; its verdict lands in decisions.md, which the next synthesis reads |
+| Synthesizer re-proposes an old fix or a revert | check improve/decisions.md — entries missing or verdicts never updated after a handoff break the continuity loop |
 | Critique feels shallow | use a stronger critic (`--model claude-opus-4-7` is the default; check `IMPROVE_MODEL` isn't set to something small) |
 
 **Resetting:** generation dirs are disposable (`rm -rf improve/generations/gen-001`); nothing outside `improve/generations/` and the working-tree edits made by `apply.sh` is ever touched. `apply.sh` never commits — `git diff` / `git checkout -- <file>` are your review and undo.

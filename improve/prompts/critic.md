@@ -26,6 +26,8 @@ Assess each dimension. Every issue you raise MUST cite evidence: quote the step 
 5. **Legibility** — Does the mind log read as a coherent first-person narrative? Flag: robotic or templated phrasing, thoughts that are actually hidden commands, confusing interleaving.
 6. **Mechanical defects** — Dispatch problems (thinker triggered when it shouldn't be, or not triggered when it should), duplicate replies, errors in thinker logs, shellm execution failures, watchdog kills, malformed JSON steps, prompt/tool friction visible in the logs.
 
+If you are given a "Recently applied fixes" ledger, also do **credit assignment**: for each recent IMPLEMENTED/REVISED fix whose effect this session could plausibly exercise, say whether the session shows it working, not working, or overshooting (with evidence). Do not re-flag a symptom as novel if the ledger shows it was just fixed — instead assess whether the fix took.
+
 ## Output format (markdown)
 
 ```
@@ -43,6 +45,9 @@ Assess each dimension. Every issue you raise MUST cite evidence: quote the step 
 
 ## What worked
 Bullet list of behaviors worth preserving (so fixes don't regress them).
+
+## Fix check
+(only if a recent-fixes ledger was provided) One line per plausibly-exercised fix: working / not working / overshooting, with evidence.
 
 ## Top issues (ranked)
 1. <title> — <component suspected>

@@ -64,6 +64,11 @@ improve/
   decide.sh     meta-harness: stage 5 (interactive card review → handoff command)
   handoff.sh    stage 6: accepted cards → PROMPT.md + claude bootstrap command
   session.sh vitals.sh critique.sh synthesize.sh apply.sh
+  decisions.md  committed decision ledger: every reviewed card + its fate
+                (accepted/skipped, then the verifier's IMPLEMENTED/REVISED/
+                REJECTED verdict). Fed back into critique + synthesis as
+                anti-whiplash memory: no re-proposing applied fixes, no
+                reverts on thin evidence, no resurrecting declined cards.
   prompts/      critic.md, synthesizer.md
   scenarios/    seed stimuli ("training instances"); <name>.memories-from
                 sidecars chain a scenario onto an earlier one's memories

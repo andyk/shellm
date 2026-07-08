@@ -65,6 +65,16 @@ materials() {
     ls -1 "$REPO_ROOT/skills" 2>/dev/null || true
     printf '```\n\nAlso mutable: bin/identity _seed_thoughts() (newborn seed thoughts).\n\n'
 
+    if [[ -f "$IMPROVE_DIR/decisions.md" ]]; then
+        printf '# Decision ledger (what prior generations proposed, and what became of it)\n\n'
+        printf 'Recent entries, oldest first:\n\n```\n'
+        awk '/^## Entries/{found=1; next} found' "$IMPROVE_DIR/decisions.md" | tail -40
+        printf '```\n\n'
+        printf 'Recent repo commits (fixes may have landed under these):\n\n```\n'
+        (cd "$REPO_ROOT" && git log --oneline -15 2>/dev/null) || true
+        printf '```\n\n'
+    fi
+
     if [[ -f "$GEN_DIR/vitals.csv" ]]; then
         printf '# Vitals for this generation\n\n```csv\n'
         cat "$GEN_DIR/vitals.csv"

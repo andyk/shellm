@@ -55,4 +55,4 @@ Artifacts per generation live in `generations/gen-NNN/`: `identities/<run>/` (tr
 - Human decides what gets applied, and separately what gets committed. No git write automation anywhere.
 - Fresh identity per session run; sessions don't contaminate each other. Cross-session memory continuity is opt-in via `session.sh --memories <prior-run>/memories`.
 
-See also: [goals.md](goals.md), [next-steps.md](next-steps.md), [runbook.md](runbook.md).
+See also: [goals.md](goals.md), [next-steps.md](next-steps.md), [runbook.md](runbook.md), [session-context.md](session-context.md) (decision trail + state for bootstrapping a fresh collaborator).
