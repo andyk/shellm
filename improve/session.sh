@@ -120,6 +120,9 @@ if [[ "$LOCAL_ENV" -eq 1 ]]; then export SHELLM_THINKER_ENV="local"; fi
 # --- Cleanup on exit: stop thinkers, remove session Docker containers ------
 cleanup() {
     thinkers stop >/dev/null 2>&1 || true
+    # thinkers stop currently leaks the trajectory tail feeders (see log.md);
+    # ours are precisely identifiable by this identity's traj dir.
+    pkill -f "tail -n 0 -F $TRAJ_DIR" 2>/dev/null || true
     if command -v docker >/dev/null 2>&1 && [[ -d "${SHELLM_ENVS_DIR:-}" ]]; then
         local env_dir cid
         for env_dir in "$SHELLM_ENVS_DIR"/*/; do
