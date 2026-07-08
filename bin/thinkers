@@ -155,6 +155,20 @@ _start_dispatcher() {
     rm -f "$fifo"
     mkfifo "$fifo"
 
+    # Fresh pending-trigger flags (steps that arrived while a thinker was busy)
+    rm -rf "$run_dir/pending"
+    mkdir -p "$run_dir/pending"
+
+    # Ownership token: this instance owns the dispatcher role only while
+    # dispatcher.token still holds its token. A newer start overwrites the
+    # token (and a stop removes it); the old instance notices on its next
+    # heartbeat tick, cleans up its tails, and exits. This makes orphaned
+    # dispatcher instances — which would double-dispatch every step —
+    # self-terminating.
+    local dispatcher_token
+    dispatcher_token="$(date +%s).$$.$RANDOM"
+    printf '%s' "$dispatcher_token" > "$run_dir/dispatcher.token"
+
     # Build subscription map: thinker_name -> [traj_file, types_pattern, trigger_self]
     # We store this as lines: THINKER_NAME\tTRAJ_FILE\tTYPES_REGEX\tTRIGGER_SELF
     local sub_map=""
@@ -220,19 +234,36 @@ _start_dispatcher() {
         trap '_cleanup_dispatcher' EXIT
         trap '_cleanup_dispatcher; exit 130' INT TERM
 
-        # Start tail -F for each unique traj file, tagged with traj path
+        # Start tail -F for each unique traj file, tagged with traj path.
+        # Track our own tail PIDs separately from the shared tail_pids file:
+        # if we lose dispatcher ownership we must kill only OUR tails and
+        # leave the new owner's runtime files alone.
         printf '' > "$tail_pids_file"
+        _my_tail_pids=""
         local _traj_file
         while IFS= read -r _traj_file; do
             [[ -z "$_traj_file" ]] && continue
             [[ -f "$_traj_file" ]] || continue
 
-            # Tag each line with the traj file path
-            tail -n 0 -F "$_traj_file" 2>/dev/null | while IFS= read -r line; do
-                printf '%s\t%s\n' "$_traj_file" "$line"
-            done > "$fifo" &
+            # Tag each line with the traj file path. Wrapped in an explicit
+            # subshell so $! owns the WHOLE pipeline: tail is then a child of
+            # $! and _kill_tree reaps it. (Killing a bare pipeline's $! only
+            # kills the last stage — the tail survives and leaks.)
+            (
+                tail -n 0 -F "$_traj_file" 2>/dev/null | while IFS= read -r line; do
+                    printf '%s\t%s\n' "$_traj_file" "$line"
+                done > "$fifo"
+            ) &
             printf '%s\n' "$!" >> "$tail_pids_file"
+            _my_tail_pids="${_my_tail_pids}${_my_tail_pids:+ }$!"
         done < "$run_dir/traj_files"
+
+        # Ticker: heartbeat line every second so pending re-triggers fire even
+        # when the trajectory is quiet. Short line => atomic FIFO write, so it
+        # cannot interleave with (much longer) tagged step lines.
+        while :; do printf 'TICK\n'; sleep 1; done > "$fifo" &
+        printf '%s\n' "$!" >> "$tail_pids_file"
+        _my_tail_pids="${_my_tail_pids}${_my_tail_pids:+ }$!"
 
         # Track thinker step PIDs as "name:pid" pairs (space-separated, bash 3.2 compat)
         _step_entries=""
@@ -264,9 +295,71 @@ _start_dispatcher() {
             return 1
         }
 
+        # Launch a thinker's step in the background with the given step JSON
+        _dispatch_step() {
+            local _dname="$1" _djson="$2"
+            local _dscript="$THINKERS_DIR/$_dname/step"
+            local _dlog="$run_dir/logs/$_dname.log"
+            (
+                printf '%s' "$_djson" | "$_dscript"
+            ) >> "$_dlog" 2>&1 &
+            _step_entries="${_step_entries}${_step_entries:+ }${_dname}:$!"
+            printf '%s %s\n' "$!" "$_dname" >> "$run_dir/step_pids"
+        }
+
+        # Fire pending re-triggers for thinkers that have freed up.
+        # run/pending/<name>.<type> holds the JSON of the last step that
+        # matched <name> while it was busy (last-writer-wins per type).
+        _fire_pending() {
+            local _pfile _pbase _pname _ptype _pjson _pactive
+            for _pfile in "$run_dir/pending"/*; do
+                [[ -f "$_pfile" ]] || continue
+                _pbase=$(basename "$_pfile")
+                _ptype="${_pbase##*.}"
+                _pname="${_pbase%.*}"
+                # Thinker no longer active: discard the flag
+                if ! grep -qx "$_pname" "$run_dir/active_thinkers" 2>/dev/null; then
+                    rm -f "$_pfile"
+                    continue
+                fi
+                # Still busy: leave the flag for a later tick
+                if _thinker_busy "$_pname"; then continue; fi
+                # At global cap: defer to a later tick
+                _pactive=$(_count_active_steps)
+                if [[ "$_pactive" -ge "$THINKERS_MAX_CONCURRENT" ]]; then return 0; fi
+                _pjson=$(cat "$_pfile")
+                rm -f "$_pfile"
+                printf '[dispatcher]   fire pending -> %s (type=%s, active=%s)\n' "$_pname" "$_ptype" "$_pactive" >&2
+                _dispatch_step "$_pname" "$_pjson"
+            done
+        }
+
         # Main dispatch loop: read from FIFO
         while IFS=$'\t' read -r _traj_file _step_json; do
+            # Ticker heartbeat: verify we still own the dispatcher role,
+            # then fire any pending re-triggers
+            if [[ "$_traj_file" == "TICK" ]]; then
+                if [[ "$(cat "$run_dir/dispatcher.token" 2>/dev/null)" != "$dispatcher_token" ]]; then
+                    printf '[dispatcher] ownership lost (newer start or stop) — exiting\n' >&2
+                    # Kill only OUR tails/ticker (whole trees — a bare kill
+                    # leaves the tail stage of the pipeline alive); the shared
+                    # runtime files (fifo, sub_map, tail_pids, pending) belong
+                    # to the new owner now — leave them untouched.
+                    trap - EXIT INT TERM
+                    local _mtp
+                    for _mtp in $_my_tail_pids; do
+                        _kill_tree "$_mtp" TERM
+                    done
+                    exit 0
+                fi
+                _fire_pending
+                continue
+            fi
             if [[ -z "$_step_json" ]]; then continue; fi
+
+            # Fire pending re-triggers first so a step flagged while its
+            # thinker was busy is delivered before this newer step
+            _fire_pending
 
             # Parse step
             _step_type=$(printf '%s' "$_step_json" | jq -r '.type // empty' 2>/dev/null) || continue
@@ -306,9 +399,16 @@ _start_dispatcher() {
                     continue
                 fi
 
-                # Per-thinker concurrency: skip if this thinker already has a step running
+                # Per-thinker concurrency: thinker busy => set a pending-trigger
+                # flag (last-writer-wins per type) so the dispatcher re-fires it
+                # with this step once it frees up
                 if _thinker_busy "$_name"; then
-                    printf '[dispatcher]   skip %s (already running)\n' "$_name" >&2
+                    _pend_file="$run_dir/pending/${_name}.${_step_type}"
+                    if [[ -f "$_pend_file" ]]; then
+                        printf '[dispatcher]   pending %s.%s superseded (last-wins)\n' "$_name" "$_step_type" >&2
+                    fi
+                    printf '%s' "$_step_json" > "$_pend_file"
+                    printf '[dispatcher]   pending -> %s (type=%s)\n' "$_name" "$_step_type" >&2
                     continue
                 fi
 
@@ -322,14 +422,8 @@ _start_dispatcher() {
                 done
 
                 # Run thinker step in background
-                _step_script="$THINKERS_DIR/$_name/step"
-                _log_file="$run_dir/logs/$_name.log"
                 printf '[dispatcher]   dispatch -> %s (active=%s)\n' "$_name" "$_active" >&2
-                (
-                    printf '%s' "$_step_json" | "$_step_script"
-                ) >> "$_log_file" 2>&1 &
-                _step_entries="${_step_entries}${_step_entries:+ }${_name}:$!"
-                printf '%s %s\n' "$!" "$_name" >> "$run_dir/step_pids"
+                _dispatch_step "$_name" "$_step_json"
             done < "$run_dir/sub_map"
         done < "$fifo"
     ) >> "$run_dir/logs/dispatcher.log" 2>&1 &
@@ -345,10 +439,10 @@ _cleanup_dispatcher() {
     local tail_pids_file="$run_dir/tail_pids"
     local fifo="$run_dir/dispatch.fifo"
 
-    # Kill tail processes
+    # Kill tail process trees (a bare kill leaves the pipeline's tail alive)
     if [[ -f "$tail_pids_file" ]]; then
         while IFS= read -r pid; do
-            [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+            [[ -n "$pid" ]] && _kill_tree "$pid" TERM
         done < "$tail_pids_file"
         rm -f "$tail_pids_file"
     fi
@@ -356,8 +450,11 @@ _cleanup_dispatcher() {
     # Remove FIFO
     rm -f "$fifo"
 
-    # Clean up sub_map and traj_files
-    rm -f "$run_dir/sub_map" "$run_dir/traj_files"
+    # Clean up sub_map, traj_files, pending-trigger flags, and ownership token
+    # (removing the token also makes any stray dispatcher instance exit on
+    # its next heartbeat)
+    rm -f "$run_dir/sub_map" "$run_dir/traj_files" "$run_dir/dispatcher.token"
+    rm -rf "$run_dir/pending"
 }
 
 _stop_dispatcher() {
@@ -388,18 +485,21 @@ _stop_dispatcher() {
         printf 'No dispatcher running.\n' >&2
     fi
 
-    # Kill tail processes
+    # Kill tail process trees (a bare kill leaves the pipeline's tail alive)
     local tail_pids_file="$run_dir/tail_pids"
     if [[ -f "$tail_pids_file" ]]; then
         local tail_pid
         while IFS= read -r tail_pid; do
-            [[ -n "$tail_pid" ]] && kill "$tail_pid" 2>/dev/null || true
+            [[ -n "$tail_pid" ]] && _kill_tree "$tail_pid" TERM
         done < "$tail_pids_file"
         rm -f "$tail_pids_file"
     fi
 
-    # Clean up FIFO, sub_map, traj_files
-    rm -f "$run_dir/dispatch.fifo" "$run_dir/sub_map" "$run_dir/traj_files"
+    # Clean up FIFO, sub_map, traj_files, pending-trigger flags, and ownership
+    # token (removing the token also makes any stray dispatcher instance exit
+    # on its next heartbeat)
+    rm -f "$run_dir/dispatch.fifo" "$run_dir/sub_map" "$run_dir/traj_files" "$run_dir/dispatcher.token"
+    rm -rf "$run_dir/pending"
 }
 
 # ---------------------------------------------------------------------------
@@ -704,7 +804,16 @@ cmd_status() {
             log_info=" (${log_lines} log lines)"
         fi
 
-        printf '  %-30s %s  [%s]%s\n' "$name" "$status" "$types" "$log_info"
+        # Pending re-trigger flags
+        local pending_info=""
+        local _pf
+        for _pf in "$run_dir/pending/$name".*; do
+            [[ -f "$_pf" ]] || continue
+            pending_info="${pending_info}${pending_info:+,}${_pf##*.}"
+        done
+        [[ -n "$pending_info" ]] && pending_info=" (pending: ${pending_info})"
+
+        printf '  %-30s %s  [%s]%s%s\n' "$name" "$status" "$types" "$log_info" "$pending_info"
     done < <(_list_thinker_dirs)
 }
 

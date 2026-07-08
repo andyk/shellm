@@ -19,7 +19,7 @@ mem search "topic from recent thoughts"
 Surface 1-3 memories that are associatively connected but NOT already being discussed. For each relevant memory found, write a thought:
 
 ```bash
-printf '{"type":"thought","content":%s,"source":"mind-wandering"}' \
+printf '{"type":"thought","content":%s,"source":"mind_wanderer"}' \
   "$(printf '%s' "I'm reminded of: $memory_content" | jq -Rsa .)" \
   | traj append
 ```

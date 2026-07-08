@@ -536,7 +536,30 @@ cmd_append() {
     mkdir -p "$(dirname "$traj_file")"
     local compact
     compact=$(printf '%s' "$record" | jq -c .)
+
+    # Serialize appends across processes: a multi-KB append is several
+    # write() syscalls, and concurrent writers (parallel thinkers/shellm
+    # runs) can interleave mid-line and corrupt the JSONL. mkdir is the
+    # portable atomic lock primitive (macOS has no flock); it also works
+    # across Docker bind mounts since it's the same filesystem path.
+    local lock_dir="${traj_file}.lock"
+    local _lock_tries=0
+    until mkdir "$lock_dir" 2>/dev/null; do
+        _lock_tries=$((_lock_tries + 1))
+        # Every ~0.5s of spinning, steal locks older than 5s — the holder
+        # was killed mid-append (e.g. thinkers stop kills process trees).
+        if [[ $((_lock_tries % 50)) -eq 0 ]]; then
+            local _now _lock_mtime
+            _now=$(date +%s)
+            _lock_mtime=$(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null) || _lock_mtime="$_now"
+            if [[ $((_now - _lock_mtime)) -ge 5 ]]; then
+                rmdir "$lock_dir" 2>/dev/null || true
+            fi
+        fi
+        sleep 0.01
+    done
     printf '%s\n' "$compact" >> "$traj_file"
+    rmdir "$lock_dir" 2>/dev/null || true
 
     # Print the assigned step_id so the caller knows it.
     printf '%s\n' "$step_id"
