@@ -83,12 +83,44 @@ $thinker_prompt
 
 $trigger_desc"
 
+# Count observation steps this actor has written to the trajectory — used to
+# detect whether a run recorded any result.
+_count_actor_observations() {
+    traj cat "$TRAJ_ID" --raw 2>/dev/null \
+        | jq -cR 'fromjson? // empty | select(.type == "observation" and .source == "actor")' 2>/dev/null \
+        | wc -l | tr -d '[:space:]'
+}
+
+obs_before=$(_count_actor_observations) || obs_before=0
+
 # Single shellm agentic loop for all triggers (writes to root trajectory)
 printf '  executing (%s)...\n' "$trigger_type" >&2
+act_rc=0
 act_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
     shellm --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
-    "$act_prompt") || true
+    "$act_prompt") || act_rc=$?
+
+# The monologue only sees what lands on the trajectory: every ACTION must
+# produce at least one observation, even on failure. The prompt asks the
+# model to record observations itself (the healthy path); this fallback
+# fires only when the run ended without recording any.
+if [[ "$trigger_type" != "message" ]]; then
+    obs_after=$(_count_actor_observations) || obs_after=0
+    if [[ "${obs_after:-0}" -le "${obs_before:-0}" ]]; then
+        if [[ "$act_rc" -ne 0 ]]; then
+            summary="action failed (exit $act_rc): $trigger_content"
+        elif [[ -n "$act_response" ]]; then
+            summary="$act_response"
+        else
+            summary="action finished but recorded no result: $trigger_content"
+        fi
+        # Cap at 500 chars — full logs stay in actor.log
+        printf '{"type":"observation","content":%s,"source":"actor"}' \
+            "$(printf '%s' "$summary" | jq -Rsa '.[0:500]')" \
+            | traj append >/dev/null
+    fi
+fi
 
 if [[ -n "$act_response" ]]; then
     printf '  [observation] %s\n' "$(printf '%s' "$act_response" | head -1)"

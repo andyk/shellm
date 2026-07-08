@@ -24,12 +24,6 @@ cat >/dev/null
 # Build system prompt with identity context
 system_prompt=$(_build_system_prompt)
 
-# Build recent context (compact: meaningful types only, content truncated)
-recent_context=""
-if traj exists 2>/dev/null; then
-    recent_context=$(_recent_stream "$THINK_CONTEXT_TAIL") || recent_context=""
-fi
-
 # Ensure think prompt exists
 prompt_file="$SCRIPT_DIR/prompt.md"
 if [[ ! -f "$prompt_file" ]]; then
@@ -41,7 +35,24 @@ fi
 goals=$(get_goals "$MEM_DIR")
 think_prompt=$(load_prompt "$prompt_file" "$IDENTITY_NAME" "$goals")
 
-full_message="<context>
+# Call llm directly — inner_monologue produces one thought, no tool use needed.
+# "idle" means hold attention on another thinker without interrupting it. It
+# must NOT be appended to the traj: idle steps clutter the diary and re-fire
+# us via trigger_self, creating busy-wait loops. But we cannot just exit
+# either — the dispatcher only re-fires us on steps we append (its TICK only
+# flushes pending triggers), so a silent exit would end the monologue. So on
+# idle we wait internally with backoff and look at the stream again; steps
+# arriving while we wait are pended by the dispatcher and re-fire us on exit.
+printf '  thinking...\n' >&2
+idle_wait=2
+while :; do
+    # Build recent context (compact: meaningful types only, content truncated)
+    recent_context=""
+    if traj exists 2>/dev/null; then
+        recent_context=$(_recent_stream "$THINK_CONTEXT_TAIL") || recent_context=""
+    fi
+
+    full_message="<context>
 $system_prompt
 
 $think_prompt
@@ -50,30 +61,49 @@ $think_prompt
 Recent stream (last $THINK_CONTEXT_TAIL steps):
 $recent_context"
 
-# Call llm directly — inner_monologue produces one thought, no tool use needed
-printf '  thinking...\n' >&2
-# llm stderr flows to the thinker log so API errors (rate limits, ...) are visible
-response=$(printf '%s' "$full_message" | \
-    llm -m "$THINK_MODEL" \
-    -s "Output only a single thought or action. No explanation, no commands, no preamble.") || true
+    # llm stderr flows to the thinker log so API errors (rate limits, ...) are visible
+    response=$(printf '%s' "$full_message" | \
+        llm -m "$THINK_MODEL" \
+        -s "Output only a single thought or action. No explanation, no commands, no preamble.") || true
 
-# The inner monologue is an infinite loop via trigger_self: it must ALWAYS
-# append something to the traj so the dispatcher re-fires.  Empty/duplicate
-# responses are degraded but still emit a thought to keep the loop alive.
-if [[ -z "$response" ]]; then
-    printf 'inner_monologue/step: empty response from llm — emitting placeholder\n' >&2
-    response="(inner monologue received an empty response from the LLM; continuing)"
-    sleep 1   # brief backoff so transient API failures don't tight-loop
-fi
+    # The inner monologue is an infinite loop via trigger_self: it must append
+    # something to the traj so the dispatcher re-fires.  Empty/duplicate
+    # responses are degraded but still emit a thought to keep the loop alive.
+    if [[ -z "$response" ]]; then
+        printf 'inner_monologue/step: empty response from llm — emitting placeholder\n' >&2
+        response="(inner monologue received an empty response from the LLM; continuing)"
+        sleep 1   # brief backoff so transient API failures don't tight-loop
+        break
+    fi
+
+    # Defensive unwrap: the model sees the stream as JSON lines and sometimes
+    # emits a full step object instead of prose — unwrap it rather than
+    # double-encoding.
+    if json_content=$(printf '%s' "$response" | \
+            jq -er 'select(type == "object") | .content // empty' 2>/dev/null); then
+        json_type=$(printf '%s' "$response" | jq -r '.type // "thought"' 2>/dev/null) || json_type="thought"
+        if [[ "$json_type" == "action" ]]; then
+            response="action: $json_content"
+        else
+            response="$json_content"
+        fi
+    fi
+
+    case "$response" in
+        "idle"|"action: idle"|"action:idle")
+            printf '  [idle] holding attention, re-checking in %ss\n' "$idle_wait" >&2
+            sleep "$idle_wait"
+            [[ "$idle_wait" -lt 30 ]] && idle_wait=$((idle_wait * 2))
+            continue
+            ;;
+    esac
+    break
+done
 
 # Determine step type and strip prefix from content
 step_type="thought"
 step_content="$response"
 case "$response" in
-    "idle"|"action: idle"|"action:idle")
-        step_type="idle"
-        step_content="idle"
-        ;;
     "action: "*)
         step_type="action"
         step_content="${response#action: }"
