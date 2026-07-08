@@ -114,6 +114,25 @@ case "$response" in
         ;;
 esac
 
+# Thoughts sometimes bury `action: ...` lines inside prose despite the
+# either/or rule; left in place they never dispatch the actor. Extract
+# line-leading `action:` lines into real action steps and keep the
+# surrounding prose as the thought.
+extracted_actions=()
+if [[ "$step_type" == "thought" ]]; then
+    remaining=""
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^action:[[:space:]]*(.+)$ ]]; then
+            extracted_actions+=("${BASH_REMATCH[1]}")
+        else
+            remaining+="$line"$'\n'
+        fi
+    done <<< "$step_content"
+    if [[ ${#extracted_actions[@]} -gt 0 ]]; then
+        step_content=$(printf '%s' "$remaining")
+    fi
+fi
+
 # Write to traj — always append (even duplicates) to keep trigger_self alive
 last_content=""
 if traj exists 2>/dev/null; then
@@ -124,8 +143,18 @@ if [[ "$response" == "$last_content" ]]; then
     step_content="$step_content (repeat)"
 fi
 
-printf '{"type":"%s","content":%s,"source":"%s"}' \
-    "$step_type" "$(printf '%s' "$step_content" | jq -Rsa .)" "$THINKER_NAME" \
-    | traj append >/dev/null
+# Skip the thought only if extraction emptied it — the action steps below
+# keep trigger_self alive in that case.
+if [[ -n "$step_content" || ${#extracted_actions[@]} -eq 0 ]]; then
+    printf '{"type":"%s","content":%s,"source":"%s"}' \
+        "$step_type" "$(printf '%s' "$step_content" | jq -Rsa .)" "$THINKER_NAME" \
+        | traj append >/dev/null
+    printf '[%s] %s\n' "$step_type" "$step_content"
+fi
 
-printf '[%s] %s\n' "$step_type" "$step_content"
+for cmd in ${extracted_actions[@]+"${extracted_actions[@]}"}; do
+    printf '{"type":"action","content":%s,"source":"%s"}' \
+        "$(printf '%s' "$cmd" | jq -Rsa .)" "$THINKER_NAME" \
+        | traj append >/dev/null
+    printf '[action] %s\n' "$cmd"
+done
