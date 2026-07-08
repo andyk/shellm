@@ -701,11 +701,16 @@ docker_setup() {
 
     progress "Setting up Docker container (image: $SHELLM_DOCKER_IMAGE, access: $SHELLM_DOCKER_ACCESS)..."
 
-    # Pull image (quiet unless verbose)
-    if [[ "$VERBOSE" -eq 1 ]]; then
-        docker pull "$SHELLM_DOCKER_IMAGE" >&2
-    else
-        docker pull "$SHELLM_DOCKER_IMAGE" >/dev/null 2>&1
+    # Pull image only if not present locally: an unconditional pull adds
+    # latency to every container create, fails offline, and a wedged Docker
+    # pull (no timeout) hangs the run forever — observed with several
+    # concurrent creates racing to pull the same image.
+    if ! docker image inspect "$SHELLM_DOCKER_IMAGE" >/dev/null 2>&1; then
+        if [[ "$VERBOSE" -eq 1 ]]; then
+            docker pull "$SHELLM_DOCKER_IMAGE" >&2
+        else
+            docker pull "$SHELLM_DOCKER_IMAGE" >/dev/null 2>&1
+        fi
     fi
 
     # Mount the runs dir (parent of the default workspace) so containers can be
@@ -1636,9 +1641,12 @@ run_loop() {
         _run_traj_id="$_use_traj"
 
         # Inherit workdir and env from the trajectory if not explicitly provided
+        # Tolerant parse (fromjson?): a corrupt line in the trajectory must
+        # not kill the run — jq exits 5 on a parse error and set -e would
+        # abort silently. The || true shields against traj tail's SIGPIPE.
         local _orig_meta
         _orig_meta=$(traj tail -n 50 --raw --traj_dir "$_run_traj_dir" "$_use_traj" \
-            | jq -c 'select(.type=="shellm-run")' 2>/dev/null | tail -1)
+            | jq -cR 'fromjson? | select(.type=="shellm-run")' 2>/dev/null | tail -1) || true
         if [[ -n "$_orig_meta" ]]; then
             local _orig_workdir _orig_env
             _orig_workdir=$(printf '%s' "$_orig_meta" | jq -r '.workdir // empty')

@@ -12,6 +12,10 @@ source "$SCRIPT_DIR/../_lib/common.sh"
 
 _require_env
 
+# Drain the triggering step from stdin (wakeup only — context comes from
+# traj). Leaving stdin unread would let it leak into shellm as stdin context.
+cat >/dev/null
+
 THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
 
 # Load prompt
@@ -23,10 +27,10 @@ system_prompt=$(_build_system_prompt)
 
 thinker_prompt=$(load_prompt "$prompt_file" "$IDENTITY_NAME")
 
-# Build recent context
+# Build recent context (compact: meaningful types only, content truncated)
 recent_thoughts=""
 if traj exists 2>/dev/null; then
-    recent_thoughts=$(traj tail -n 15 2>/dev/null) || recent_thoughts=""
+    recent_thoughts=$(_recent_stream 15) || recent_thoughts=""
 fi
 
 thinker_message="<context>

@@ -107,6 +107,30 @@ load_prompt() {
 }
 
 # ---------------------------------------------------------------------------
+# Recent stream context
+# ---------------------------------------------------------------------------
+
+# Build a compact recent-stream context for thinker prompts: meaningful step
+# types only, long content truncated. Excluding bulky machinery steps (prompt,
+# shell-output, shellm-run, ...) keeps thinker prompts small AND prevents
+# recursive inflation: a thinker's own prompt step must never be re-embedded
+# in the context of its next run.
+_recent_stream() {
+    local n="${1:-${THINK_CONTEXT_TAIL:-20}}"
+    # Tolerant parse (fromjson?): skip corrupt lines rather than dying —
+    # concurrent appends have historically produced occasional bad lines.
+    traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --raw 2>/dev/null \
+        | jq -cR 'fromjson? // empty
+            | select(.type == "thought" or .type == "action" or .type == "observation"
+                     or .type == "message" or .type == "idle" or .type == "merge"
+                     or .type == "final" or .type == "reasoning")
+            | .content = ((.content // "") | tostring
+                | if length > 1500 then .[0:1500] + "…[truncated]" else . end)' \
+        2>/dev/null \
+        | tail -n "$n"
+}
+
+# ---------------------------------------------------------------------------
 # Skill variable collection
 # ---------------------------------------------------------------------------
 

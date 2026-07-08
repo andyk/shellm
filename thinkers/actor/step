@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # actor/step — Action executor thinker
-# Reads action body from step JSON on stdin, builds system prompt via
-# _build_system_prompt, calls shellm with fork/merge support.
+# Triggered by action steps (execute them) and message steps addressed to
+# this identity (reply to them). Both go through a single shellm run; the
+# prompt tells the model to send any appropriate reply in its FIRST bash
+# block (via `chat reply`), then carry out follow-up work.
 
 THINKER_NAME="actor"
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
@@ -14,17 +16,34 @@ source "$SCRIPT_DIR/../_lib/common.sh"
 _require_env
 
 THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
+THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-20}"
 
 # Read step JSON from stdin
 step_json=$(cat)
 [[ -z "$step_json" ]] && exit 0
 
-# Extract action content
-action_body=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
-[[ -z "$action_body" ]] && exit 0
+trigger_type=$(printf '%s' "$step_json" | jq -r '.type // empty' 2>/dev/null) || true
+trigger_content=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
+[[ -z "$trigger_content" ]] && exit 0
+
+# Guard: only engage with messages addressed to this identity. This is the
+# only directional check — `chat` stamps source:"chat" on BOTH incoming and
+# outgoing messages, so without it our own outgoing replies would re-trigger
+# us in a reply-to-self loop.
+if [[ "$trigger_type" == "message" ]]; then
+    msg_to=$(printf '%s' "$step_json" | jq -r '.to // empty' 2>/dev/null) || true
+    [[ "$msg_to" == "$IDENTITY_NAME" ]] || exit 0
+fi
 
 # Build system prompt with identity context
 system_prompt=$(_build_system_prompt)
+
+# Recent stream so replies and actions are contextual (compact: meaningful
+# types only — embedding raw prompt steps here would inflate recursively)
+recent_context=""
+if traj exists 2>/dev/null; then
+    recent_context=$(_recent_stream "$THINK_CONTEXT_TAIL") || recent_context=""
+fi
 
 # Resolve absolute paths
 run_dir="$IDENTITY_DIR/workdir"
@@ -39,54 +58,33 @@ done < <(_build_shellm_flags "$IDENTITY_DIR" "$run_dir")
 # Load thinker prompt
 prompt_file="$SCRIPT_DIR/prompt.md"
 [[ -f "$prompt_file" ]] || { printf 'actor/step: error: prompt.md not found at %s\n' "$prompt_file" >&2; exit 1; }
-thinker_prompt=$(cat "$prompt_file")
+thinker_prompt=$(load_prompt "$prompt_file" "$IDENTITY_NAME" "")
 
+# Label the trigger for the prompt
+if [[ "$trigger_type" == "message" ]]; then
+    msg_from=$(printf '%s' "$step_json" | jq -r '.from // "human"' 2>/dev/null) || true
+    trigger_desc="MESSAGE from $msg_from: $trigger_content"
+else
+    trigger_desc="ACTION: $trigger_content"
+fi
+
+# Instructions go AFTER the recent stream: the stream is full of other
+# thinkers' output conventions (thought:/action: lines) and the model
+# mimics whatever is closest to the trigger. Recency keeps the actor
+# acting instead of narrating.
 act_prompt="<context>
 $system_prompt
+
+Recent stream (last $THINK_CONTEXT_TAIL steps):
+$recent_context
 
 $thinker_prompt
 </context>
 
-ACTION: $action_body"
+$trigger_desc"
 
-
-# Fast-path: detect chat reply intent via fast classifier
-THINK_FAST_MODEL="${THINK_FAST_MODEL:-gemini-3.5-flash}"
-
-is_reply=$(printf 'Action: %s\n\nIs this action about replying, responding, or sending a message to someone in chat? Answer only YES or NO.' "$action_body" | \
-    llm -m "$THINK_FAST_MODEL" -s "Answer only YES or NO." 2>/dev/null) || true
-
-if [[ "$(printf '%s' "$is_reply" | tr '[:lower:]' '[:upper:]')" == *"YES"* ]]; then
-    printf '  fast reply...\n' >&2
-    reply=$(printf '%s' "$act_prompt" | \
-        llm -m "$THINK_FAST_MODEL" \
-        -s "Write a short, natural reply. Output ONLY the message text, nothing else." \
-        2>/dev/null) || true
-    if [[ -n "$reply" ]]; then
-        reply_to=$(printf '%s' "$step_json" | jq -r '.to // .recipient // empty' 2>/dev/null) || true
-        if [[ -z "$reply_to" ]]; then
-            reply_to=$(traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --filter type=message,human-msg --raw 2>/dev/null | \
-                jq -sr --arg me "${IDENTITY_NAME:-}" '
-                    reverse
-                    | map(select(
-                        (.type == "message" and (.to // "") == $me and (.from // "") != "")
-                        or (.type == "human-msg" and (.from // "") != "")
-                    ))
-                    | .[0].from // empty
-                ' 2>/dev/null) || true
-        fi
-
-        if [[ -n "$reply_to" ]] && printf '%s' "$reply" | chat reply "$reply_to"; then
-            printf '{"type":"observation","content":%s,"source":"actor"}' \
-                "$(printf 'Replied to %s: %s' "$reply_to" "$reply" | jq -Rsa .)" | traj append
-            printf '  [reply -> %s] %s\n' "$reply_to" "$(printf '%s' "$reply" | head -1)" >&2
-            exit 0
-        fi
-    fi
-fi
-
-# Full shellm agentic loop for non-chat actions (writes to root trajectory)
-printf '  executing action...\n' >&2
+# Single shellm agentic loop for all triggers (writes to root trajectory)
+printf '  executing (%s)...\n' "$trigger_type" >&2
 act_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
     shellm --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \

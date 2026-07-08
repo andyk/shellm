@@ -73,7 +73,7 @@ Create a .chatrc file with:
     [[ -z "$to" ]] && die "No --to specified and IDENTITY_NAME not set."
 
     # Append message step to trajectory
-    printf '{"type":"message","content":%s,"from":%s,"to":%s}' \
+    printf '{"type":"message","content":%s,"from":%s,"to":%s,"source":"chat"}' \
         "$(printf '%s' "$message" | jq -Rsa .)" \
         "$(printf '%s' "$from" | jq -Rsa .)" \
         "$(printf '%s' "$to" | jq -Rsa .)" \
@@ -99,7 +99,7 @@ cmd_reply() {
     local from="${IDENTITY_NAME:-}"
     [[ -z "$from" ]] && die "IDENTITY_NAME not set. Run: identity shell <name>"
 
-    printf '{"type":"message","content":%s,"from":%s,"to":%s}' \
+    printf '{"type":"message","content":%s,"from":%s,"to":%s,"source":"chat"}' \
         "$(printf '%s' "$message" | jq -Rsa .)" \
         "$(printf '%s' "$from" | jq -Rsa .)" \
         "$(printf '%s' "$to_name" | jq -Rsa .)" \
@@ -137,7 +137,7 @@ Create a .chatrc file with:
     local content
     content=$(cat "$filepath")
 
-    printf '{"type":"message","filename":%s,"content":%s,"from":%s,"to":%s}' \
+    printf '{"type":"message","filename":%s,"content":%s,"from":%s,"to":%s,"source":"chat"}' \
         "$(printf '%s' "$filename" | jq -Rsa .)" \
         "$(printf '%s' "$content" | jq -Rsa .)" \
         "$(printf '%s' "$from" | jq -Rsa .)" \
