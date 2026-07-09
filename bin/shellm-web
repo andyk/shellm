@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellm-web — Web viewer for shellm mind logs and trajectory trees.
+#
+# Usage:
+#   shellm-web [ROOT] [--dev] [--port N] [--rebuild]
+#
+# ROOT defaults to the shellm repo (parent of this script's directory).
+# Requires uv (backend) and bun, pnpm, or npm (frontend; auto-detected in
+# that order, override with SHELLM_WEB_JS=bun|pnpm|npm).
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+command -v uv >/dev/null 2>&1 || { echo "shellm-web: uv is required (https://docs.astral.sh/uv/)" >&2; exit 1; }
+
+# First arg is ROOT if it isn't a flag; all remaining args pass through.
+if [[ $# -gt 0 && "${1:0:1}" != "-" ]]; then
+    serve_root="$1"
+    shift
+else
+    serve_root="$ROOT_DIR"
+fi
+
+exec uv run --project "$ROOT_DIR/web" shellm-web "$serve_root" "$@"

@@ -16,3 +16,8 @@ bin/shellm-tui
 
 # Identity instances are runtime data (logs, trajectories, memories, etc.)
 .identities/
+web/src/shellm_web/static/
+web/viewer/build/
+web/viewer/node_modules/
+web/.venv/
+web/viewer/.react-router/
