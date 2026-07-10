@@ -1850,8 +1850,10 @@ run_loop() {
         --argjson env "$_env_json" \
         --argjson resumed "$(if [[ -n "$_use_traj" ]]; then echo true; else echo false; fi)" \
         --arg trigger "${SHELLM_TRIGGER_STEP_ID:-}" \
+        --arg launched_by "${SHELLM_LAUNCHED_BY:-}" \
         '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env, resumed:$resumed}
-         + (if $trigger == "" then {} else {trigger_step: $trigger} end)')
+         + (if $trigger == "" then {} else {trigger_step: $trigger} end)
+         + (if $launched_by == "" then {} else {launched_by: $launched_by} end)')
     # traj append prints the assigned step_id; keep it so every machinery step
     # this run writes can carry run_id (crucial with --traj, where many runs
     # interleave in one shared trajectory)
@@ -2069,8 +2071,12 @@ exit \$__shellm_rc
             SHELLM_ALLOW_NESTED_DOCKER="$SHELLM_ALLOW_NESTED_DOCKER"
             _SHELLM_PARENT_RUN="$run_name"
             _SHELLM_PARENT_TRAJ_ID="$_run_traj_id"
-            # blank so nested shellm runs don't inherit this run's trigger
+            # blank so nested shellm runs don't inherit this run's trigger/launcher
             SHELLM_TRIGGER_STEP_ID=""
+            SHELLM_LAUNCHED_BY=""
+            # traj append stamps this as run_id on steps the executed code
+            # writes (observations etc.), linking them to this run exactly
+            SHELLM_RUN_STEP_ID="$_run_step_id"
             TRAJ_DIR="$_run_traj_dir"
             TRAJ_ID="$_run_traj_id"
             ROOT_TRAJ_ID="${ROOT_TRAJ_ID:-$_run_traj_id}"

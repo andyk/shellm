@@ -76,7 +76,8 @@ def step_preview(raw: dict[str, Any]) -> str:
 @dataclass
 class RunGroup:
     run_id: str  # = shellm-run step_id
-    action_step_id: str | None = None
+    trigger_step_id: str | None = None  # step that triggered the run (any type)
+    launched_by: str | None = None  # thinker that launched the run
     step_ids: list[str] = field(default_factory=list)
     started_ts: str = ""
     ended_ts: str | None = None
@@ -88,7 +89,8 @@ class RunGroup:
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
-            "action_step_id": self.action_step_id,
+            "trigger_step_id": self.trigger_step_id,
+            "launched_by": self.launched_by,
             "step_ids": self.step_ids,
             "started_ts": self.started_ts,
             "ended_ts": self.ended_ts,
@@ -133,6 +135,7 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
     runs: list[RunGroup] = []
     runs_by_id: dict[str, RunGroup] = {}
     unmatched_actions: list[dict[str, Any]] = []
+    seen_step_ids: set[str] = set()
 
     for raw in raw_steps:
         step_type = raw.get("type", "")
@@ -180,17 +183,20 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                     started_ts=ts,
                     command=raw.get("command", ""),
                     model=raw.get("model"),
+                    launched_by=raw.get("launched_by"),
                 )
-                # action -> run join. Exact when the run carries trigger_step
-                # (the actor exports the triggering step's id); otherwise fall
-                # back to the legacy ACTION: command-suffix prefix match.
+                # trigger -> run join. Exact when the run carries trigger_step
+                # (thinkers export the triggering step's id; any step type can
+                # trigger); otherwise fall back to the legacy ACTION:
+                # command-suffix prefix match against action steps.
                 trigger = raw.get("trigger_step")
                 if trigger:
-                    for action in unmatched_actions:
-                        if action["step_id"] == trigger:
-                            run.action_step_id = action["step_id"]
-                            unmatched_actions.remove(action)
-                            break
+                    if trigger in seen_step_ids:
+                        run.trigger_step_id = trigger
+                        # consume so a later legacy run can't prefix-match it
+                        unmatched_actions[:] = [
+                            a for a in unmatched_actions if a["step_id"] != trigger
+                        ]
                 else:
                     suffix = _action_suffix(run.command)
                     if suffix:
@@ -200,7 +206,7 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                                 action_text.startswith(suffix[:200])
                                 or suffix.startswith(action_text[:200])
                             ):
-                                run.action_step_id = action["step_id"]
+                                run.trigger_step_id = action["step_id"]
                                 unmatched_actions.remove(action)
                                 break
                 runs.append(run)
@@ -223,6 +229,8 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
         elif step_type == "action":
             unmatched_actions.append(normalized)
 
+        if step_id:
+            seen_step_ids.add(step_id)
         steps.append(normalized)
 
     return {"steps": steps, "runs": [run.to_dict() for run in runs]}

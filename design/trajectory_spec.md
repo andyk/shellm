@@ -69,6 +69,7 @@ Every step is a single-line JSON object with at least these fields:
 |-------|----------|-------------|
 | `step_id` | `traj append` | UUID v4, unique across all trajectories. Preserved if pre-set by caller (e.g. fork steps). |
 | `ts` | `traj append` | ISO 8601 timestamp, e.g. `2026-05-16T13:26:06.846-0700` |
+| `run_id` | `traj append` (conditional) | Stamped when `SHELLM_RUN_STEP_ID` is in the environment (i.e. the append comes from code executing inside a shellm run) and the step doesn't already carry one. `shellm-run`/`trajectory` steps excluded. See [Run identity](#run-identity-run_id-and-trigger_step). |
 
 ## Step types
 
@@ -87,20 +88,20 @@ The canonical list of step types. Families:
 | Type | Family | Writer | Notes |
 |------|--------|--------|-------|
 | `trajectory` | structural | `traj new` | First line of every file; its `step_id` is the trajectory's ID |
-| `fork` | structural | `traj fork` (nested shellm runs) | Spawns a child trajectory |
-| `merge` | structural | shellm (write-back when a forked child completes); `traj merge` | Carries `content` + `from_traj`/`from_step`/`from_traj_ref`; no `source` |
-| `shellm-run` | machinery | shellm loop | Run header; its `step_id` is the run's identity; may carry `trigger_step` |
+| `fork` | structural | `traj fork` (nested shellm runs) | Spawns a child trajectory; carries `run_id` when forked from inside a run |
+| `merge` | structural | shellm (write-back when a forked child completes); `traj merge` | Carries `content` + `from_traj`/`from_step`/`from_traj_ref`; no `source`; carries `run_id` when written from inside a run |
+| `shellm-run` | machinery | shellm loop | Run header; its `step_id` is the run's identity; may carry `trigger_step` + `launched_by` |
 | `prompt` | machinery | shellm loop | Carries `run_id` |
 | `reasoning` | machinery | shellm loop | Carries `run_id` |
 | `shell-output` | machinery | shellm loop | Carries `run_id` |
 | `feedback` | machinery | shellm loop | Carries `run_id` |
 | `final` | machinery | shellm loop | Carries `run_id`; closes the run |
 | `run-summary` | machinery | shellm loop (async) | Carries `run_id` |
-| `thought` | thinker | `inner_monologue` | Monologue output; always carries `source`. (Pre-2026-07-10 logs also used `thought` for forked-child write-backs, now `merge`) |
-| `action` | thinker | `inner_monologue` | A thought starting with `action:`; dispatch triggers the actor |
-| `idle` | thinker | `inner_monologue` | Explicit no-op; keeps the `trigger_self` loop alive |
-| `observation` | thinker | `actor` | The actor recording a result to the mind log |
-| `tp-thought` | thinker | thinkers scaffolded by `thinkers create` | Generic thinker output |
+| `thought` | thinker | `inner_monologue` | Monologue output; always carries `source`; carries `trigger_step`. (Pre-2026-07-10 logs also used `thought` for forked-child write-backs, now `merge`) |
+| `action` | thinker | `inner_monologue` | A thought starting with `action:`; dispatch triggers the actor; carries `trigger_step` |
+| `idle` | thinker | `inner_monologue` | Explicit no-op; keeps the `trigger_self` loop alive; carries `trigger_step` |
+| `observation` | thinker | `actor` | The actor recording a result to the mind log; carries `run_id` (written from inside the actor's run) |
+| `tp-thought` | thinker | thinkers scaffolded by `thinkers create` | Generic thinker output; carries `run_id` when written from inside a run |
 | `message` | conversation | `chat send` / `chat reply` / `chat file` | Carries `from`/`to`; file variant adds `filename` |
 | `human-msg` | conversation | *(legacy — nothing writes it)* | Still read by `chat repl` for old logs |
 | `agent-msg` | conversation | *(legacy — nothing writes it)* | Still read by `chat repl` for old logs |
@@ -119,14 +120,28 @@ readers must not guess):
   existing file), and machinery from concurrent runs and thinker steps may
   interleave freely. `run_id` — not file position — is what ties a step to
   its run.
-- When a run is launched by the actor thinker, the `shellm-run` header
-  carries `trigger_step` = the `step_id` of the mind-log step (`action` or
-  `message`) that triggered it. Mechanism: the actor exports
-  `SHELLM_TRIGGER_STEP_ID`; shellm stamps it on the header and blanks the
-  variable in the environment of executed code, so nested runs never
-  inherit a stale trigger.
+- When a run is launched by a thinker, the `shellm-run` header carries
+  `trigger_step` = the `step_id` of the mind-log step that triggered the
+  thinker (any step type can trigger), and `launched_by` = the thinker's
+  name. Mechanism: the dispatcher exports `SHELLM_LAUNCHED_BY` when
+  invoking a step script; step scripts export `SHELLM_TRIGGER_STEP_ID`;
+  shellm stamps both on the header and blanks both variables in the
+  environment of executed code, so nested runs never inherit a stale
+  trigger or launcher. Several runs may share one `trigger_step` (one
+  thought can trigger several thinkers).
+- Steps a thinker appends *directly* (the monologue's `thought`/`action`/
+  `idle`) also carry `trigger_step`, so the dispatch edge exists even when
+  no run is involved.
+- Steps written by code executing *inside* a run also carry `run_id`:
+  shellm exports `SHELLM_RUN_STEP_ID` into the executed code's
+  environment, and `traj append` stamps it on any appended step that lacks
+  one (`shellm-run` and `trajectory` steps excluded, so a nested run's own
+  header and child trajectory never inherit the parent's run). This links
+  `observation`, `tp-thought`, `fork`, `merge`, and ad-hoc appends to
+  their enclosing run. An explicit `run_id` is never overwritten.
 - Machinery steps never carry `source`; readers attribute source-less
-  machinery to the shellm loop.
+  machinery to the shellm loop. `launched_by` is not `source` — readers
+  must not conflate them.
 
 Logs written before 2026-07-10 predate these fields. Readers must tolerate
 their absence (render such steps as a plain ungrouped stream), never
@@ -220,7 +235,8 @@ machinery step of the run carries it as `run_id`.
   "inactivity_timeout": "<seconds>",
   "context_files": ["<path>", ...],
   "env": {"name":"<env name>", "type":"local|docker", ...},
-  "trigger_step": "<uuid, only when launched by the actor>"
+  "trigger_step": "<uuid, only when launched by a thinker>",
+  "launched_by": "<thinker name, only when launched by a thinker>"
 }
 ```
 
@@ -235,7 +251,8 @@ machinery step of the run carries it as `run_id`.
 | `inactivity_timeout` | Seconds before killing idle execution (default: `30`) |
 | `context_files` | Array of `-f` file paths passed to the run |
 | `env` | Execution environment metadata (local or Docker details) |
-| `trigger_step` | Optional. `step_id` of the mind-log step (`action` or `message`) that triggered this run, when launched by the actor |
+| `trigger_step` | Optional. `step_id` of the mind-log step that triggered this run, when launched by a thinker (any step type can trigger) |
+| `launched_by` | Optional. Name of the thinker that launched this run (the dispatcher exports `SHELLM_LAUNCHED_BY`) |
 
 #### `prompt`
 
@@ -298,14 +315,17 @@ System-generated feedback injected into the conversation (e.g. after a timeout).
 ### Thinker types
 
 Written by thinkers — the processes `bin/thinkers` dispatches against a
-mind log. Thinker steps always carry `source` (the thinker's name).
+mind log. Thinker steps always carry `source` (the thinker's name). Steps
+a thinker appends directly also carry `trigger_step` (the step that made
+the dispatcher fire it); steps written from inside a thinker's shellm run
+carry `run_id` instead (stamped by `traj append`).
 
 #### `thought`
 
 The inner monologue's default output.
 
 ```json
-{"type":"thought", "content":"<thought text>", "source":"inner_monologue"}
+{"type":"thought", "content":"<thought text>", "source":"inner_monologue", "trigger_step":"<uuid>"}
 ```
 
 Logs written before 2026-07-10 also used `thought` (with
@@ -338,7 +358,7 @@ The actor recording a result or meaningful intermediate finding to the
 mind log.
 
 ```json
-{"type":"observation", "content":"<result>", "source":"actor"}
+{"type":"observation", "content":"<result>", "source":"actor", "run_id":"<shellm-run step_id>"}
 ```
 
 #### `tp-thought`

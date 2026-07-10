@@ -24,11 +24,14 @@ export function assembleStream(
   runs: RunGroup[]
 ): StreamItem[] {
   const runsById = new Map(runs.map((run) => [run.run_id, run]));
+  // Only action-type triggers become run headers (and are hidden from the
+  // stream). Other trigger types (thought, message) are joined in the data
+  // but keep rendering as their own stream steps.
   const actionsById = new Map<string, NormalizedStep>();
   for (const run of runs) {
-    if (run.action_step_id) {
-      const action = steps.find((s) => s.step_id === run.action_step_id);
-      if (action) actionsById.set(run.action_step_id, action);
+    if (run.trigger_step_id) {
+      const trigger = steps.find((s) => s.step_id === run.trigger_step_id);
+      if (trigger?.type === "action") actionsById.set(run.trigger_step_id, trigger);
     }
   }
 
@@ -44,8 +47,8 @@ export function assembleStream(
           kind: "run",
           run,
           steps: [],
-          actionStep: run.action_step_id
-            ? actionsById.get(run.action_step_id) ?? null
+          actionStep: run.trigger_step_id
+            ? actionsById.get(run.trigger_step_id) ?? null
             : null,
         };
         runItems.set(step.run_id, runItem);

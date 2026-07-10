@@ -79,7 +79,8 @@ export interface NormalizedStep {
 
 export interface RunGroup {
   run_id: string;
-  action_step_id: string | null;
+  trigger_step_id: string | null;
+  launched_by: string | null;
   step_ids: string[];
   started_ts: string;
   ended_ts: string | null;

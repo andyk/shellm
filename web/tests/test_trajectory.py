@@ -37,8 +37,8 @@ def test_g001r1_legacy_log_run_header_only():
     assert run["step_ids"] == [run["run_id"]]
     assert run["status"] == "running"
     # the action -> run join must land
-    assert run["action_step_id"] is not None
-    action = next(s for s in result["steps"] if s["step_id"] == run["action_step_id"])
+    assert run["trigger_step_id"] is not None
+    action = next(s for s in result["steps"] if s["step_id"] == run["trigger_step_id"])
     assert action["type"] == "action"
 
 
@@ -47,9 +47,9 @@ def test_g001r2_legacy_machinery_stays_ungrouped():
     result = load_trajectory(_root_traj_dir(GEN1 / "g001r2"))
     runs = result["runs"]
     assert len(runs) == 3
-    assert all(run["action_step_id"] for run in runs)
+    assert all(run["trigger_step_id"] for run in runs)
     # each run's action is distinct
-    assert len({run["action_step_id"] for run in runs}) == 3
+    assert len({run["trigger_step_id"] for run in runs}) == 3
     # legacy machinery carries no run_id -> ignored for grouping, never lost
     machinery = [
         s
@@ -107,8 +107,8 @@ def test_run_id_grouping_exact_with_interleaved_runs():
     assert runs["r1"]["tldr"] == "Measured disk usage"
     assert runs["r2"]["tldr"] is None
     # action joins: legacy prefix fallback for r1, exact trigger_step for r2
-    assert runs["r1"]["action_step_id"] == "a1"
-    assert runs["r2"]["action_step_id"] == "a2"
+    assert runs["r1"]["trigger_step_id"] == "a1"
+    assert runs["r2"]["trigger_step_id"] == "a2"
     # thinker steps untouched; orphan machinery ungrouped but present
     steps = {s["step_id"]: s for s in result["steps"]}
     assert steps["th1"]["run_id"] is None
@@ -144,6 +144,35 @@ def test_previews():
     # merge write-backs carry the child's answer; bare CLI merges fall back to the uuid
     assert step_preview({"type": "merge", "content": "sub done", "from_traj": "abc"}) == "<- sub done"
     assert step_preview({"type": "merge", "from_traj": "abc"}) == "<- abc"
+
+
+def test_launched_by_and_nonaction_triggers():
+    """launched_by is surfaced on the run group, and trigger_step joins any
+    step type (a monologue thought triggering a generic thinker's run), with
+    one step able to trigger several runs."""
+    from shellm_web.trajectory import normalize
+
+    raw = [
+        _step("trajectory", "t0"),
+        _step("thought", "th1", source="inner_monologue", content="I learned something"),
+        _step("shellm-run", "r1", command="shellm --traj t0 ...", trigger_step="th1", launched_by="learning"),
+        _step("shellm-run", "r2", command="shellm --traj t0 ...", trigger_step="th1", launched_by="goals_manager"),
+        _step("final", "f1", content="noted", run_id="r1"),
+        _step("final", "f2", content="no goals change", run_id="r2"),
+        # unknown trigger id: join skipped, not guessed
+        _step("shellm-run", "r3", command="shellm --traj t0 ...", trigger_step="ghost"),
+    ]
+    result = normalize(raw, Path("/nonexistent"))
+    runs = {run["run_id"]: run for run in result["runs"]}
+    assert runs["r1"]["launched_by"] == "learning"
+    assert runs["r2"]["launched_by"] == "goals_manager"
+    assert runs["r1"]["trigger_step_id"] == "th1"
+    assert runs["r2"]["trigger_step_id"] == "th1"
+    assert runs["r3"]["trigger_step_id"] is None
+    assert runs["r3"]["launched_by"] is None
+    # the triggering thought is a normal stream step, not swallowed
+    thought = next(s for s in result["steps"] if s["step_id"] == "th1")
+    assert thought["run_id"] is None
 
 
 def test_merge_writeback_normalization():

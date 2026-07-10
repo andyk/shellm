@@ -45,14 +45,19 @@ runs interleave in one shared mind log:
 3. **Legacy logs (pre-run_id)**: machinery steps without `run_id` are left
    ungrouped and render as plain stream steps — never guessed at. A legacy
    `shellm-run` header still opens a (member-less) group.
-4. `action` → run join: exact when the `shellm-run` step carries
-   `trigger_step` (the actor exports the triggering step's id via
-   `SHELLM_TRIGGER_STEP_ID`; shellm blanks it for executed code so nested
-   runs don't inherit it). Legacy runs without `trigger_step` fall back to
-   the ACTION: command-suffix prefix match (whitespace-collapsed 200-char
-   prefix in either direction). On a miss, `action_step_id` stays null and
-   the UI shows the steps adjacently. Note: message-triggered runs carry
-   `trigger_step` too, but the viewer currently only joins `action` steps.
+4. Trigger → run join: exact when the `shellm-run` step carries
+   `trigger_step` (thinker step scripts export the triggering step's id
+   via `SHELLM_TRIGGER_STEP_ID`; shellm blanks it for executed code so
+   nested runs don't inherit it). Any step type can be the trigger, and
+   several runs may share one trigger; the join lands in
+   `RunGroup.trigger_step_id`. The run also carries `launched_by` (the
+   thinker name, from the dispatcher's `SHELLM_LAUNCHED_BY`). Legacy runs
+   without `trigger_step` fall back to the ACTION: command-suffix prefix
+   match (whitespace-collapsed 200-char prefix in either direction). On a
+   miss, `trigger_step_id` stays null and the UI shows the steps
+   adjacently. The stream view turns only `action`-type triggers into run
+   headers (hiding the action step); other trigger types keep rendering
+   as their own stream steps.
 5. `fork` steps resolve their child dir via `child_ref`, falling back to a
    `<hex8>-*` glob; `from_traj` write-backs become links.
 
@@ -89,7 +94,12 @@ interface NormalizedStep {
 }
 ```
 
-`RunGroup` carries `action_step_id`, ordered `step_ids`, `status`
-(`running`/`done`), `tldr`, `confidence`. `TreeNode` carries per-trajectory
+`NormalizedStep.run_id` means *membership* and is set for machinery steps
+only; a thinker/structural step written from inside a run (`observation`,
+`fork`, `merge`, …) carries its `run_id` in `raw` — an *association* the
+timeline view can use without the step being swallowed into the run group.
+
+`RunGroup` carries `trigger_step_id`, `launched_by`, ordered `step_ids`,
+`status` (`running`/`done`), `tldr`. `TreeNode` carries per-trajectory
 stats (`step_count`, `has_final`, `tldr`, `child_count`) with `children`
 present only within the requested depth (lazy expansion).

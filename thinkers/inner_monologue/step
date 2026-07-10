@@ -18,8 +18,11 @@ _require_env
 THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
 THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-20}"
 
-# Drain the triggering step from stdin (wakeup only — context comes from traj)
-cat >/dev/null
+# Capture the triggering step from stdin (context still comes from traj).
+# The step_id is stamped as trigger_step on the step we append, so viewers
+# can draw the exact dispatch edge.
+step_json=$(cat)
+trigger_step_id=$(printf '%s' "$step_json" | jq -r '.step_id // empty' 2>/dev/null) || true
 
 # Build system prompt with identity context
 system_prompt=$(_build_system_prompt)
@@ -109,8 +112,13 @@ if [[ "$response" == "$last_content" ]]; then
     step_content="$step_content (repeat)"
 fi
 
-printf '{"type":"%s","content":%s,"source":"%s"}' \
-    "$step_type" "$(printf '%s' "$step_content" | jq -Rsa .)" "$THINKER_NAME" \
+jq -nc \
+    --arg type "$step_type" \
+    --arg content "$step_content" \
+    --arg source "$THINKER_NAME" \
+    --arg trigger "$trigger_step_id" \
+    '{type:$type, content:$content, source:$source}
+     + (if $trigger == "" then {} else {trigger_step: $trigger} end)' \
     | traj append >/dev/null
 
 printf '[%s] %s\n' "$step_type" "$step_content"
