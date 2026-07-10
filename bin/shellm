@@ -2259,7 +2259,7 @@ exit \$__shellm_rc
                     --arg from_traj "$_run_traj_id" \
                     --arg from_step "${_last_step_id:-}" \
                     --arg from_traj_ref "$_from_traj_ref" \
-                    '{type:"thought", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+                    '{type:"merge", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
                     | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
             fi
             return 0
@@ -2318,7 +2318,7 @@ exit \$__shellm_rc
             --arg from_traj "$_run_traj_id" \
             --arg from_step "${_last_step_id:-}" \
             --arg from_traj_ref "$_from_traj_ref" \
-            '{type:"thought", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+            '{type:"merge", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
             | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
     fi
     return 1

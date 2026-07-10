@@ -141,6 +141,33 @@ def test_previews():
     assert step_preview({"type": "trajectory"}) == "root"
     assert step_preview({"type": "trajectory", "parent_traj": "0123456789"}) == "<- parent: 01234567"
     assert step_preview({"type": "shell-output", "exit": 0, "stdout": "hi"}) == "exit 0 · hi"
+    # merge write-backs carry the child's answer; bare CLI merges fall back to the uuid
+    assert step_preview({"type": "merge", "content": "sub done", "from_traj": "abc"}) == "<- sub done"
+    assert step_preview({"type": "merge", "from_traj": "abc"}) == "<- abc"
+
+
+def test_merge_writeback_normalization():
+    """shellm's forked-child write-back is a merge step: writeback link built
+    from from_traj, never grouped into a run."""
+    from shellm_web.trajectory import normalize
+
+    raw = [
+        _step("trajectory", "t0"),
+        _step("fork", "fk1", child="c1", child_ref="c1-sub/trajectory.jsonl"),
+        _step(
+            "merge",
+            "m1",
+            content="inner result",
+            from_traj="c1",
+            from_step="c1-final",
+            from_traj_ref="c1-sub",
+        ),
+    ]
+    result = normalize(raw, Path("/nonexistent"))
+    merge = next(s for s in result["steps"] if s["step_id"] == "m1")
+    assert merge["writeback"] == {"from_traj": "c1", "from_step": "c1-final"}
+    assert merge["run_id"] is None
+    assert result["runs"] == []
 
 
 def test_blob_fields_survive_normalization():

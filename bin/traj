@@ -956,7 +956,7 @@ TAILHELP
                     elif .type == "final"         then ((.content // .thought) // "")
                     elif .type == "fork"          then ("-> " + (.child // ""))
                     elif .type == "trajectory"    then (if (.parent_traj // .parent) then ("<- parent: " + (.parent_traj // .parent)) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
-                    elif .type == "merge"         then ("<- " + (.from_traj // ""))
+                    elif .type == "merge"         then ("<- " + (.content // .from_traj // ""))
                     else (.content // "")
                     end;
                 select(matches_filters($filters)) |
@@ -1640,7 +1640,7 @@ CATHELP
                     elif .type == "final"         then ((.content // .thought) // "")
                     elif .type == "fork"          then ("-> " + (.child // ""))
                     elif .type == "trajectory"    then (if (.parent_traj // .parent) then ("<- parent: " + (.parent_traj // .parent)) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
-                    elif .type == "merge"         then ("<- " + (.from_traj // ""))
+                    elif .type == "merge"         then ("<- " + (.content // .from_traj // ""))
                     else (.content // "")
                     end;
                 select(matches_filters($filters)) |
@@ -1948,7 +1948,7 @@ _render_steps_inline() {
           elif .type == "shellm-run" then (.command // "")[0:60]
           elif .type == "run-summary" then (.tldr // "")[0:60]
           elif .type == "fork" then ("-> " + ((.child // "")[0:50]))
-          elif .type == "merge" then ("<- " + ((.from_traj // .from_branch // "")[0:50]))
+          elif .type == "merge" then ("<- " + ((.content // .from_traj // .from_branch // "")[0:50]))
           else (.content // "")[0:60]
           end) | gsub("[\\n\\r\\t]"; " "))
     ' "$file" 2>/dev/null) || true

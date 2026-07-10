@@ -156,8 +156,21 @@ step_ids — a different program), SSE tailing, stream virtualization,
   writers, `human-msg`/`agent-msg` are marked legacy, and `merge` is
   documented as CLI-only. The dead `sub-run` reference was removed from
   `bin/shellm`'s `--exclude-types` list (nothing writes that type).
-  **Open: Nick's call on `merge`** — nothing writes it; commit to it (keep
-  spec + subcommand as-is) or delete `traj merge` and its registry row.
+- **Done — `merge` decision (Nick, 2026-07-10): commit to it.** shellm's
+  forked-child write-back (the two `_SHELLM_PARENT_TRAJ_ID` sites in
+  `bin/shellm`, success + max-iterations) now writes `type:"merge"` instead
+  of a source-less `thought` — same fields (`content` +
+  `from_traj`/`from_step`/`from_traj_ref`). Every reader already spoke
+  merge (viewer writeback links are type-agnostic on `from_traj`;
+  `_recent_stream` and inner_monologue subscriptions already included it),
+  so the fan-out was: `merge` added to the four generic thinkers'
+  subscriptions + the `thinkers create` scaffold; merge previews in
+  `trajectory.py` and `bin/traj` now show `content` (falling back to the
+  uuid for bare CLI merges); spec/data-model updated (thought = monologue
+  only; a `thought` with `from_traj` is a legacy merge). Old logs
+  unaffected. Verified end-to-end with a nested forked run (merge lands in
+  the parent with the child's final answer; viewer builds the writeback
+  link and groups nothing); 12 pytest, typecheck clean.
 - **Not done**: 5b (fresh real-session fixture; the data-model.md grouping
   section was already updated alongside the code).
 

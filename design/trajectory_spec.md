@@ -88,7 +88,7 @@ The canonical list of step types. Families:
 |------|--------|--------|-------|
 | `trajectory` | structural | `traj new` | First line of every file; its `step_id` is the trajectory's ID |
 | `fork` | structural | `traj fork` (nested shellm runs) | Spawns a child trajectory |
-| `merge` | structural | `traj merge` (CLI only) | No automated writer currently calls it |
+| `merge` | structural | shellm (write-back when a forked child completes); `traj merge` | Carries `content` + `from_traj`/`from_step`/`from_traj_ref`; no `source` |
 | `shellm-run` | machinery | shellm loop | Run header; its `step_id` is the run's identity; may carry `trigger_step` |
 | `prompt` | machinery | shellm loop | Carries `run_id` |
 | `reasoning` | machinery | shellm loop | Carries `run_id` |
@@ -96,7 +96,7 @@ The canonical list of step types. Families:
 | `feedback` | machinery | shellm loop | Carries `run_id` |
 | `final` | machinery | shellm loop | Carries `run_id`; closes the run |
 | `run-summary` | machinery | shellm loop (async) | Carries `run_id` |
-| `thought` | thinker | `inner_monologue`; also written by shellm as a write-back when a forked child completes | Write-back variant carries `from_traj`/`from_step`/`from_traj_ref` and no `source` |
+| `thought` | thinker | `inner_monologue` | Monologue output; always carries `source`. (Pre-2026-07-10 logs also used `thought` for forked-child write-backs, now `merge`) |
 | `action` | thinker | `inner_monologue` | A thought starting with `action:`; dispatch triggers the actor |
 | `idle` | thinker | `inner_monologue` | Explicit no-op; keeps the `trigger_self` loop alive |
 | `observation` | thinker | `actor` | The actor recording a result to the mind log |
@@ -163,15 +163,18 @@ Records that a child trajectory was spawned from this point. The fork step's `st
 #### `merge`
 
 Records that a completed child trajectory's result was merged back into this
-one. Appended by `traj merge <child_id>`; the step points at the child's
-last step.
+one. Written by shellm into the parent trajectory when a forked child run
+finishes (the write-back carries the child's final answer as `content`, or
+`(max iterations reached)` on failure), and writable manually via
+`traj merge <child_id>`. The step points at the child's last step.
 
 ```json
-{"type":"merge", "from_traj":"<child-traj-uuid>", "from_step":"<child-last-step-uuid>", "from_traj_ref":"<hex8>-<slug>", "step_id":"<uuid>", "ts":"..."}
+{"type":"merge", "content":"<child's final answer>", "from_traj":"<child-traj-uuid>", "from_step":"<child-last-step-uuid>", "from_traj_ref":"<hex8>-<slug>", "step_id":"<uuid>", "ts":"..."}
 ```
 
-No automated writer currently calls `traj merge` — the type is reachable
-only via the CLI.
+Carries no `source`. Logs written before 2026-07-10 record these
+write-backs as `thought` steps with the same cross-reference fields;
+readers should treat a `thought` carrying `from_traj` as a legacy merge.
 
 ### Reference pattern
 
@@ -189,7 +192,7 @@ The UUID is the stable identifier; the `_ref` path enables direct file access wi
 
 Cross-trajectory references appear in two directions:
 - **Upward** (`parent_traj`/`parent_step`/`parent_traj_ref`): on the child trajectory's first step, pointing to the parent that forked it
-- **Downward** (`from_traj`/`from_step`/`from_traj_ref`): on `thought` steps written back to a parent trajectory after a sub-run completes, pointing to the sub-trajectory's final step
+- **Downward** (`from_traj`/`from_step`/`from_traj_ref`): on `merge` steps written back to a parent trajectory after a sub-run completes, pointing to the sub-trajectory's final step (legacy logs use `thought` steps with the same fields)
 
 ### Run lifecycle types
 
@@ -295,9 +298,7 @@ System-generated feedback injected into the conversation (e.g. after a timeout).
 ### Thinker types
 
 Written by thinkers — the processes `bin/thinkers` dispatches against a
-mind log. Thinker steps always carry `source` (the thinker's name); the one
-exception is the write-back `thought` variant below, which is written by
-shellm machinery and carries cross-references instead.
+mind log. Thinker steps always carry `source` (the thinker's name).
 
 #### `thought`
 
@@ -307,13 +308,9 @@ The inner monologue's default output.
 {"type":"thought", "content":"<thought text>", "source":"inner_monologue"}
 ```
 
-Write-back variant: when a forked child run completes, the parent
-trajectory receives a `thought` summarizing the result, with
-cross-references to the child (written by shellm, no `source`):
-
-```json
-{"type":"thought", "content":"<result>", "from_traj":"<sub-traj-uuid>", "from_step":"<final-step-uuid>", "from_traj_ref":"<hex8>-<slug>"}
-```
+Logs written before 2026-07-10 also used `thought` (with
+`from_traj`/`from_step`/`from_traj_ref` and no `source`) for forked-child
+write-backs; those are now `merge` steps.
 
 #### `action`
 
@@ -415,7 +412,7 @@ Trajectories form a tree via `fork` steps and `parent_traj` fields:
 
 - A **root** trajectory has no `parent_traj` field on its first step.
 - A **child** trajectory has `"parent_traj":"<parent-uuid>"` and `"parent_step":"<fork-step-uuid>"` on its first step, and the parent has a corresponding `"fork"` step with `"child":"<child-uuid>"`.
-- When a child completes, the parent records a `"thought"` step with `from_traj`/`from_step`/`from_traj_ref` pointing to the child's final step.
+- When a child completes, the parent records a `"merge"` step with `from_traj`/`from_step`/`from_traj_ref` pointing to the child's final step.
 
 The filesystem mirrors this: child trajectory directories are nested inside their parent's directory.
 
@@ -509,6 +506,6 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 {"type":"prompt","content":"echo hello","run_id":"aaa11111-0000-0000-0000-000000000001","step_id":"aaa11111-0000-0000-0000-000000000002","ts":"2026-05-16T13:26:06.855-0700"}
 {"type":"run-summary","tldr":"Ran echo command","full_summary":"","run_id":"aaa11111-0000-0000-0000-000000000001","step_id":"aaa11111-0000-0000-0000-000000000003","ts":"2026-05-16T13:26:07.100-0700"}
 {"type":"fork","child":"acce682d-1234-5678-9abc-def012345678","step_id":"aaa11111-0000-0000-0000-000000000004","ts":"2026-05-16T13:26:08.000-0700"}
-{"type":"thought","content":"Sub task done","from_traj":"acce682d-1234-5678-9abc-def012345678","from_step":"bbb11111-0000-0000-0000-000000000002","from_traj_ref":"acce682d-sub-task","step_id":"aaa11111-0000-0000-0000-000000000005","ts":"2026-05-16T13:26:09.000-0700"}
+{"type":"merge","content":"Sub task done","from_traj":"acce682d-1234-5678-9abc-def012345678","from_step":"bbb11111-0000-0000-0000-000000000002","from_traj_ref":"acce682d-sub-task","step_id":"aaa11111-0000-0000-0000-000000000005","ts":"2026-05-16T13:26:09.000-0700"}
 {"type":"final","thought":"Got the output, returning it.","content":"hello","run_id":"aaa11111-0000-0000-0000-000000000001","step_id":"aaa11111-0000-0000-0000-000000000006","ts":"2026-05-16T13:26:10.000-0700"}
 ```

@@ -20,10 +20,11 @@ code to revisit.
   `stdout_truncated` (same for stderr).
 - Fork links: parent `fork` step (`child` uuid, `child_ref` relpath, its
   `step_id` shared with the child) ↔ child first step (`parent_traj`,
-  `parent_step`, `parent_traj_ref`). Completion write-back is a `thought`
-  step in the parent with `from_traj`/`from_step`/`from_traj_ref`.
-- `merge` exists in the `traj` CLI but nothing currently writes it; the
-  viewer renders it if present but never depends on it.
+  `parent_step`, `parent_traj_ref`). Completion write-back is a `merge`
+  step in the parent with `content` + `from_traj`/`from_step`/
+  `from_traj_ref` (since 2026-07-10; legacy logs use a source-less
+  `thought` with the same fields — the viewer's writeback-link handling is
+  type-agnostic, keyed on `from_traj`, so both render identically).
 
 ## Run grouping: exact via run_id
 

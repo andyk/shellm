@@ -935,7 +935,7 @@ STEP
 
     # Create subscriptions
     cat > "$thinker_dir/subscriptions.jsonl" <<'SUBS'
-{"types":["thought","action","observation"]}
+{"types":["thought","action","observation","merge"]}
 SUBS
 
     # Create prompt template

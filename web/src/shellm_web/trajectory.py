@@ -61,7 +61,8 @@ def step_preview(raw: dict[str, Any]) -> str:
     if step_type == "fork":
         return f"-> {_first_str(raw, 'child_ref', 'child')}"
     if step_type == "merge":
-        return f"<- {_first_str(raw, 'from_traj')}"
+        content = _collapse(_first_str(raw, "content"), 140)
+        return f"<- {content}" if content else f"<- {_first_str(raw, 'from_traj')}"
     if step_type == "trajectory":
         parent = _first_str(raw, "parent_traj")
         return f"<- parent: {parent[:8]}" if parent else "root"
