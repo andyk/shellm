@@ -81,7 +81,10 @@ def test_run_id_grouping_exact_with_interleaved_runs():
         _step("action", "a1", source="inner_monologue", content="measure disk usage"),
         _step("shellm-run", "r1", command="shellm --traj t0 ... ACTION: measure disk usage"),
         _step("prompt", "p1", content="...", run_id="r1"),
-        _step("shellm-run", "r2", command="shellm --traj t0 ... ACTION: tidy notes"),
+        _step("action", "a2", source="inner_monologue", content="please tidy the notes directory"),
+        # trigger_step joins exactly even though the ACTION text would not
+        # prefix-match the action content
+        _step("shellm-run", "r2", command="shellm --traj t0 ... ACTION: tidy notes", trigger_step="a2"),
         _step("reasoning", "s1", thought="du", cmd="du -sh .", run_id="r1"),
         _step("reasoning", "s2", thought="ls", cmd="ls notes/", run_id="r2"),
         _step("thought", "th1", source="inner_monologue", content="both running"),
@@ -103,8 +106,9 @@ def test_run_id_grouping_exact_with_interleaved_runs():
     # run-summary lands on the right run even though r2 closed in between
     assert runs["r1"]["tldr"] == "Measured disk usage"
     assert runs["r2"]["tldr"] is None
-    # action join still works
+    # action joins: legacy prefix fallback for r1, exact trigger_step for r2
     assert runs["r1"]["action_step_id"] == "a1"
+    assert runs["r2"]["action_step_id"] == "a2"
     # thinker steps untouched; orphan machinery ungrouped but present
     steps = {s["step_id"]: s for s in result["steps"]}
     assert steps["th1"]["run_id"] is None

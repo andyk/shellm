@@ -117,6 +117,15 @@ step_ids — a different program), SSE tailing, stream virtualization,
 - **Done — work item 1**: `bin/shellm` stamps `run_id` on prompt / reasoning /
   shell-output / feedback / final (both sites) / run-summary;
   `generate_run_summary` takes the run step_id as an argument.
+- **Done — work item 2**: `thinkers/actor/step` exports
+  `SHELLM_TRIGGER_STEP_ID` (the triggering step's id, message or action);
+  `bin/shellm` stamps it as `trigger_step` on the `shellm-run` step and
+  blanks the env var for executed code so nested runs don't inherit it.
+  Viewer joins exactly on `trigger_step`, keeping the ACTION-prefix match
+  as fallback for legacy logs (message-triggered runs carry the field but
+  are not yet joined in the UI — same semantics as before). Verified with
+  the stubbed-llm harness: `trigger_step` on the header, executed code
+  sees the var blank.
 - **Done — work item 4, revised per amended D2**: `trajectory.py` groups by
   explicit `run_id` (dict lookup); stack / summary-attachment heuristics and
   `confidence` deleted from the backend, `types.ts`, and `run-group.tsx`.
@@ -126,9 +135,9 @@ step_ids — a different program), SSE tailing, stream virtualization,
   unknown-run_id orphans. 11 passed; frontend typecheck clean. Verified
   end-to-end with a stubbed `llm`: two runs appended into one trajectory via
   `--traj` grouped exactly by `load_trajectory`.
-- **Not done**: work item 2 (`trigger_step`), 3 (monologue content bug),
-  5b (fresh real-session fixture), 6 (trajectory_spec registry; the
-  data-model.md grouping section was updated alongside the code).
+- **Not done**: work item 3 (monologue content bug), 5b (fresh real-session
+  fixture), 6 (trajectory_spec registry; the data-model.md grouping section
+  was updated alongside the code).
 
 ## Work items (in order)
 

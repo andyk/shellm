@@ -44,11 +44,14 @@ runs interleave in one shared mind log:
 3. **Legacy logs (pre-run_id)**: machinery steps without `run_id` are left
    ungrouped and render as plain stream steps — never guessed at. A legacy
    `shellm-run` header still opens a (member-less) group.
-4. `action` → run join: the actor embeds the action text at the end of the
-   `shellm-run` command (`…ACTION: <text>`); match by whitespace-collapsed
-   200-char prefix in either direction. On a miss, `action_step_id` stays
-   null and the UI shows the steps adjacently. (To be replaced by an
-   explicit `trigger_step` field — see `20260710/PLAN.md`.)
+4. `action` → run join: exact when the `shellm-run` step carries
+   `trigger_step` (the actor exports the triggering step's id via
+   `SHELLM_TRIGGER_STEP_ID`; shellm blanks it for executed code so nested
+   runs don't inherit it). Legacy runs without `trigger_step` fall back to
+   the ACTION: command-suffix prefix match (whitespace-collapsed 200-char
+   prefix in either direction). On a miss, `action_step_id` stays null and
+   the UI shows the steps adjacently. Note: message-triggered runs carry
+   `trigger_step` too, but the viewer currently only joins `action` steps.
 5. `fork` steps resolve their child dir via `child_ref`, falling back to a
    `<hex8>-*` glob; `from_traj` write-backs become links.
 

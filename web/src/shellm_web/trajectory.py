@@ -180,18 +180,28 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                     command=raw.get("command", ""),
                     model=raw.get("model"),
                 )
-                # action -> run join via the ACTION: suffix in the command
-                suffix = _action_suffix(run.command)
-                if suffix:
-                    for action in reversed(unmatched_actions):
-                        action_text = _collapse(str(action["raw"].get("content", "")))
-                        if action_text and (
-                            action_text.startswith(suffix[:200])
-                            or suffix.startswith(action_text[:200])
-                        ):
+                # action -> run join. Exact when the run carries trigger_step
+                # (the actor exports the triggering step's id); otherwise fall
+                # back to the legacy ACTION: command-suffix prefix match.
+                trigger = raw.get("trigger_step")
+                if trigger:
+                    for action in unmatched_actions:
+                        if action["step_id"] == trigger:
                             run.action_step_id = action["step_id"]
                             unmatched_actions.remove(action)
                             break
+                else:
+                    suffix = _action_suffix(run.command)
+                    if suffix:
+                        for action in reversed(unmatched_actions):
+                            action_text = _collapse(str(action["raw"].get("content", "")))
+                            if action_text and (
+                                action_text.startswith(suffix[:200])
+                                or suffix.startswith(action_text[:200])
+                            ):
+                                run.action_step_id = action["step_id"]
+                                unmatched_actions.remove(action)
+                                break
                 runs.append(run)
                 runs_by_id[run.run_id] = run
                 run.step_ids.append(step_id)
