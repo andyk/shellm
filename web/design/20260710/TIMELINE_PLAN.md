@@ -229,5 +229,32 @@ correlation, any mobile-specific layout.
   run's id; viewer surfaces launched_by, refuses to join an unknown
   trigger id. 13 pytest passed; typecheck clean; `bash -n` clean on all
   touched scripts.
-- **Not started — work item 5** (Timeline tab UI), item 6 tests beyond the
-  three added (`launched_by`/non-action-trigger/multi-run-per-trigger).
+- **Done — work item 5 (Timeline tab UI)**, awaiting Nick's review/commit.
+  New files: `web/viewer/app/lib/timeline-model.ts` (pure layout: lanes
+  from data, ordinal rows with per-row heights, run blocks with extents,
+  gap dividers, all four edge kinds — deterministic coordinates so the SVG
+  overlay needs no DOM measurement), `components/timeline-view.tsx`
+  (scroll container + sticky lane headers, cells with preview text, run
+  blocks with sticky in-block summaries, hover-highlighted edges, in-lane
+  nesting of steps a run wrote, container-based follow pill),
+  `components/timeline-detail.tsx` (modal: step card / run summary +
+  members), `routes/timeline.tsx` (page + legend); `routes.ts` and
+  `identity-tabs.tsx` register the tab.
+  Implementation notes discovered while verifying in the browser:
+  timestamps in one log can carry **mixed TZ offsets** (steps written from
+  inside a run's env) — all comparisons/clock display go through
+  `Date.parse`, never string compares; an open run's extent = its latest
+  member's ts (so legacy member-less headers stay point blocks);
+  `overflow-hidden` on a block would become the sticky summary's scroll
+  container and misplace it (comment in the code). Verified against
+  legacy data (botnick-neo: unattributed runs → `shellm` fallback lane,
+  prefix-fallback trigger edges) and a synthetic new-format identity
+  (`.identities/timeline-demo/`, gitignored, kept as a demo: launched_by
+  lanes for actor+learning, exact trigger/dispatch/assoc edges, nested
+  in-run steps, 4m gap divider, light+dark, modals, hover). 13 pytest,
+  typecheck clean, no console errors. NOTE: restart `shellm-web` after
+  pulling backend changes — uvicorn (non-dev) serves stale code.
+- **Remaining**: live-session verification (start thinkers on a fresh
+  identity and watch it tick — doubles as PLAN.md 5b fixture capture);
+  optional stretch items per T4/T8 (newest-at-top toggle, ghost squares,
+  `?after=`).
