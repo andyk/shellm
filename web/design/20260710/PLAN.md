@@ -146,9 +146,20 @@ step_ids — a different program), SSE tailing, stream virtualization,
   re-prefixed so it still classifies as an action). Verified against the
   g001r1 evidence case plus edge cases (non-JSON brace-prefixed prose,
   envelope without content key) — all classify correctly.
-- **Not done**: 5b (fresh real-session fixture), 6 (trajectory_spec
-  registry + the `merge` decision; the data-model.md grouping section was
-  updated alongside the code).
+- **Done — work item 6 (docs), except the `merge` decision**:
+  `design/trajectory_spec.md` gained a canonical step-type registry
+  (type → family → writer, covering all 18 wire types incl. the previously
+  undocumented `idle`, `observation`, `tp-thought`, `message`) and a
+  "Run identity" section recording the `run_id`/`trigger_step` invariants;
+  machinery examples now show `run_id`, `shellm-run` documents
+  `trigger_step`, the think-cycle section was rewritten for current thinker
+  writers, `human-msg`/`agent-msg` are marked legacy, and `merge` is
+  documented as CLI-only. The dead `sub-run` reference was removed from
+  `bin/shellm`'s `--exclude-types` list (nothing writes that type).
+  **Open: Nick's call on `merge`** — nothing writes it; commit to it (keep
+  spec + subcommand as-is) or delete `traj merge` and its registry row.
+- **Not done**: 5b (fresh real-session fixture; the data-model.md grouping
+  section was already updated alongside the code).
 
 ## Work items (in order)
 

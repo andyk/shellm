@@ -1946,7 +1946,7 @@ run_loop() {
         messages_json=$(context --traj_dir "$_run_traj_dir" "$_run_traj_id" \
             --assistant-types reasoning,final \
             --user-types prompt,shell-output,feedback \
-            --exclude-types sub-run,shellm-run,run-summary 2>/dev/null) || messages_json='[]'
+            --exclude-types shellm-run,run-summary 2>/dev/null) || messages_json='[]'
 
         # Call Claude (capture thinking/reasoning to file)
         local thinking_file="$rundir/.last_thinking"

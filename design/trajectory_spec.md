@@ -72,6 +72,66 @@ Every step is a single-line JSON object with at least these fields:
 
 ## Step types
 
+### Registry
+
+The canonical list of step types. Families:
+
+- **machinery** — written by the shellm run loop (`bin/shellm`). Never
+  carry `source`. All except the `shellm-run` header carry `run_id`.
+- **structural** — written by the `traj` CLI; manage the trajectory tree.
+- **thinker** — written by thinkers dispatched against a mind log. Always
+  carry `source` (the thinker's name).
+- **conversation** — written by `chat` (a bus client, not a shellm entry
+  point). Carry `source: "chat"`.
+
+| Type | Family | Writer | Notes |
+|------|--------|--------|-------|
+| `trajectory` | structural | `traj new` | First line of every file; its `step_id` is the trajectory's ID |
+| `fork` | structural | `traj fork` (nested shellm runs) | Spawns a child trajectory |
+| `merge` | structural | `traj merge` (CLI only) | No automated writer currently calls it |
+| `shellm-run` | machinery | shellm loop | Run header; its `step_id` is the run's identity; may carry `trigger_step` |
+| `prompt` | machinery | shellm loop | Carries `run_id` |
+| `reasoning` | machinery | shellm loop | Carries `run_id` |
+| `shell-output` | machinery | shellm loop | Carries `run_id` |
+| `feedback` | machinery | shellm loop | Carries `run_id` |
+| `final` | machinery | shellm loop | Carries `run_id`; closes the run |
+| `run-summary` | machinery | shellm loop (async) | Carries `run_id` |
+| `thought` | thinker | `inner_monologue`; also written by shellm as a write-back when a forked child completes | Write-back variant carries `from_traj`/`from_step`/`from_traj_ref` and no `source` |
+| `action` | thinker | `inner_monologue` | A thought starting with `action:`; dispatch triggers the actor |
+| `idle` | thinker | `inner_monologue` | Explicit no-op; keeps the `trigger_self` loop alive |
+| `observation` | thinker | `actor` | The actor recording a result to the mind log |
+| `tp-thought` | thinker | thinkers scaffolded by `thinkers create` | Generic thinker output |
+| `message` | conversation | `chat send` / `chat reply` / `chat file` | Carries `from`/`to`; file variant adds `filename` |
+| `human-msg` | conversation | *(legacy — nothing writes it)* | Still read by `chat repl` for old logs |
+| `agent-msg` | conversation | *(legacy — nothing writes it)* | Still read by `chat repl` for old logs |
+
+### Run identity: `run_id` and `trigger_step`
+
+These are guaranteed invariants of the format (writers stamp exact links;
+readers must not guess):
+
+- Every execution of the shellm run loop writes exactly one `shellm-run`
+  header step. **The header's `step_id` is the run's identity.**
+- Every other machinery step the run writes — `prompt`, `reasoning`,
+  `shell-output`, `feedback`, `final`, `run-summary` — carries
+  `run_id` = that header's `step_id`.
+- Many runs may share one trajectory (`shellm --traj <ID>` appends into an
+  existing file), and machinery from concurrent runs and thinker steps may
+  interleave freely. `run_id` — not file position — is what ties a step to
+  its run.
+- When a run is launched by the actor thinker, the `shellm-run` header
+  carries `trigger_step` = the `step_id` of the mind-log step (`action` or
+  `message`) that triggered it. Mechanism: the actor exports
+  `SHELLM_TRIGGER_STEP_ID`; shellm stamps it on the header and blanks the
+  variable in the environment of executed code, so nested runs never
+  inherit a stale trigger.
+- Machinery steps never carry `source`; readers attribute source-less
+  machinery to the shellm loop.
+
+Logs written before 2026-07-10 predate these fields. Readers must tolerate
+their absence (render such steps as a plain ungrouped stream), never
+reconstruct membership heuristically.
+
 ### Structural types
 
 These manage the trajectory tree itself.
@@ -100,6 +160,19 @@ Records that a child trajectory was spawned from this point. The fork step's `st
 - `child` — UUID of the child trajectory
 - `child_ref` — relative path from this trajectory's directory to the child's `trajectory.jsonl`
 
+#### `merge`
+
+Records that a completed child trajectory's result was merged back into this
+one. Appended by `traj merge <child_id>`; the step points at the child's
+last step.
+
+```json
+{"type":"merge", "from_traj":"<child-traj-uuid>", "from_step":"<child-last-step-uuid>", "from_traj_ref":"<hex8>-<slug>", "step_id":"<uuid>", "ts":"..."}
+```
+
+No automated writer currently calls `traj merge` — the type is reachable
+only via the CLI.
+
 ### Reference pattern
 
 All cross-trajectory references use three fields: a trajectory UUID, a step UUID within that trajectory, and a relative path for direct file access.
@@ -120,11 +193,17 @@ Cross-trajectory references appear in two directions:
 
 ### Run lifecycle types
 
-These mark the beginning, end, and metadata of a shellm run.
+Machinery steps marking the beginning, end, and metadata of a shellm run.
+Never carry `source`. All except the `shellm-run` header carry `run_id`
+(see [Run identity](#run-identity-run_id-and-trigger_step)).
 
 #### `shellm-run`
 
-Written immediately after trajectory creation. Records how the run was invoked and its configuration.
+The run header, written at the start of every run (immediately after
+trajectory creation, or as the first step of a `--traj` run appending into
+an existing trajectory). Records how the run was invoked and its
+configuration. **Its `step_id` is the run's identity** — every subsequent
+machinery step of the run carries it as `run_id`.
 
 ```json
 {
@@ -137,7 +216,8 @@ Written immediately after trajectory creation. Records how the run was invoked a
   "max_tokens": "<N or empty>",
   "inactivity_timeout": "<seconds>",
   "context_files": ["<path>", ...],
-  "env": {"name":"<env name>", "type":"local|docker", ...}
+  "env": {"name":"<env name>", "type":"local|docker", ...},
+  "trigger_step": "<uuid, only when launched by the actor>"
 }
 ```
 
@@ -152,13 +232,14 @@ Written immediately after trajectory creation. Records how the run was invoked a
 | `inactivity_timeout` | Seconds before killing idle execution (default: `30`) |
 | `context_files` | Array of `-f` file paths passed to the run |
 | `env` | Execution environment metadata (local or Docker details) |
+| `trigger_step` | Optional. `step_id` of the mind-log step (`action` or `message`) that triggered this run, when launched by the actor |
 
 #### `prompt`
 
 The user's initial prompt for the run.
 
 ```json
-{"type":"prompt", "content":"<prompt text>"}
+{"type":"prompt", "content":"<prompt text>", "run_id":"<shellm-run step_id>"}
 ```
 
 #### `run-summary`
@@ -166,27 +247,28 @@ The user's initial prompt for the run.
 Auto-generated summary of the run (produced asynchronously by a fast model).
 
 ```json
-{"type":"run-summary", "tldr":"<one-line summary>", "full_summary":"<longer summary>"}
+{"type":"run-summary", "tldr":"<one-line summary>", "full_summary":"<longer summary>", "run_id":"<shellm-run step_id>"}
 ```
 
 #### `final`
 
-The agent's final answer — the run's output.
+The agent's final answer — the run's output. Closes the run.
 
 ```json
-{"type":"final", "thought":"<reasoning>", "content":"<answer>", "cmd":"<last code if any>"}
+{"type":"final", "thought":"<reasoning>", "content":"<answer>", "cmd":"<last code if any>", "run_id":"<shellm-run step_id>"}
 ```
 
 ### Agent reasoning types
 
-These record the agent's thought-action-observation loop.
+Machinery steps recording the agent's thought-action-observation loop.
+Never carry `source`; always carry `run_id`.
 
 #### `reasoning`
 
 One iteration of the agent's reasoning, including the code it decided to execute.
 
 ```json
-{"type":"reasoning", "thought":"<reasoning text>", "cmd":"<bash code>"}
+{"type":"reasoning", "thought":"<reasoning text>", "cmd":"<bash code>", "run_id":"<shellm-run step_id>"}
 ```
 
 #### `shell-output`
@@ -194,12 +276,12 @@ One iteration of the agent's reasoning, including the code it decided to execute
 The result of executing a code block.
 
 ```json
-{"type":"shell-output", "stdout":"<output>", "stderr":"<errors>", "exit":<code>}
+{"type":"shell-output", "stdout":"<output>", "stderr":"<errors>", "exit":<code>, "run_id":"<shellm-run step_id>"}
 ```
 
 When execution timed out:
 ```json
-{"type":"shell-output", "stdout":"...", "stderr":"...", "exit":<code>, "timed_out":true, "feedback":"<inactivity message>"}
+{"type":"shell-output", "stdout":"...", "stderr":"...", "exit":<code>, "timed_out":true, "feedback":"<inactivity message>", "run_id":"..."}
 ```
 
 #### `feedback`
@@ -207,22 +289,27 @@ When execution timed out:
 System-generated feedback injected into the conversation (e.g. after a timeout).
 
 ```json
-{"type":"feedback", "content":"<feedback text>"}
+{"type":"feedback", "content":"<feedback text>", "run_id":"<shellm-run step_id>"}
 ```
 
-### Think cycle types
+### Thinker types
 
-These are produced by `think`, the autonomous thinking loop.
+Written by thinkers — the processes `bin/thinkers` dispatches against a
+mind log. Thinker steps always carry `source` (the thinker's name); the one
+exception is the write-back `thought` variant below, which is written by
+shellm machinery and carries cross-references instead.
 
 #### `thought`
 
-A think-cycle thought (no action taken).
+The inner monologue's default output.
 
 ```json
-{"type":"thought", "content":"<thought text>", "source":"think"}
+{"type":"thought", "content":"<thought text>", "source":"inner_monologue"}
 ```
 
-When a thought originates from a completed sub-trajectory (e.g. after a thinker's shellm run), it includes cross-references:
+Write-back variant: when a forked child run completes, the parent
+trajectory receives a `thought` summarizing the result, with
+cross-references to the child (written by shellm, no `source`):
 
 ```json
 {"type":"thought", "content":"<result>", "from_traj":"<sub-traj-uuid>", "from_step":"<final-step-uuid>", "from_traj_ref":"<hex8>-<slug>"}
@@ -230,29 +317,65 @@ When a thought originates from a completed sub-trajectory (e.g. after a thinker'
 
 #### `action`
 
-A think-cycle thought that begins with "action:" — triggers execution in a child trajectory.
+A monologue thought that begins with `action:` — the dispatcher triggers
+the actor thinker, which runs `shellm --traj <mind log>`. The resulting
+`shellm-run` header points back at this step via `trigger_step`.
 
 ```json
-{"type":"action", "content":"action: <description>", "source":"think"}
+{"type":"action", "content":"<description>", "source":"inner_monologue"}
+```
+
+#### `idle`
+
+An explicit no-op from the monologue (the model answered `idle`). Emitted
+instead of a `thought` so the `trigger_self` loop stays alive without
+adding content.
+
+```json
+{"type":"idle", "content":"idle", "source":"inner_monologue"}
+```
+
+#### `observation`
+
+The actor recording a result or meaningful intermediate finding to the
+mind log.
+
+```json
+{"type":"observation", "content":"<result>", "source":"actor"}
+```
+
+#### `tp-thought`
+
+Generic thinker output — the `thinkers create` scaffold instructs new
+thinkers to write this type.
+
+```json
+{"type":"tp-thought", "content":"<thought text>", "source":"<thinker name>"}
 ```
 
 ### Conversation types
 
-Produced by `chat` for human-agent messaging.
+Produced by `chat` for messaging on a mind log. `chat` is a bus client, not
+a shellm entry point: `chat send` is one `traj append`.
 
-#### `human-msg`
+#### `message`
 
-A message from a human into the thought stream.
+A message between named parties (human or agent).
+
+```json
+{"type":"message", "content":"<message>", "from":"<sender>", "to":"<recipient>", "source":"chat"}
+```
+
+The file-transfer variant (`chat file`) adds `"filename":"<name>"`.
+
+#### `human-msg` / `agent-msg` (legacy)
+
+Predecessors of `message` — a human message into the thought stream and
+the agent's reply. Nothing writes them anymore; `chat repl` still reads
+them so old logs render.
 
 ```json
 {"type":"human-msg", "content":"<message>"}
-```
-
-#### `agent-msg`
-
-The agent's conversational reply.
-
-```json
 {"type":"agent-msg", "content":"<message>"}
 ```
 
@@ -323,20 +446,26 @@ The filesystem mirrors this: child trajectory directories are nested inside thei
 
 ## Expected step ordering
 
-A complete shellm run trajectory follows this order:
+A complete shellm run follows this order:
 
 ```
-trajectory                      # created by traj new
-shellm-run                      # run metadata (model, effort, env, etc.)
-prompt                          # the user's request
-run-summary                     # async, may appear at any point after prompt
-reasoning → shell-output        # repeated per iteration (the agent loop)
-final                           # the agent's answer (terminates the loop)
+trajectory                      # created by traj new (absent for --traj runs)
+shellm-run                      # run header; its step_id is the run id
+prompt                          # the user's request        (run_id)
+run-summary                     # async, may appear at any point after prompt (run_id)
+reasoning → shell-output        # repeated per iteration    (run_id)
+final                           # the agent's answer (terminates the loop, run_id)
 ```
 
 The `reasoning → shell-output` pair repeats for each iteration. If the LLM responds without a code block, a `final` step is written directly (no `reasoning`/`shell-output` pair for that iteration).
 
 The `run-summary` step is generated asynchronously and may land anywhere after the `prompt` step — often between `prompt` and the first `reasoning`, but sometimes after `final`.
+
+**Ordering is per run, not per file.** With `shellm --traj <ID>` a run
+appends its machinery into an existing trajectory, so one file can hold
+many runs, interleaved with each other and with concurrent thinker and
+conversation steps. The order above holds among the steps sharing a
+`run_id`; readers must group by `run_id`, not by position.
 
 ## CLI reference
 
@@ -377,9 +506,9 @@ All commands accept `[ID]` as an optional positional argument (trajectory ID, UU
 ```jsonl
 {"type":"trajectory","step_id":"729eb4ae-2a49-4b41-9db6-8ff3aa500d2a","ts":"2026-05-16T13:26:06.846-0700"}
 {"type":"shellm-run","command":"shellm 'echo hello'","workdir":"/tmp/work","model":"claude-sonnet-4-20250514","effort":"high","max_iterations":"","max_tokens":"","inactivity_timeout":"30","context_files":[],"env":{"name":"local","type":"local"},"step_id":"aaa11111-0000-0000-0000-000000000001","ts":"2026-05-16T13:26:06.850-0700"}
-{"type":"prompt","content":"echo hello","step_id":"aaa11111-0000-0000-0000-000000000002","ts":"2026-05-16T13:26:06.855-0700"}
-{"type":"run-summary","tldr":"Ran echo command","full_summary":"","step_id":"aaa11111-0000-0000-0000-000000000003","ts":"2026-05-16T13:26:07.100-0700"}
+{"type":"prompt","content":"echo hello","run_id":"aaa11111-0000-0000-0000-000000000001","step_id":"aaa11111-0000-0000-0000-000000000002","ts":"2026-05-16T13:26:06.855-0700"}
+{"type":"run-summary","tldr":"Ran echo command","full_summary":"","run_id":"aaa11111-0000-0000-0000-000000000001","step_id":"aaa11111-0000-0000-0000-000000000003","ts":"2026-05-16T13:26:07.100-0700"}
 {"type":"fork","child":"acce682d-1234-5678-9abc-def012345678","step_id":"aaa11111-0000-0000-0000-000000000004","ts":"2026-05-16T13:26:08.000-0700"}
 {"type":"thought","content":"Sub task done","from_traj":"acce682d-1234-5678-9abc-def012345678","from_step":"bbb11111-0000-0000-0000-000000000002","from_traj_ref":"acce682d-sub-task","step_id":"aaa11111-0000-0000-0000-000000000005","ts":"2026-05-16T13:26:09.000-0700"}
-{"type":"final","thought":"Got the output, returning it.","content":"hello","step_id":"aaa11111-0000-0000-0000-000000000006","ts":"2026-05-16T13:26:10.000-0700"}
+{"type":"final","thought":"Got the output, returning it.","content":"hello","run_id":"aaa11111-0000-0000-0000-000000000001","step_id":"aaa11111-0000-0000-0000-000000000006","ts":"2026-05-16T13:26:10.000-0700"}
 ```
