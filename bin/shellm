@@ -1517,9 +1517,10 @@ SYSPROMPT
 generate_run_summary() {
     local traj_dir="$1"
     local traj_id="$2"
-    local prompt="$3"
-    local stdin_file="$4"  # path to file with stdin content, or ""
-    shift 4
+    local run_step_id="$3"  # step_id of the shellm-run step this summarizes
+    local prompt="$4"
+    local stdin_file="$5"  # path to file with stdin content, or ""
+    shift 5
     local file_paths=("$@")
 
     local summary_model="${SHELLM_SUMMARY_MODEL:-claude-haiku-4-5-20251001}"
@@ -1598,7 +1599,8 @@ ${combined}"
     summary_json=$(jq -nc \
         --arg tldr "${tldr:-(summary generation failed)}" \
         --arg full "$full_summary" \
-        '{type:"run-summary", tldr:$tldr, full_summary:$full}')
+        --arg run_id "$run_step_id" \
+        '{type:"run-summary", tldr:$tldr, full_summary:$full, run_id:$run_id}')
     printf '%s' "$summary_json" | traj append --traj_dir "$traj_dir" "$traj_id" >/dev/null 2>/dev/null || true
 }
 
@@ -1847,8 +1849,16 @@ run_loop() {
         --argjson ctx "$_ctx_files_json" \
         --argjson env "$_env_json" \
         --argjson resumed "$(if [[ -n "$_use_traj" ]]; then echo true; else echo false; fi)" \
-        '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env, resumed:$resumed}')
-    printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
+        --arg trigger "${SHELLM_TRIGGER_STEP_ID:-}" \
+        --arg launched_by "${SHELLM_LAUNCHED_BY:-}" \
+        '{type:"shellm-run", command:$cmd, workdir:$wd, model:$model, effort:$effort, max_iterations:$max_iter, max_tokens:$max_tok, inactivity_timeout:$inactivity_timeout, context_files:$ctx, env:$env, resumed:$resumed}
+         + (if $trigger == "" then {} else {trigger_step: $trigger} end)
+         + (if $launched_by == "" then {} else {launched_by: $launched_by} end)')
+    # traj append prints the assigned step_id; keep it so every machinery step
+    # this run writes can carry run_id (crucial with --traj, where many runs
+    # interleave in one shared trajectory)
+    local _run_step_id
+    _run_step_id=$(printf '%s' "$_shellm_run_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id")
 
     if [[ -z "$_use_traj" ]]; then
         # New trajectory — kick off async run-summary generation
@@ -1857,7 +1867,7 @@ run_loop() {
             stdin_ctx_file="$rundir/.stdin_context"
             printf '%s' "$stdin_context" > "$stdin_ctx_file"
         fi
-        generate_run_summary "$_run_traj_dir" "$_run_traj_id" "$prompt" "$stdin_ctx_file" \
+        generate_run_summary "$_run_traj_dir" "$_run_traj_id" "$_run_step_id" "$prompt" "$stdin_ctx_file" \
             "${context_files[@]+"${context_files[@]}"}" &
         _ctx_summary_pid=$!
         debug "Run summary generation started (PID: $_ctx_summary_pid)"
@@ -1865,7 +1875,7 @@ run_loop() {
 
     # Write prompt step
     if [[ -n "$prompt" ]]; then
-        printf '%s' "$(jq -n --arg p "$prompt" '{type:"prompt",content:$p}')" \
+        printf '%s' "$(jq -n --arg p "$prompt" --arg run_id "$_run_step_id" '{type:"prompt",content:$p,run_id:$run_id}')" \
             | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
     fi
 
@@ -1938,7 +1948,7 @@ run_loop() {
         messages_json=$(context --traj_dir "$_run_traj_dir" "$_run_traj_id" \
             --assistant-types reasoning,final \
             --user-types prompt,shell-output,feedback \
-            --exclude-types sub-run,shellm-run,run-summary 2>/dev/null) || messages_json='[]'
+            --exclude-types shellm-run,run-summary 2>/dev/null) || messages_json='[]'
 
         # Call Claude (capture thinking/reasoning to file)
         local thinking_file="$rundir/.last_thinking"
@@ -2009,7 +2019,7 @@ run_loop() {
             debug "No code extracted, treating full response as final answer"
             progress "No code block found — returning response as answer"
             # Record as a final step with no cmd
-            printf '%s' "$(jq -n --arg t "$reasoning" --arg f "$response" '{type:"final",thought:$t,content:$f}')" \
+            printf '%s' "$(jq -n --arg t "$reasoning" --arg f "$response" --arg run_id "$_run_step_id" '{type:"final",thought:$t,content:$f,run_id:$run_id}')" \
                 | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
             echo "$response"
             return 0
@@ -2061,6 +2071,12 @@ exit \$__shellm_rc
             SHELLM_ALLOW_NESTED_DOCKER="$SHELLM_ALLOW_NESTED_DOCKER"
             _SHELLM_PARENT_RUN="$run_name"
             _SHELLM_PARENT_TRAJ_ID="$_run_traj_id"
+            # blank so nested shellm runs don't inherit this run's trigger/launcher
+            SHELLM_TRIGGER_STEP_ID=""
+            SHELLM_LAUNCHED_BY=""
+            # traj append stamps this as run_id on steps the executed code
+            # writes (observations etc.), linking them to this run exactly
+            SHELLM_RUN_STEP_ID="$_run_step_id"
             TRAJ_DIR="$_run_traj_dir"
             TRAJ_ID="$_run_traj_id"
             ROOT_TRAJ_ID="${ROOT_TRAJ_ID:-$_run_traj_id}"
@@ -2216,7 +2232,8 @@ exit \$__shellm_rc
         reasoning_json=$(jq -n \
             --arg thought "$reasoning" \
             --arg cmd "$code" \
-            '{type:"reasoning", thought:$thought, cmd:$cmd}')
+            --arg run_id "$_run_step_id" \
+            '{type:"reasoning", thought:$thought, cmd:$cmd, run_id:$run_id}')
 
         # Check for final answer before recording output
         if [[ -f "$final_path" ]]; then
@@ -2230,7 +2247,8 @@ exit \$__shellm_rc
                 --arg thought "$reasoning" \
                 --arg cmd "$code" \
                 --arg content "$final_answer" \
-                '{type:"final", thought:$thought, cmd:$cmd, content:$content}')" \
+                --arg run_id "$_run_step_id" \
+                '{type:"final", thought:$thought, cmd:$cmd, content:$content, run_id:$run_id}')" \
                 | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
             redact_sensitive "$final_answer"
             [[ "$QUIET" -eq 0 ]] && echo >&2
@@ -2247,7 +2265,7 @@ exit \$__shellm_rc
                     --arg from_traj "$_run_traj_id" \
                     --arg from_step "${_last_step_id:-}" \
                     --arg from_traj_ref "$_from_traj_ref" \
-                    '{type:"thought", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+                    '{type:"merge", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
                     | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
             fi
             return 0
@@ -2270,20 +2288,22 @@ exit \$__shellm_rc
                 --arg stderr "" \
                 --argjson exit "$exit_code" \
                 --arg feedback "$feedback" \
-                '{type:"shell-output", stdout:$stdout, stderr:$stderr, exit:$exit, timed_out:true, feedback:$feedback}')
+                --arg run_id "$_run_step_id" \
+                '{type:"shell-output", stdout:$stdout, stderr:$stderr, exit:$exit, timed_out:true, feedback:$feedback, run_id:$run_id}')
         else
             output_json=$(jq -n \
                 --arg stdout "$clean_output" \
                 --arg stderr "" \
                 --argjson exit "$exit_code" \
-                '{type:"shell-output", stdout:$stdout, stderr:$stderr, exit:$exit}')
+                --arg run_id "$_run_step_id" \
+                '{type:"shell-output", stdout:$stdout, stderr:$stderr, exit:$exit, run_id:$run_id}')
         fi
 
         # Also record as feedback step if timed out
         if [[ "$timed_out" -eq 1 ]]; then
             printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
             local feedback_json
-            feedback_json=$(jq -n --arg content "$feedback" '{type:"feedback", content:$content}')
+            feedback_json=$(jq -n --arg content "$feedback" --arg run_id "$_run_step_id" '{type:"feedback", content:$content, run_id:$run_id}')
             printf '%s' "$feedback_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
         else
             printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
@@ -2304,7 +2324,7 @@ exit \$__shellm_rc
             --arg from_traj "$_run_traj_id" \
             --arg from_step "${_last_step_id:-}" \
             --arg from_traj_ref "$_from_traj_ref" \
-            '{type:"thought", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+            '{type:"merge", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
             | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
     fi
     return 1

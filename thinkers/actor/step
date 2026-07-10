@@ -24,6 +24,7 @@ step_json=$(cat)
 
 trigger_type=$(printf '%s' "$step_json" | jq -r '.type // empty' 2>/dev/null) || true
 trigger_content=$(printf '%s' "$step_json" | jq -r '.content // empty' 2>/dev/null) || true
+trigger_step_id=$(printf '%s' "$step_json" | jq -r '.step_id // empty' 2>/dev/null) || true
 [[ -z "$trigger_content" ]] && exit 0
 
 # Guard: only engage with messages addressed to this identity. This is the
@@ -83,9 +84,12 @@ $thinker_prompt
 
 $trigger_desc"
 
-# Single shellm agentic loop for all triggers (writes to root trajectory)
+# Single shellm agentic loop for all triggers (writes to root trajectory).
+# SHELLM_TRIGGER_STEP_ID lands as trigger_step on the shellm-run step so
+# viewers can join the run to the step that caused it exactly.
 printf '  executing (%s)...\n' "$trigger_type" >&2
 act_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+    SHELLM_TRIGGER_STEP_ID="$trigger_step_id" \
     shellm --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
     "$act_prompt") || true

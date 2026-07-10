@@ -14,9 +14,11 @@ source "$SCRIPT_DIR/../_lib/common.sh"
 
 _require_env
 
-# Drain the triggering step from stdin (wakeup only — context comes from
-# traj). Leaving stdin unread would let it leak into shellm as stdin context.
-cat >/dev/null
+# Capture the triggering step from stdin (context still comes from traj;
+# reading it also keeps it from leaking into shellm as stdin context). The
+# step_id is exported so the run header carries trigger_step.
+step_json=$(cat)
+trigger_step_id=$(printf '%s' "$step_json" | jq -r '.step_id // empty' 2>/dev/null) || true
 
 THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
 
@@ -56,6 +58,7 @@ done < <(_build_shellm_flags "$IDENTITY_DIR")
 
 printf '  thinker: %s...\n' "$THINKER_NAME" >&2
 thinker_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+    SHELLM_TRIGGER_STEP_ID="$trigger_step_id" \
     shellm --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
     "$thinker_message") || true

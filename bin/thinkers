@@ -319,8 +319,10 @@ _start_dispatcher() {
             local _dname="$1" _djson="$2"
             local _dscript="$THINKERS_DIR/$_dname/step"
             local _dlog="$run_dir/logs/$_dname.log"
+            # SHELLM_LAUNCHED_BY lands as launched_by on any shellm-run the
+            # step script starts, so viewers can attribute runs to thinkers.
             (
-                printf '%s' "$_djson" | "$_dscript"
+                printf '%s' "$_djson" | SHELLM_LAUNCHED_BY="$_dname" "$_dscript"
             ) >> "$_dlog" 2>&1 &
             _step_entries="${_step_entries}${_step_entries:+ }${_dname}:$!"
             printf '%s %s\n' "$!" "$_dname" >> "$run_dir/step_pids"
@@ -612,7 +614,7 @@ cmd_start() {
             '{type:"manual-trigger", source:"thinkers-cli", ts:$ts}')
         for name in "$@"; do
             local thinker_dir="$THINKERS_DIR/$name"
-            (printf '%s' "$trigger_json" | "$thinker_dir/step") \
+            (printf '%s' "$trigger_json" | SHELLM_LAUNCHED_BY="$name" "$thinker_dir/step") \
                 >> "$run_dir/logs/$name.log" 2>&1 &
             printf 'Started thinker: %s\n' "$name" >&2
         done
@@ -935,7 +937,7 @@ STEP
 
     # Create subscriptions
     cat > "$thinker_dir/subscriptions.jsonl" <<'SUBS'
-{"types":["thought","action","observation"]}
+{"types":["thought","action","observation","merge"]}
 SUBS
 
     # Create prompt template

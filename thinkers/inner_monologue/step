@@ -18,8 +18,11 @@ _require_env
 THINK_MODEL="${THINK_MODEL:-${SHELLM_MODEL:-claude-opus-4-7}}"
 THINK_CONTEXT_TAIL="${THINK_CONTEXT_TAIL:-20}"
 
-# Drain the triggering step from stdin (wakeup only — context comes from traj)
-cat >/dev/null
+# Capture the triggering step from stdin (context still comes from traj).
+# The step_id is stamped as trigger_step on the step we append, so viewers
+# can draw the exact dispatch edge.
+step_json=$(cat)
+trigger_step_id=$(printf '%s' "$step_json" | jq -r '.step_id // empty' 2>/dev/null) || true
 
 # Build system prompt with identity context
 system_prompt=$(_build_system_prompt)
@@ -66,6 +69,21 @@ if [[ -z "$response" ]]; then
     sleep 1   # brief backoff so transient API failures don't tight-loop
 fi
 
+# Defensive unwrap: the model occasionally mimics the JSON step envelopes it
+# sees in the recent stream and emits one as its whole response; recover the
+# inner content instead of double-wrapping it (gen-001 proposal 04).
+if [[ "$response" == "{"* ]]; then
+    unwrapped=$(printf '%s' "$response" | jq -r 'select(type == "object") | .content // empty' 2>/dev/null) || true
+    if [[ -n "$unwrapped" ]]; then
+        unwrapped_type=$(printf '%s' "$response" | jq -r 'select(type == "object") | .type // empty' 2>/dev/null) || true
+        # Preserve an action envelope's intent through the prefix classifier
+        if [[ "$unwrapped_type" == "action" && "$unwrapped" != action:* ]]; then
+            unwrapped="action: $unwrapped"
+        fi
+        response="$unwrapped"
+    fi
+fi
+
 # Determine step type and strip prefix from content
 step_type="thought"
 step_content="$response"
@@ -94,8 +112,13 @@ if [[ "$response" == "$last_content" ]]; then
     step_content="$step_content (repeat)"
 fi
 
-printf '{"type":"%s","content":%s,"source":"%s"}' \
-    "$step_type" "$(printf '%s' "$step_content" | jq -Rsa .)" "$THINKER_NAME" \
+jq -nc \
+    --arg type "$step_type" \
+    --arg content "$step_content" \
+    --arg source "$THINKER_NAME" \
+    --arg trigger "$trigger_step_id" \
+    '{type:$type, content:$content, source:$source}
+     + (if $trigger == "" then {} else {trigger_step: $trigger} end)' \
     | traj append >/dev/null
 
 printf '[%s] %s\n' "$step_type" "$step_content"

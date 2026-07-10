@@ -464,6 +464,17 @@ cmd_append() {
     step_type=$(printf '%s' "$record" | jq -r '.type // empty')
     [[ -n "$step_type" ]] || die "append: step record must have a 'type' field"
 
+    # Auto-link steps written from inside a shellm run: the run exports
+    # SHELLM_RUN_STEP_ID into executed code's env, so observations (and any
+    # other ad-hoc appends) carry run_id without the writer knowing about
+    # runs. Never overwrites an explicit run_id. shellm-run and trajectory
+    # steps are excluded so a nested run's own header/child trajectory
+    # can't inherit the parent's run.
+    if [[ -n "${SHELLM_RUN_STEP_ID:-}" && "$step_type" != "shellm-run" && "$step_type" != "trajectory" ]]; then
+        record=$(printf '%s' "$record" | jq --arg rid "$SHELLM_RUN_STEP_ID" \
+            'if .run_id then . else . + {run_id: $rid} end')
+    fi
+
     # Assign step id (preserve existing if caller pre-generated one).
     local step_id
     step_id=$(printf '%s' "$record" | jq -r '.step_id // empty')
@@ -956,7 +967,7 @@ TAILHELP
                     elif .type == "final"         then ((.content // .thought) // "")
                     elif .type == "fork"          then ("-> " + (.child // ""))
                     elif .type == "trajectory"    then (if (.parent_traj // .parent) then ("<- parent: " + (.parent_traj // .parent)) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
-                    elif .type == "merge"         then ("<- " + (.from_traj // ""))
+                    elif .type == "merge"         then ("<- " + (.content // .from_traj // ""))
                     else (.content // "")
                     end;
                 select(matches_filters($filters)) |
@@ -1640,7 +1651,7 @@ CATHELP
                     elif .type == "final"         then ((.content // .thought) // "")
                     elif .type == "fork"          then ("-> " + (.child // ""))
                     elif .type == "trajectory"    then (if (.parent_traj // .parent) then ("<- parent: " + (.parent_traj // .parent)) else ("root" + (if .identity_dir then " (" + .identity_dir + ")" else "" end)) end)
-                    elif .type == "merge"         then ("<- " + (.from_traj // ""))
+                    elif .type == "merge"         then ("<- " + (.content // .from_traj // ""))
                     else (.content // "")
                     end;
                 select(matches_filters($filters)) |
@@ -1948,7 +1959,7 @@ _render_steps_inline() {
           elif .type == "shellm-run" then (.command // "")[0:60]
           elif .type == "run-summary" then (.tldr // "")[0:60]
           elif .type == "fork" then ("-> " + ((.child // "")[0:50]))
-          elif .type == "merge" then ("<- " + ((.from_traj // .from_branch // "")[0:50]))
+          elif .type == "merge" then ("<- " + ((.content // .from_traj // .from_branch // "")[0:50]))
           else (.content // "")[0:60]
           end) | gsub("[\\n\\r\\t]"; " "))
     ' "$file" 2>/dev/null) || true
