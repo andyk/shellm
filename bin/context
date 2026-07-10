@@ -262,7 +262,7 @@ def render_step($limit; $blobs):
   if $t == "fork" then "[Forked child: \($row.child | jqr_empty)]"
   elif $t == "trajectory" then ""
   elif $t == "merge" then
-    ($row.from_branch | jqr_empty) as $b |
+    (($row.from_branch // $row.from_traj) | jqr_empty) as $b |
     ($row.content | jqr_empty) as $c |
     if $c != "" then "[Merged from \($b): \($c)]" else "[Merged from \($b)]" end
   else
