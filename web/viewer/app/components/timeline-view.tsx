@@ -34,8 +34,10 @@ import {
   GUTTER_W,
   HEADER_H,
   LANE_W,
+  MID_ROW_H,
   MONO_LANE_W,
   ROW_H,
+  TALL_ROW_H,
   rowCenterY,
   type EdgeKind,
   type TimelineBlock,
@@ -52,6 +54,13 @@ const EDGE_STROKE: Record<EdgeKind, string> = {
   assoc: "#60a5fa", // blue-400 — run -> step it wrote
   merge: "#e879f9", // fuchsia-400 — fork -> merge write-back
 };
+
+// Retro-future skin: the canvas is an always-dark neon panel (independent
+// of the app theme), so everything inside uses fixed colors, not theme
+// tokens. Deep-space base + laser grid + glows.
+const CANVAS_BG = "#0a0420";
+const CANVAS_GRID =
+  "linear-gradient(rgba(34,211,238,0.055) 1px, transparent 1px), linear-gradient(90deg, rgba(34,211,238,0.055) 1px, transparent 1px)";
 
 const CELL = 12; // square size
 const ROW_CLICK_H = 20; // click target taller than the square
@@ -197,6 +206,23 @@ export function TimelineView({
   }, [displayLanes, collapsed]);
 
   const bodyHeight = layout.totalHeight;
+
+  // New arrivals pop in (a thought arriving). Track what we've already
+  // seen so the initial load doesn't animate everything at once.
+  const seenRef = useRef<Set<string> | null>(null);
+  const freshIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const cell of layout.cells) ids.add(cell.step.step_id);
+    for (const block of layout.blocks) ids.add(block.run.run_id);
+    if (seenRef.current === null) {
+      seenRef.current = ids;
+      return new Set<string>();
+    }
+    const prev = seenRef.current;
+    const fresh = new Set([...ids].filter((id) => !prev.has(id)));
+    seenRef.current = ids;
+    return fresh;
+  }, [layout]);
 
   // Follow mode: the timeline scrolls inside its own container (so the lane
   // header can stick); while pinned to the bottom, new rows scroll into view.
@@ -366,14 +392,22 @@ export function TimelineView({
       )}
       <div
         ref={scrollRef}
-        className="overflow-auto rounded-lg border"
-        style={{ maxHeight: "calc(100vh - 210px)" }}
+        className="overflow-auto rounded-lg border border-cyan-400/25 shadow-[0_0_24px_rgba(34,211,238,0.12)]"
+        style={{ maxHeight: "calc(100vh - 210px)", backgroundColor: CANVAS_BG }}
       >
-        <div className="relative" style={{ width, minWidth: "100%" }}>
+        <div
+          className="relative"
+          style={{
+            width,
+            minWidth: "100%",
+            backgroundImage: CANVAS_GRID,
+            backgroundSize: "28px 28px",
+          }}
+        >
           {/* sticky lane headers */}
           <div
-            className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur"
-            style={{ height: HEADER_H, width }}
+            className="sticky top-0 z-20 border-b border-cyan-400/25 backdrop-blur"
+            style={{ height: HEADER_H, width, backgroundColor: "rgba(13,5,38,0.92)" }}
           >
             {displayLanes.map((lane, i) => {
               const isCollapsed = collapsed.has(lane.id);
@@ -385,23 +419,34 @@ export function TimelineView({
                     onClick={() => toggleLane(lane.id)}
                     title={`expand ${lane.label}`}
                     style={{ left: laneX[i], width: laneW[i], height: HEADER_H }}
-                    className="absolute top-0 flex items-center justify-center rounded-t bg-muted/[0.12] hover:bg-accent/50"
+                    className="absolute top-0 flex items-center justify-center rounded-t bg-cyan-300/[0.06] hover:bg-cyan-300/[0.14]"
                   >
-                    <ChevronsLeftRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    <ChevronsLeftRight className="h-3 w-3 shrink-0 text-cyan-400/70" />
                   </button>
                 );
               }
+              const neon =
+                lane.kind === "chat"
+                  ? "text-fuchsia-300"
+                  : lane.kind === "shellm"
+                    ? "text-purple-300/80"
+                    : "text-cyan-300";
+              const neonGlow =
+                lane.kind === "chat"
+                  ? "0 0 10px rgba(240,171,252,0.55)"
+                  : "0 0 10px rgba(103,232,249,0.55)";
               return (
                 <div
                   key={lane.id}
                   style={{ left: laneX[i], width: laneW[i], height: HEADER_H }}
-                  className="group absolute top-0 flex items-center gap-0.5 overflow-hidden rounded-t bg-muted/[0.12] pl-2 pr-1"
+                  className="group absolute top-0 flex items-center gap-0.5 overflow-hidden rounded-t bg-cyan-300/[0.06] pl-2 pr-1"
                 >
                   <span
                     className={cn(
-                      "min-w-0 flex-1 truncate font-mono text-xs",
-                      lane.kind === "thinker" ? "font-medium" : "text-muted-foreground"
+                      "min-w-0 flex-1 truncate font-mono text-xs uppercase tracking-widest",
+                      neon
                     )}
+                    style={{ textShadow: neonGlow }}
                   >
                     {lane.label}
                   </span>
@@ -410,7 +455,7 @@ export function TimelineView({
                       type="button"
                       onClick={() => moveLane(lane.id, -1)}
                       title="move left"
-                      className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="rounded p-0.5 text-cyan-400/60 hover:bg-cyan-300/10 hover:text-cyan-200"
                     >
                       <ChevronLeft className="h-3 w-3" />
                     </button>
@@ -418,7 +463,7 @@ export function TimelineView({
                       type="button"
                       onClick={() => moveLane(lane.id, 1)}
                       title="move right"
-                      className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="rounded p-0.5 text-cyan-400/60 hover:bg-cyan-300/10 hover:text-cyan-200"
                     >
                       <ChevronRight className="h-3 w-3" />
                     </button>
@@ -426,7 +471,7 @@ export function TimelineView({
                       type="button"
                       onClick={() => toggleLane(lane.id)}
                       title={`collapse ${lane.label}`}
-                      className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="rounded p-0.5 text-cyan-400/60 hover:bg-cyan-300/10 hover:text-cyan-200"
                     >
                       <ChevronsRightLeft className="h-3 w-3" />
                     </button>
@@ -434,7 +479,7 @@ export function TimelineView({
                       type="button"
                       onClick={() => hideLane(lane.id)}
                       title={`hide ${lane.label}`}
-                      className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="rounded p-0.5 text-cyan-400/60 hover:bg-cyan-300/10 hover:text-cyan-200"
                     >
                       <EyeOff className="h-3 w-3" />
                     </button>
@@ -453,7 +498,7 @@ export function TimelineView({
                 key={lane.id}
                 className={cn(
                   "absolute top-0 rounded-b",
-                  collapsed.has(lane.id) ? "bg-muted/25" : "bg-muted/[0.12]"
+                  collapsed.has(lane.id) ? "bg-cyan-300/[0.09]" : "bg-cyan-300/[0.045]"
                 )}
                 style={{ left: laneX[i], width: laneW[i], height: bodyHeight }}
               />
@@ -464,7 +509,7 @@ export function TimelineView({
               label ? (
                 <div
                   key={row}
-                  className="absolute pr-2 text-right font-mono text-[9px] leading-none text-muted-foreground/70"
+                  className="absolute pr-2 text-right font-mono text-[9px] leading-none text-cyan-400/50"
                   style={{ left: 0, width: GUTTER_W, top: rowCenterY(layout, row) - 4 }}
                 >
                   {label}
@@ -484,11 +529,14 @@ export function TimelineView({
                   height: layout.rowH[gap.row],
                 }}
               >
-                <span className="h-px flex-1 border-t border-dashed border-border" />
-                <span className="font-mono text-[10px] text-muted-foreground/70">
+                <span className="h-px flex-1 border-t border-dashed border-fuchsia-400/30" />
+                <span
+                  className="font-mono text-[10px] text-fuchsia-300/70"
+                  style={{ textShadow: "0 0 8px rgba(240,171,252,0.4)" }}
+                >
                   {gap.label}
                 </span>
-                <span className="h-px flex-1 border-t border-dashed border-border" />
+                <span className="h-px flex-1 border-t border-dashed border-fuchsia-400/30" />
               </div>
             ))}
 
@@ -509,10 +557,18 @@ export function TimelineView({
                       <path
                         d={d}
                         fill="none"
-                        stroke="var(--color-background)"
+                        stroke={CANVAS_BG}
                         strokeWidth={s.width + 2.5}
                       />
                     )}
+                    {/* neon under-glow */}
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke={color}
+                      strokeWidth={s.width * 3 + 2}
+                      opacity={0.22}
+                    />
                     <path d={d} fill="none" stroke={color} strokeWidth={s.width} />
                     <circle cx={start.x} cy={start.y} r={s.width + 0.5} fill={color} />
                     <circle cx={end.x} cy={end.y} r={s.width + 1.5} fill={color} />
@@ -537,16 +593,18 @@ export function TimelineView({
                   onMouseLeave={() => setHovered(null)}
                   className={cn(
                     "absolute z-10 rounded-md border text-left",
-                    "border-blue-300 bg-blue-50/70 hover:bg-blue-100/70",
-                    "dark:border-blue-800 dark:bg-blue-950/40 dark:hover:bg-blue-900/40",
+                    "border-cyan-400/50 bg-cyan-400/[0.06] hover:bg-cyan-400/[0.12]",
                     running && "animate-pulse",
-                    hot && "ring-2 ring-blue-400/60"
+                    hot && "ring-2 ring-cyan-300/70",
+                    freshIds.has(block.run.run_id) && "tl-pop"
                   )}
                   style={{
                     left: r.left,
                     width: r.right - r.left,
                     top: r.top,
                     height: Math.max(r.bottom - r.top, 24),
+                    boxShadow:
+                      "0 0 10px rgba(34,211,238,0.22), inset 0 0 22px rgba(34,211,238,0.05)",
                   }}
                   title={`[run] ${blockTitle(block)}`}
                 />
@@ -561,8 +619,14 @@ export function TimelineView({
               const y = rowCenterY(layout, cell.row);
               const hot = hovered === cell.step.step_id;
               const isCollapsed = collapsed.has(layout.lanes[cell.lane].id);
-              const tall = layout.rowH[cell.row] > ROW_H; // two-line monologue row
-              const clickH = tall ? 34 : ROW_CLICK_H;
+              // preview depth follows the row height the model assigned
+              const lines =
+                layout.rowH[cell.row] >= TALL_ROW_H
+                  ? 3
+                  : layout.rowH[cell.row] >= MID_ROW_H
+                    ? 2
+                    : 1;
+              const clickH = lines === 3 ? 46 : lines === 2 ? 34 : ROW_CLICK_H;
               return (
                 <button
                   key={cell.step.step_id}
@@ -570,7 +634,10 @@ export function TimelineView({
                   onClick={() => setSelected({ kind: "step", step: cell.step })}
                   onMouseEnter={() => setHovered(cell.step.step_id)}
                   onMouseLeave={() => setHovered(null)}
-                  className="absolute z-10 flex items-center gap-1.5 text-left"
+                  className={cn(
+                    "absolute z-10 flex items-center gap-1.5 text-left",
+                    freshIds.has(cell.step.step_id) && "tl-pop"
+                  )}
                   style={
                     isCollapsed
                       ? {
@@ -596,20 +663,29 @@ export function TimelineView({
                     className={cn(
                       "shrink-0 rounded-sm",
                       timelineColor(cell.step.type),
-                      hot && "ring-2 ring-foreground/40"
+                      hot && "ring-2 ring-cyan-200/60"
                     )}
-                    style={{ width: CELL, height: CELL }}
+                    style={{
+                      width: CELL,
+                      height: CELL,
+                      boxShadow:
+                        cell.step.type === "idle"
+                          ? undefined
+                          : "0 0 6px rgba(255,255,255,0.28)",
+                    }}
                   />
                   {!isCollapsed && (
                     <span
                       className={cn(
                         "min-w-0 flex-1 text-[10px]",
-                        tall
-                          ? "line-clamp-2 break-words leading-[13px]"
-                          : "truncate leading-none",
+                        lines === 3
+                          ? "line-clamp-3 break-words leading-[13px]"
+                          : lines === 2
+                            ? "line-clamp-2 break-words leading-[13px]"
+                            : "truncate leading-none",
                         cell.step.type === "idle"
-                          ? "text-muted-foreground/50"
-                          : "text-muted-foreground"
+                          ? "text-slate-500/60"
+                          : "text-slate-300/90"
                       )}
                     >
                       {cell.step.preview || cell.step.type}
@@ -644,14 +720,21 @@ export function TimelineView({
                     onClick={() => setSelected({ kind: "run", block })}
                     onMouseEnter={() => setHovered(block.run.run_id)}
                     onMouseLeave={() => setHovered(null)}
-                    className="pointer-events-auto sticky flex w-full flex-col rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-left shadow-sm dark:border-blue-900 dark:bg-blue-950"
-                    style={{ top: HEADER_H + 4 }}
+                    className="pointer-events-auto sticky flex w-full flex-col rounded border border-cyan-400/40 px-1.5 py-0.5 text-left"
+                    style={{
+                      top: HEADER_H + 4,
+                      backgroundColor: "#120b32",
+                      boxShadow: "0 0 8px rgba(34,211,238,0.25)",
+                    }}
                     title={`[run] ${blockTitle(block)}`}
                   >
-                    <span className="w-full truncate text-[11px] italic leading-4">
+                    <span
+                      className="line-clamp-2 w-full break-words text-[11px] italic leading-4 text-cyan-100"
+                      style={{ textShadow: "0 0 6px rgba(103,232,249,0.4)" }}
+                    >
                       {blockTitle(block)}
                     </span>
-                    <span className="w-full truncate font-mono text-[9px] leading-4 text-muted-foreground">
+                    <span className="w-full truncate font-mono text-[9px] leading-4 text-cyan-300/60">
                       {block.open && !block.run.ended_ts
                         ? live
                           ? "running"
@@ -666,6 +749,23 @@ export function TimelineView({
                 </div>
               );
             })}
+
+            {/* CRT scanlines + magenta horizon glow (pure decoration) */}
+            <div
+              className="pointer-events-none absolute inset-0 z-[12]"
+              style={{
+                backgroundImage:
+                  "repeating-linear-gradient(0deg, rgba(0,0,0,0.22) 0px, rgba(0,0,0,0.22) 1px, transparent 1px, transparent 3px)",
+                opacity: 0.18,
+              }}
+            />
+            <div
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] h-64"
+              style={{
+                background:
+                  "radial-gradient(ellipse 80% 100% at 50% 115%, rgba(217,70,239,0.14), transparent 65%)",
+              }}
+            />
           </div>
         </div>
       </div>

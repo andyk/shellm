@@ -311,6 +311,19 @@ correlation, any mobile-specific layout.
   mind log moved to `/i/<id>/mindlog` (tab order: Timeline · Mind log ·
   Thinkers · Memories; fork-tree root + sub-traj breadcrumb still point
   at the mind log explicitly).
+- **Round 7 (retro-future skin)**: the timeline canvas is an
+  **always-dark synthwave panel** independent of the app theme (deep
+  indigo `#0a0420` + cyan laser grid that scrolls with content, CRT
+  scanline overlay, magenta horizon glow at the bottom). Neon treatment:
+  uppercase glowing lane headers (cyan thinkers / fuchsia chat / purple
+  shellm), cyan-bordered run blocks with outer+inset glow, glowing summary
+  chips, neon under-glow stroke on every edge, glowing squares, cyan clock
+  gutter, fuchsia gap dividers. Because the canvas no longer follows the
+  theme, all text inside uses fixed colors (no `muted-foreground` etc.) —
+  verified legible in light chrome (CRT-in-a-light-room) and dark.
+  Also fixed en route: the sticky run summary now renders as an opaque
+  chip in a layer *above* the cells, so it occludes nested steps cleanly
+  while floating instead of z-fighting their text (Nick's overlap bug).
 - **Remaining**: live verification on a **freshly created** identity
   (Nick); capture it as the PLAN.md 5b fixture; optional stretch items per
   T4/T8 (newest-at-top toggle, ghost squares, `?after=`).

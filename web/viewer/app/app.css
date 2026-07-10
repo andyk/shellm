@@ -228,3 +228,16 @@ html.dark {
 .animate-dot-1 { animation: dot-bounce 1.4s infinite ease-in-out; animation-delay: 0s; }
 .animate-dot-2 { animation: dot-bounce 1.4s infinite ease-in-out; animation-delay: 0.2s; }
 .animate-dot-3 { animation: dot-bounce 1.4s infinite ease-in-out; animation-delay: 0.4s; }
+
+/* Timeline: new steps ease in like a thought arriving — a gentle fade
+   with the faintest rise and settle */
+@keyframes tl-pop {
+  0% { opacity: 0; transform: scale(0.96) translateY(3px); }
+  70% { opacity: 1; transform: scale(1.005) translateY(0); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.tl-pop {
+  animation: tl-pop 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: left center;
+}

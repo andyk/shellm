@@ -11,8 +11,9 @@ export const GUTTER_W = 72; // wall-clock column
 export const LANE_W = 200;
 export const MONO_LANE_W = 320; // the monologue is the narrative spine — wider
 export const ROW_H = 26;
-export const TALL_ROW_H = 40; // two-line rows for monologue thoughts/actions
-export const BLOCK_ROW_H = 54; // rows where a run block starts (2-line summary)
+export const MID_ROW_H = 40; // two-line rows for thinker/chat content steps
+export const TALL_ROW_H = 52; // three-line rows for the monologue — the narrator
+export const BLOCK_ROW_H = 64; // rows where a run block starts (chip with 2-line title)
 export const GAP_ROW_H = 26;
 export const HEADER_H = 34; // sticky lane-header strip
 
@@ -205,9 +206,17 @@ export function buildTimeline(mindlog: Pick<Mindlog, "steps" | "runs">): Timelin
       blockByRunId.set(run.run_id, block);
     } else {
       const lane = laneFor(laneIdFor(step));
-      // monologue thoughts get two preview lines — they carry the narrative
-      const tall = step.source === "inner_monologue" && step.type !== "idle";
-      const row = pushRow(tall ? TALL_ROW_H : ROW_H, step.ts);
+      // Preview depth: the monologue narrates (3 lines); other sourced
+      // content steps get 2; machinery/structural strays and idles get 1.
+      const h =
+        step.type === "idle"
+          ? ROW_H
+          : step.source === "inner_monologue"
+            ? TALL_ROW_H
+            : step.source
+              ? MID_ROW_H
+              : ROW_H;
+      const row = pushRow(h, step.ts);
       const cell = { step, lane, row };
       cells.push(cell);
       cellByStepId.set(step.step_id, cell);
