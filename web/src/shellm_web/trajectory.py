@@ -2,9 +2,11 @@
 
 Produces the wire shape the viewer renders:
 - steps: normalized steps (preview one-liner, source, fork/writeback links)
-- runs: inline shellm-run groups (flat-era mind logs interleave the run's
-  machinery steps with concurrent thinker steps; we group them by a stack of
-  open runs, since machinery steps carry no `source` field)
+- runs: inline shellm-run groups. Grouping is exact: every machinery step
+  written by shellm since 2026-07-10 carries `run_id` (the step_id of its
+  `shellm-run` header), so membership is a lookup even when concurrent runs
+  interleave in one shared mind log. Machinery steps without `run_id`
+  (pre-2026-07-10 logs) are left ungrouped and render as plain stream steps.
 """
 
 import json
@@ -81,7 +83,6 @@ class RunGroup:
     command: str = ""
     model: str | None = None
     tldr: str | None = None
-    confidence: str = "exact"  # exact | heuristic
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,7 +95,6 @@ class RunGroup:
             "command": self.command,
             "model": self.model,
             "tldr": self.tldr,
-            "confidence": self.confidence,
         }
 
 
@@ -130,8 +130,7 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
     """Normalize steps and group inline runs. Returns {steps, runs}."""
     steps: list[dict[str, Any]] = []
     runs: list[RunGroup] = []
-    open_stack: list[RunGroup] = []
-    last_closed: RunGroup | None = None
+    runs_by_id: dict[str, RunGroup] = {}
     unmatched_actions: list[dict[str, Any]] = []
 
     for raw in raw_steps:
@@ -180,7 +179,6 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                     started_ts=ts,
                     command=raw.get("command", ""),
                     model=raw.get("model"),
-                    confidence="heuristic" if open_stack else "exact",
                 )
                 # action -> run join via the ACTION: suffix in the command
                 suffix = _action_suffix(run.command)
@@ -195,23 +193,22 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                             unmatched_actions.remove(action)
                             break
                 runs.append(run)
-                open_stack.append(run)
+                runs_by_id[run.run_id] = run
                 run.step_ids.append(step_id)
                 normalized["run_id"] = run.run_id
-            elif step_type == "run-summary":
-                target = last_closed or (open_stack[-1] if open_stack else None)
-                if target is not None:
-                    target.tldr = raw.get("tldr") or target.tldr
-                    target.step_ids.append(step_id)
-                    normalized["run_id"] = target.run_id
-            elif open_stack:
-                run = open_stack[-1]
-                run.step_ids.append(step_id)
-                normalized["run_id"] = run.run_id
-                if step_type == "final":
-                    run.status = "done"
-                    run.ended_ts = ts
-                    last_closed = open_stack.pop()
+            else:
+                # Membership is explicit: the step's own run_id field points
+                # at its shellm-run header. Steps without one (pre-run_id
+                # logs) or with an unknown id stay ungrouped.
+                run = runs_by_id.get(raw.get("run_id") or "")
+                if run is not None:
+                    run.step_ids.append(step_id)
+                    normalized["run_id"] = run.run_id
+                    if step_type == "run-summary":
+                        run.tldr = raw.get("tldr") or run.tldr
+                    elif step_type == "final":
+                        run.status = "done"
+                        run.ended_ts = ts
         elif step_type == "action":
             unmatched_actions.append(normalized)
 

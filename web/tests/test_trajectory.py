@@ -26,15 +26,16 @@ needs_botnick = pytest.mark.skipif(not BOTNICK.is_dir(), reason="botnick data no
 
 
 @needs_gen1
-def test_g001r1_single_unclosed_run():
+def test_g001r1_legacy_log_run_header_only():
+    """Pre-run_id logs: the shellm-run header still opens a group (it knows
+    its own id) and the action join still lands, but machinery steps carry
+    no run_id and stay ungrouped in the stream."""
     result = load_trajectory(_root_traj_dir(GEN1 / "g001r1"))
     assert result["step_count"] == 41
     assert len(result["runs"]) == 1
     run = result["runs"][0]
-    # 1 shellm-run + 1 prompt + 4 reasoning + 4 shell-output, no final in this session
-    assert len(run["step_ids"]) == 10
+    assert run["step_ids"] == [run["run_id"]]
     assert run["status"] == "running"
-    assert run["confidence"] == "exact"
     # the action -> run join must land
     assert run["action_step_id"] is not None
     action = next(s for s in result["steps"] if s["step_id"] == run["action_step_id"])
@@ -42,25 +43,72 @@ def test_g001r1_single_unclosed_run():
 
 
 @needs_gen1
-def test_g001r2_three_closed_runs_all_joined():
+def test_g001r2_legacy_machinery_stays_ungrouped():
     result = load_trajectory(_root_traj_dir(GEN1 / "g001r2"))
     runs = result["runs"]
     assert len(runs) == 3
-    assert all(run["status"] == "done" for run in runs)
     assert all(run["action_step_id"] for run in runs)
     # each run's action is distinct
     assert len({run["action_step_id"] for run in runs}) == 3
-    # machinery steps are all attributed to some run
+    # legacy machinery carries no run_id -> ignored for grouping, never lost
     machinery = [
         s
         for s in result["steps"]
         if s["source"] is None
-        and s["type"] in {"shellm-run", "prompt", "reasoning", "shell-output", "final"}
+        and s["type"] in {"prompt", "reasoning", "shell-output", "final"}
     ]
-    assert all(s["run_id"] for s in machinery)
+    assert machinery
+    assert all(s["run_id"] is None for s in machinery)
+    # without run_id-stamped finals, legacy runs never close
+    assert all(run["status"] == "running" for run in runs)
     # thinker steps are never swallowed into runs
     thinker = [s for s in result["steps"] if s["source"] is not None]
     assert all(s["run_id"] is None for s in thinker)
+
+
+def _step(step_type, step_id, ts="2026-07-10T12:00:00.000-0700", **fields):
+    return {"type": step_type, "step_id": step_id, "ts": ts, **fields}
+
+
+def test_run_id_grouping_exact_with_interleaved_runs():
+    """New-format logs: membership comes from the explicit run_id stamp,
+    so two concurrent runs interleaving in one mind log group exactly —
+    the case the old stack heuristic could not attribute."""
+    from shellm_web.trajectory import normalize
+
+    raw = [
+        _step("trajectory", "t0"),
+        _step("action", "a1", source="inner_monologue", content="measure disk usage"),
+        _step("shellm-run", "r1", command="shellm --traj t0 ... ACTION: measure disk usage"),
+        _step("prompt", "p1", content="...", run_id="r1"),
+        _step("shellm-run", "r2", command="shellm --traj t0 ... ACTION: tidy notes"),
+        _step("reasoning", "s1", thought="du", cmd="du -sh .", run_id="r1"),
+        _step("reasoning", "s2", thought="ls", cmd="ls notes/", run_id="r2"),
+        _step("thought", "th1", source="inner_monologue", content="both running"),
+        _step("shell-output", "o2", stdout="a.md", exit=0, run_id="r2"),
+        _step("shell-output", "o1", stdout="1.2G", exit=0, run_id="r1"),
+        _step("final", "f2", content="tidied", run_id="r2", ts="2026-07-10T12:00:05.000-0700"),
+        _step("final", "f1", content="1.2G", run_id="r1", ts="2026-07-10T12:00:06.000-0700"),
+        _step("run-summary", "sum1", tldr="Measured disk usage", run_id="r1"),
+        # unknown run_id: ignored, not crashed on
+        _step("prompt", "px", content="orphan", run_id="r-gone"),
+    ]
+    result = normalize(raw, Path("/nonexistent"))
+    runs = {run["run_id"]: run for run in result["runs"]}
+    assert set(runs) == {"r1", "r2"}
+    assert runs["r1"]["step_ids"] == ["r1", "p1", "s1", "o1", "f1", "sum1"]
+    assert runs["r2"]["step_ids"] == ["r2", "s2", "o2", "f2"]
+    assert runs["r1"]["status"] == "done" and runs["r2"]["status"] == "done"
+    assert runs["r1"]["ended_ts"] == "2026-07-10T12:00:06.000-0700"
+    # run-summary lands on the right run even though r2 closed in between
+    assert runs["r1"]["tldr"] == "Measured disk usage"
+    assert runs["r2"]["tldr"] is None
+    # action join still works
+    assert runs["r1"]["action_step_id"] == "a1"
+    # thinker steps untouched; orphan machinery ungrouped but present
+    steps = {s["step_id"]: s for s in result["steps"]}
+    assert steps["th1"]["run_id"] is None
+    assert steps["px"]["run_id"] is None
 
 
 @needs_botnick

@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronDown, ChevronRight, Play } from "lucide-react";
+import { ChevronDown, ChevronRight, Play } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { StepCard } from "~/components/step-card";
@@ -75,11 +75,6 @@ export function RunGroupBlock({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
-          {run.confidence === "heuristic" && (
-            <span title="run membership is heuristic (nested/resumed run)">
-              <AlertTriangle className="h-3 w-3 text-amber-500" />
-            </span>
-          )}
           <Badge
             variant="outline"
             className={cn(

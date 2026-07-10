@@ -25,27 +25,31 @@ code to revisit.
 - `merge` exists in the `traj` CLI but nothing currently writes it; the
   viewer renders it if present but never depends on it.
 
-## Two eras, one grouping algorithm
+## Run grouping: exact via run_id
 
-- **Flat era** (current; `improve/generations/gen-00*`): the actor runs
-  `shellm --traj <root>`, so run machinery is appended **inline** into the
-  mind log, interleaved with concurrent monologue steps.
+- **Flat era** (current; the actor runs `shellm --traj <root>`): run
+  machinery is appended **inline** into the mind log, interleaved with
+  concurrent monologue steps.
 - **Fork era** (`.identities/botnick`): thinker runs forked child
   trajectories with explicit links.
 
-The grouping in `trajectory.py` doesn't branch on era — both can coexist in
-one log (flat-era logs still fork children for nested `shellm` calls):
+Since 2026-07-10, every machinery step shellm writes carries
+`run_id` = the step_id of its `shellm-run` header, so grouping in
+`trajectory.py` is a lookup, not a heuristic — correct even when concurrent
+runs interleave in one shared mind log:
 
-1. Source-less machinery steps attach to the most recent unclosed
-   `shellm-run` (a stack; `final` pops). A `shellm-run` pushed while another
-   is open marks the run `confidence: "heuristic"`.
-2. `run-summary` (written asynchronously) attaches to the most recently
-   closed run, else the top of the stack.
-3. `action` → run join: the actor embeds the action text at the end of the
+1. A `shellm-run` step opens a run group keyed by its own step_id.
+2. Other source-less machinery steps attach to the group named by their
+   `run_id`; `final` closes it; `run-summary` (async) sets its tldr.
+3. **Legacy logs (pre-run_id)**: machinery steps without `run_id` are left
+   ungrouped and render as plain stream steps — never guessed at. A legacy
+   `shellm-run` header still opens a (member-less) group.
+4. `action` → run join: the actor embeds the action text at the end of the
    `shellm-run` command (`…ACTION: <text>`); match by whitespace-collapsed
    200-char prefix in either direction. On a miss, `action_step_id` stays
-   null and the UI shows the steps adjacently.
-4. `fork` steps resolve their child dir via `child_ref`, falling back to a
+   null and the UI shows the steps adjacently. (To be replaced by an
+   explicit `trigger_step` field — see `20260710/PLAN.md`.)
+5. `fork` steps resolve their child dir via `child_ref`, falling back to a
    `<hex8>-*` glob; `from_traj` write-backs become links.
 
 ## Identity dirs and liveness

@@ -87,7 +87,6 @@ export interface RunGroup {
   command: string;
   model: string | null;
   tldr: string | null;
-  confidence: "exact" | "heuristic";
 }
 
 export interface Mindlog {
