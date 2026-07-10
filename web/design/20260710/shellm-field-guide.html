@@ -1,0 +1,807 @@
+<title>shellm: how the log hangs together</title>
+<style>
+  :root {
+    --bg: #FBFBFA;
+    --surface: #F2F4F3;
+    --surface2: #EAEDEB;
+    --ink: #1F2422;
+    --muted: #5C6663;
+    --faint: #8A938F;
+    --line: #E0E4E1;
+    --mind: #9A6A1F;
+    --mind-bg: #F6EDDD;
+    --mach: #1D6E77;
+    --mach-bg: #E2EFF0;
+    --chat: #6B5CA5;
+    --chat-bg: #ECE8F5;
+    --forkc: #3E7B4F;
+    --fork-bg: #E4EFE6;
+    --struct: #6E6A64;
+    --struct-bg: #ECEAE6;
+    --code-bg: #22282A;
+    --code-ink: #D7DDDA;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16191A;
+      --surface: #1E2325;
+      --surface2: #252B2D;
+      --ink: #E6E9E7;
+      --muted: #99A39F;
+      --faint: #6E7875;
+      --line: #2B3234;
+      --mind: #DCA85C;
+      --mind-bg: #33281A;
+      --mach: #63C7CF;
+      --mach-bg: #16333A;
+      --chat: #A79BD8;
+      --chat-bg: #2A2540;
+      --forkc: #82BE8F;
+      --fork-bg: #1E3324;
+      --struct: #9B968E;
+      --struct-bg: #2B2A27;
+      --code-bg: #101415;
+      --code-ink: #C9D0CD;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16191A; --surface: #1E2325; --surface2: #252B2D;
+    --ink: #E6E9E7; --muted: #99A39F; --faint: #6E7875; --line: #2B3234;
+    --mind: #DCA85C; --mind-bg: #33281A;
+    --mach: #63C7CF; --mach-bg: #16333A;
+    --chat: #A79BD8; --chat-bg: #2A2540;
+    --forkc: #82BE8F; --fork-bg: #1E3324;
+    --struct: #9B968E; --struct-bg: #2B2A27;
+    --code-bg: #101415; --code-ink: #C9D0CD;
+  }
+  :root[data-theme="light"] {
+    --bg: #FBFBFA; --surface: #F2F4F3; --surface2: #EAEDEB;
+    --ink: #1F2422; --muted: #5C6663; --faint: #8A938F; --line: #E0E4E1;
+    --mind: #9A6A1F; --mind-bg: #F6EDDD;
+    --mach: #1D6E77; --mach-bg: #E2EFF0;
+    --chat: #6B5CA5; --chat-bg: #ECE8F5;
+    --forkc: #3E7B4F; --fork-bg: #E4EFE6;
+    --struct: #6E6A64; --struct-bg: #ECEAE6;
+    --code-bg: #22282A; --code-ink: #D7DDDA;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Charter, "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.25rem;
+  }
+  .wrap { max-width: 60rem; margin: 0 auto; padding: 3.5rem 0 5rem; }
+  .prose { max-width: 42rem; }
+
+  h1, h2, h3 { text-wrap: balance; line-height: 1.2; }
+  h1 { font-size: 2.3rem; font-weight: 700; margin: .4rem 0 .8rem; letter-spacing: -0.01em; }
+  h2 { font-size: 1.45rem; font-weight: 700; margin: 0 0 .75rem; }
+  h3 { font-size: 1.05rem; font-weight: 700; margin: 1.4rem 0 .4rem; }
+  p { margin: 0 0 1rem; }
+  a { color: var(--mach); }
+
+  code, .mono {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  p code, li code, td code {
+    font-size: .82em;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: .08em .32em;
+    white-space: nowrap;
+  }
+
+  .eyebrow {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .72rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .eyebrow .tick { color: var(--mach); }
+
+  section { margin-top: 3.5rem; border-top: 1px solid var(--line); padding-top: 2rem; }
+  .secnum {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .72rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--faint); display: block; margin-bottom: .5rem;
+  }
+
+  .lede { font-size: 1.12rem; color: var(--muted); max-width: 40rem; }
+
+  /* hero specimen line */
+  .specimen {
+    margin: 2rem 0 0;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: 8px;
+    padding: 1rem 1.1rem 1.15rem;
+    overflow-x: auto;
+  }
+  .specimen .cap {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .7rem; letter-spacing: .12em; text-transform: uppercase;
+    color: #8B968F; margin-bottom: .6rem;
+  }
+  .specimen pre {
+    margin: 0; font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .8rem; line-height: 1.7; white-space: pre;
+  }
+  .k { color: #8B968F; }
+  .req { color: #E8C87E; font-weight: 600; }
+  .tag { color: #7ED0D8; font-weight: 600; }
+  .opt { color: #C9D0CD; }
+  .dim { color: #66716D; }
+
+  /* chips */
+  .chip {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .68rem; font-weight: 600;
+    padding: .1em .5em; border-radius: 99px;
+    white-space: nowrap;
+  }
+  .chip.mind { color: var(--mind); background: var(--mind-bg); }
+  .chip.mach { color: var(--mach); background: var(--mach-bg); }
+  .chip.chat { color: var(--chat); background: var(--chat-bg); }
+  .chip.forkc { color: var(--forkc); background: var(--fork-bg); }
+  .chip.struct { color: var(--struct); background: var(--struct-bg); }
+
+  /* registry table */
+  .tablewrap { overflow-x: auto; margin: 1.5rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 640px; }
+  th {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); text-align: left; font-weight: 600;
+    padding: .5rem .9rem .5rem 0; border-bottom: 1px solid var(--line);
+  }
+  td { padding: .55rem .9rem .55rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.types { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: .78rem; line-height: 2; }
+  td .t {
+    display: inline-block; padding: .05em .45em; border-radius: 4px; margin-right: .3rem;
+    white-space: nowrap;
+  }
+  .t.mind { color: var(--mind); background: var(--mind-bg); }
+  .t.mach { color: var(--mach); background: var(--mach-bg); }
+  .t.chat { color: var(--chat); background: var(--chat-bg); }
+  .t.forkc { color: var(--forkc); background: var(--fork-bg); }
+  .t.struct { color: var(--struct); background: var(--struct-bg); }
+
+  /* the log excerpt */
+  .logfig { margin: 1.75rem 0; }
+  .logbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    flex-wrap: wrap; margin-bottom: .5rem;
+  }
+  .logtitle {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  }
+  .toggle {
+    display: inline-flex; align-items: center; gap: .5rem;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .74rem; color: var(--mach);
+    background: var(--mach-bg); border: 1px solid transparent;
+    padding: .35em .8em; border-radius: 99px; cursor: pointer;
+    user-select: none;
+  }
+  .toggle:hover { border-color: var(--mach); }
+  .toggle:focus-visible { outline: 2px solid var(--mach); outline-offset: 2px; }
+  .toggle .box {
+    width: .8em; height: .8em; border: 1.5px solid var(--mach); border-radius: 3px;
+    display: inline-block; position: relative; flex: none;
+  }
+  .grouped .toggle .box::after {
+    content: ""; position: absolute; inset: 1px; background: var(--mach); border-radius: 1px;
+  }
+
+  .log {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: .75rem 0;
+    overflow-x: auto;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .78rem;
+    line-height: 1.5;
+  }
+  .row {
+    display: flex; align-items: baseline; gap: .7rem;
+    padding: .22rem 1rem;
+    white-space: nowrap;
+    border-left: 3px solid transparent;
+    transition: border-color .25s, background-color .25s, margin .25s, opacity .25s;
+  }
+  .row .chip { flex: none; width: 9.5em; text-align: center; }
+  .row .nosrc {
+    flex: none; width: 9.5em; text-align: center;
+    font-size: .68rem; color: var(--faint);
+  }
+  .row .body { color: var(--ink); }
+  .row .body .ty { font-weight: 700; }
+  .row .body .fld { color: var(--muted); }
+  .row.mach-row .body .ty { color: var(--mach); }
+  .row.mind-row .body .ty { color: var(--mind); }
+  .row.chat-row .body .ty { color: var(--chat); }
+  .row.struct-row .body .ty { color: var(--struct); }
+
+  .runlabel {
+    display: none;
+    margin: .5rem 1rem .2rem;
+    padding: .3rem .7rem;
+    border-left: 3px solid var(--mach);
+    background: var(--mach-bg);
+    color: var(--mach);
+    font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 600;
+    border-radius: 0 4px 4px 0;
+    white-space: nowrap;
+  }
+  .grouped .runlabel { display: block; }
+  .grouped .row.mach-row {
+    border-left-color: var(--mach);
+    background: var(--mach-bg);
+    margin-left: 1rem;
+  }
+  .grouped .row.idle-row { opacity: .45; }
+  .fignote { font-size: .85rem; color: var(--muted); margin-top: .6rem; max-width: 42rem; }
+
+  /* fingerprint rule callout */
+  .rule {
+    display: flex; gap: 0; margin: 1.5rem 0; border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--line);
+  }
+  .rule > div { flex: 1 1 0; padding: 1rem 1.2rem; min-width: 0; }
+  .rule .a { background: var(--mind-bg); }
+  .rule .b { background: var(--mach-bg); }
+  .rule h3 { margin: 0 0 .3rem; font-size: .95rem; }
+  .rule .a h3 { color: var(--mind); }
+  .rule .b h3 { color: var(--mach); }
+  .rule p { margin: 0; font-size: .88rem; color: var(--ink); }
+  .rule code { background: rgba(127,127,127,.12); border: none; }
+
+  /* fork layers */
+  .layers { display: grid; gap: .6rem; margin: 1.5rem 0; }
+  .layer {
+    display: grid; grid-template-columns: 11rem 1fr; gap: 1rem;
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: .9rem 1.1rem; background: var(--surface);
+    align-items: baseline;
+  }
+  .layer .lname {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+    font-weight: 700; color: var(--muted);
+  }
+  .layer p { margin: 0; font-size: .92rem; }
+  .layer.hot { border-color: var(--forkc); }
+  .layer.hot .lname { color: var(--forkc); }
+
+  /* entry points */
+  .entries { display: grid; grid-template-columns: repeat(3, 1fr); gap: .8rem; margin: 1.5rem 0; }
+  .entry {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+    padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: .5rem;
+  }
+  .entry .who {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--mach); font-weight: 700;
+  }
+  .entry pre {
+    margin: 0; font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .74rem; background: var(--code-bg); color: var(--code-ink);
+    padding: .5rem .7rem; border-radius: 5px; overflow-x: auto;
+  }
+  .entry p { margin: 0; font-size: .85rem; color: var(--muted); }
+
+  /* chat causality chain */
+  .chain { margin: 1.5rem 0; display: grid; gap: 0; max-width: 46rem; }
+  .hop { display: grid; grid-template-columns: 2rem 1fr; gap: .9rem; }
+  .hop .dot {
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .hop .dot .n {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .7rem; font-weight: 700;
+    width: 1.6rem; height: 1.6rem; border-radius: 99px;
+    display: flex; align-items: center; justify-content: center;
+    flex: none;
+  }
+  .hop.h-chat .dot .n { color: var(--chat); background: var(--chat-bg); }
+  .hop.h-mach .dot .n { color: var(--mach); background: var(--mach-bg); }
+  .hop.h-mind .dot .n { color: var(--mind); background: var(--mind-bg); }
+  .hop .dot .stem { width: 1px; flex: 1 1 .8rem; min-height: .8rem; background: var(--line); }
+  .hop:last-child .dot .stem { display: none; }
+  .hop .hbody { padding-bottom: 1.1rem; }
+  .hop .hbody p { margin: 0; font-size: .93rem; }
+  .hop .hbody .h { font-weight: 700; }
+  .hop .hbody code { font-size: .78em; }
+
+  /* bus diagram */
+  .bus { margin: 1.75rem 0; }
+  .busrow { display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; }
+  .busnode {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+    padding: .7rem .85rem; text-align: center;
+  }
+  .busnode .bn {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .74rem; font-weight: 700; display: block;
+  }
+  .busnode .bd { font-size: .74rem; color: var(--muted); display: block; margin-top: .15rem; }
+  .busnode.w-mind .bn { color: var(--mind); }
+  .busnode.w-chat .bn { color: var(--chat); }
+  .busnode.w-mach .bn { color: var(--mach); }
+  .arrows { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .arrows span {
+    text-align: center; color: var(--faint); font-size: .9rem; padding: .25rem 0;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  .busbar {
+    border: 1.5px solid var(--ink); border-radius: 8px;
+    background: var(--bg);
+    padding: .8rem 1rem; text-align: center;
+  }
+  .busbar .bn {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .85rem; font-weight: 700;
+  }
+  .busbar .bd { font-size: .78rem; color: var(--muted); display: block; margin-top: .15rem; }
+
+  .footer {
+    margin-top: 4rem; border-top: 1px solid var(--line); padding-top: 1.5rem;
+    font-size: .85rem; color: var(--muted); max-width: 42rem;
+  }
+  .footer code { font-size: .8em; }
+
+  /* appendix: annotated session */
+  .setupterm {
+    background: var(--code-bg); color: var(--code-ink);
+    border-radius: 8px; padding: .9rem 1.1rem; overflow-x: auto; margin: 1.25rem 0;
+  }
+  .setupterm pre {
+    margin: 0; font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .78rem; line-height: 1.8; white-space: pre;
+  }
+  .setupterm .cmt { color: #66716D; }
+  .setupterm .ps { color: #7ED0D8; }
+
+  .filehead {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .78rem; font-weight: 700; margin: 2rem 0 .1rem;
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+  }
+  .filehead .fnum {
+    font-size: .66rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--faint); font-weight: 600;
+  }
+  .filesub { font-size: .85rem; color: var(--muted); margin: .2rem 0 0; max-width: 42rem; }
+
+  .applog {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+    padding: .5rem 0; overflow-x: auto; margin: 1rem 0 0;
+  }
+  .aline { padding: .5rem 1rem .55rem; }
+  .aline + .aline { border-top: 1px solid var(--line); }
+  .anote {
+    font-size: .8rem; color: var(--muted); margin-bottom: .3rem;
+    max-width: 44rem; white-space: normal; line-height: 1.45;
+  }
+  .anote .w {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .62rem; letter-spacing: .06em; text-transform: uppercase;
+    font-weight: 700; padding: .12em .55em; border-radius: 99px;
+    margin-right: .45rem; white-space: nowrap;
+  }
+  .anote .w.mind { color: var(--mind); background: var(--mind-bg); }
+  .anote .w.mach { color: var(--mach); background: var(--mach-bg); }
+  .anote .w.chat { color: var(--chat); background: var(--chat-bg); }
+  .anote .w.forkc { color: var(--forkc); background: var(--fork-bg); }
+  .anote .w.struct { color: var(--struct); background: var(--struct-bg); }
+  .anote code { font-size: .82em; }
+  .ajson {
+    margin: 0; font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: .74rem; line-height: 1.5; white-space: pre; color: var(--ink);
+  }
+  .ajson .ty { font-weight: 700; }
+  .aline.f-mind .ajson .ty { color: var(--mind); }
+  .aline.f-mach .ajson .ty { color: var(--mach); }
+  .aline.f-chat .ajson .ty { color: var(--chat); }
+  .aline.f-forkc .ajson .ty { color: var(--forkc); }
+  .aline.f-struct .ajson .ty { color: var(--struct); }
+  .ajson .fk { color: var(--muted); }
+
+  @media (max-width: 720px) {
+    .entries { grid-template-columns: 1fr; }
+    .busrow { grid-template-columns: repeat(2, 1fr); }
+    .arrows { display: none; }
+    .busbar { margin-top: .7rem; }
+    .bus .readers { margin-top: .7rem; }
+    .layer { grid-template-columns: 1fr; gap: .3rem; }
+    .rule { flex-direction: column; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .row, .toggle { transition: none; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="prose">
+    <div class="eyebrow"><span class="tick">▶</span> shellm field guide</div>
+    <h1>Everything is a line in one file</h1>
+    <p class="lede">A shellm identity — its thoughts, its actions, the shell commands it runs, your chat messages to it — is an append-only JSONL file. This page is a map of that file: the record format, who writes which lines, and how the pieces trigger each other.</p>
+  </header>
+
+  <div class="specimen">
+    <div class="cap">one step · one line of trajectory.jsonl</div>
+    <pre>{ <span class="k">"step_id"</span>: <span class="req">"7c02…"</span>, <span class="k">"ts"</span>: <span class="req">"2026-07-09T16:02:11.483-0700"</span>, <span class="k">"type"</span>: <span class="tag">"thought"</span>, <span class="k">"source"</span>: <span class="opt">"inner_monologue"</span>, <span class="k">"content"</span>: <span class="opt">"nick asked about disk usage — the actor is on it"</span> }
+   <span class="dim">└─ mandatory: step_id · ts · type ──┘  └─ everything else is optional and depends on the type ─┘</span></pre>
+  </div>
+
+  <section>
+    <span class="secnum">01 · The record format</span>
+    <div class="prose">
+      <h2>One shape, tagged by <code>type</code></h2>
+      <p>There is no schema zoo. Every step is a JSON object with three mandatory fields — <code>step_id</code> (UUID), <code>ts</code> (timestamp), <code>type</code> — plus whatever payload fields that type carries. <code>traj append</code> validates nothing beyond “valid JSON with a <code>type</code>.” It's a <em>tagged union over one open record</em>, the standard event-log pattern.</p>
+      <p>The tag carries meaning the fields can't: <code>thought</code>, <code>idle</code>, and <code>action</code> have <em>byte-identical field sets</em> (<code>content</code> + <code>source</code>), but an <code>action</code> makes the dispatcher fire the actor, a <code>thought</code> is broadcast for other thinkers, and an <code>idle</code> is a heartbeat the viewer folds away. The type is intent.</p>
+      <p><strong>Trajectory vs. mind log:</strong> a <em>trajectory</em> is any such file — the record of any shellm run, living at <code>&lt;hex8&gt;-&lt;slug&gt;/trajectory.jsonl</code> with a sibling <code>blobs/</code> for oversized output. A <em>mind log</em> is the special role one trajectory plays: an identity's <strong>root</strong> trajectory (pointed at by <code>info.txt</code>), used as a shared bus. Every mind log is a trajectory; most trajectories aren't mind logs.</p>
+      <p>Concurrent writers are safe because every write goes through <code>traj append</code>, which serializes appends with a <code>mkdir</code>-based lock (atomic, works on macOS and across Docker mounts). It guarantees no torn lines — and nothing more. Log order is just lock-acquisition order.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">02 · The step registry</span>
+    <h2 class="prose">Who writes which types</h2>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Family</th><th>Types</th><th>Written by</th><th>Carries <code>source</code>?</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="chip mach">machinery</span></td>
+            <td class="types"><span class="t mach">shellm-run</span><span class="t mach">prompt</span><span class="t mach">reasoning</span><span class="t mach">shell-output</span><span class="t mach">feedback</span><span class="t mach">final</span><span class="t mach">run-summary</span></td>
+            <td>the shellm loop itself, during a run</td>
+            <td><strong>never</strong></td>
+          </tr>
+          <tr>
+            <td><span class="chip mind">thinker</span></td>
+            <td class="types"><span class="t mind">thought</span><span class="t mind">action</span><span class="t mind">observation</span><span class="t mind">idle</span><span class="t mind">tp-thought</span></td>
+            <td>a thinker script's own hand (<code>traj append</code>)</td>
+            <td><strong>always</strong> (thinker name)</td>
+          </tr>
+          <tr>
+            <td><span class="chip chat">conversation</span></td>
+            <td class="types"><span class="t chat">message</span><span class="t chat">human-msg</span><span class="t chat">agent-msg</span></td>
+            <td><code>chat send</code> / <code>chat reply</code> — plain appends</td>
+            <td><code>"chat"</code></td>
+          </tr>
+          <tr>
+            <td><span class="chip struct">structural</span></td>
+            <td class="types"><span class="t struct">trajectory</span><span class="t forkc">fork</span><span class="t struct">merge</span></td>
+            <td>file header; cross-links between trajectories</td>
+            <td>no</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The first line of every file is a <code>trajectory</code> step whose <code>step_id</code> <em>is</em> the trajectory's ID — trajectories and steps share one UUID namespace.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">03 · Machinery vs. sourced steps</span>
+    <div class="prose">
+      <h2>The fingerprint rule</h2>
+      <p>“Machinery” is not a property of what caused a step — it's the fingerprint of <em>who wrote the line</em>. The shellm loop writes its seven types and never stamps <code>source</code>; thinker scripts always stamp theirs. One actor activation produces both kinds in the same log.</p>
+    </div>
+
+    <div class="rule">
+      <div class="a">
+        <h3>has source → a mind speaking</h3>
+        <p>Written by a thinker script (or <code>chat</code>) directly onto the bus. <code>source</code> names the voice: <code>inner_monologue</code>, <code>actor</code>, <code>chat</code>, <code>seed</code>.</p>
+      </div>
+      <div class="b">
+        <h3>no source → the loop working</h3>
+        <p>Written by a running shellm process: the run header, each iteration's reasoning + shell output, the final answer.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>Since 2026-07-05 the actor runs <code>shellm --traj &lt;root&gt;</code>, pouring its machinery <em>inline</em> into the mind log (“flat era”) so other thinkers can see work in-flight — instead of hiding it in a forked child trajectory (“fork era”). The cost: machinery interleaves with concurrent monologue, and nothing ties a step to its run. Toggle below to see what the viewer has to reconstruct:</p>
+    </div>
+
+    <div class="logfig" id="logfig">
+      <div class="logbar">
+        <div class="logtitle">mind log excerpt · condensed from gen-001</div>
+        <button class="toggle" id="grpbtn" aria-pressed="false"><span class="box"></span><span id="grplabel">group the actor's run</span></button>
+      </div>
+      <div class="log">
+        <div class="row struct-row"><span class="nosrc">— file header —</span><span class="body"><span class="ty">trajectory</span> <span class="fld">step_id: 73a9dd90…</span></span></div>
+        <div class="row mind-row"><span class="chip mind">seed</span><span class="body"><span class="ty">thought</span> <span class="fld">content:</span> "I am g001r3. My purpose is to be helpful and curious…"</span></div>
+        <div class="row chat-row"><span class="chip chat">chat</span><span class="body"><span class="ty">message</span> <span class="fld">from: nick · to: g001r3 · content:</span> "hey — how much disk is your workdir using?"</span></div>
+        <div class="row mind-row"><span class="chip mind">inner_monologue</span><span class="body"><span class="ty">action</span> <span class="fld">content:</span> "action: check workdir disk usage and reply to nick"</span></div>
+        <div class="runlabel">actor's run · shellm --traj (machinery, no source)</div>
+        <div class="row mach-row"><span class="nosrc">⚙ no source</span><span class="body"><span class="ty">shellm-run</span> <span class="fld">command:</span> "shellm --traj 73a9dd90 … ACTION: check workdir disk usage" <span class="fld">· model, env, workdir…</span></span></div>
+        <div class="row mach-row"><span class="nosrc">⚙ no source</span><span class="body"><span class="ty">prompt</span> <span class="fld">content:</span> "&lt;context&gt;…recent stream…&lt;/context&gt; ACTION: check workdir…"</span></div>
+        <div class="row mind-row"><span class="chip mind">inner_monologue</span><span class="body"><span class="ty">thought</span> <span class="fld">content:</span> "nick asked about disk — the actor is on it"</span></div>
+        <div class="row mach-row"><span class="nosrc">⚙ no source</span><span class="body"><span class="ty">reasoning</span> <span class="fld">thought:</span> "du the workdir, reply first" <span class="fld">· cmd:</span> chat reply nick "checking…"; du -sh "$SHELLM_WORKDIR"</span></div>
+        <div class="row chat-row"><span class="chip chat">chat</span><span class="body"><span class="ty">message</span> <span class="fld">from: g001r3 · to: nick · content:</span> "checking…"</span></div>
+        <div class="row mach-row"><span class="nosrc">⚙ no source</span><span class="body"><span class="ty">shell-output</span> <span class="fld">stdout:</span> "412M  /…/workdir" <span class="fld">· exit: 0</span></span></div>
+        <div class="row mind-row idle-row"><span class="chip mind">inner_monologue</span><span class="body"><span class="ty">idle</span> <span class="fld">content:</span> "…"</span></div>
+        <div class="row mach-row"><span class="nosrc">⚙ no source</span><span class="body"><span class="ty">final</span> <span class="fld">thought:</span> "Replied with usage." <span class="fld">· content:</span> "412M; told nick"</span></div>
+        <div class="row mind-row"><span class="chip mind">inner_monologue</span><span class="body"><span class="ty">thought</span> <span class="fld">content:</span> "good — answered quickly, nothing else pending"</span></div>
+      </div>
+      <p class="fignote">Grouped view is what the web viewer reconstructs — today by a stack heuristic (machinery attaches to the most recent unclosed <code>shellm-run</code>; <code>final</code> closes it), soon by an explicit <code>run_id</code> stamped on every machinery step (see <code>PLAN.md</code>). Note the monologue keeps thinking <em>during</em> the run — that interleaving is real concurrency, not noise.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">04 · Three meanings of “fork”</span>
+    <div class="prose">
+      <h2>Unix forks constantly; trajectories fork rarely</h2>
+      <p>Easy place to get confused: executing bash every iteration <em>is</em> a unix fork, but it isn't a shellm fork. Three layers, only the last one creates structure in the log:</p>
+    </div>
+    <div class="layers">
+      <div class="layer">
+        <span class="lname">1 · unix process</span>
+        <p>Forks everywhere, invisible as structure. Each iteration fork/execs a bash subprocess (or <code>docker exec</code>); the dispatcher fork/execs thinker scripts. The only trace is captured <code>stdout</code>/<code>stderr</code> inside a <code>shell-output</code> step.</p>
+      </div>
+      <div class="layer">
+        <span class="lname">2 · log record</span>
+        <p>Who wrote the line — machinery vs. sourced (section 03). One iteration of the loop = a <code>reasoning</code> + <code>shell-output</code> pair, same trajectory, no forking of anything.</p>
+      </div>
+      <div class="layer hot">
+        <span class="lname">3 · trajectory topology</span>
+        <p>A <span class="chip forkc">fork</span> step + child trajectory dir exist <strong>only</strong> when code inside a run invokes <code>shellm</code> again (without <code>--traj</code>). The child sees <code>_SHELLM_PARENT_TRAJ_ID</code> in its environment and writes the cross-link. <code>--traj</code> is precisely the “don't fork the topology” switch.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">05 · Entry points</span>
+    <div class="prose">
+      <h2>Three ways a loop starts — and one that isn't</h2>
+      <p>Only three things ever run the shellm loop, and they're the same function with different trajectory plumbing:</p>
+    </div>
+    <div class="entries">
+      <div class="entry">
+        <span class="who">you · imperatively</span>
+        <pre>shellm "mass of jupiter in kg"</pre>
+        <p>Synchronous. Own fresh trajectory; answer on stdout.</p>
+      </div>
+      <div class="entry">
+        <span class="who">a thinker · reactively</span>
+        <pre>shellm --traj "$TRAJ_ID" …</pre>
+        <p>Fired by dispatch. Machinery inlined into the mind log; no fork step, no child.</p>
+      </div>
+      <div class="entry">
+        <span class="who">generated code · recursively</span>
+        <pre>x=$(shellm "classify: $text")</pre>
+        <p>Nested call from inside a run. Forks a child trajectory with cross-links.</p>
+      </div>
+    </div>
+    <div class="prose">
+      <p><strong><code>chat repl</code> is not on this list.</strong> It contains no LLM call at all: <code>chat send</code> is a single <code>traj append</code> of a <code>message</code> step, and the repl is a TUI wrapping append + tail. You-in-the-repl are architecturally a peer of <code>inner_monologue</code> — a sourced writer on the bus. A reply reaches you like this:</p>
+    </div>
+    <div class="chain">
+      <div class="hop h-chat"><div class="dot"><span class="n">1</span><span class="stem"></span></div><div class="hbody"><p><span class="h">You type; a <code>message</code> step lands on the bus</span> — <code>chat send</code>, <code>from: nick</code>, <code>source: "chat"</code>. Nothing has “called an agent.”</p></div></div>
+      <div class="hop h-mach"><div class="dot"><span class="n">2</span><span class="stem"></span></div><div class="hbody"><p><span class="h">The dispatcher matches the type</span> — the actor subscribes to <code>message</code>; a guard skips messages not addressed to this identity (prevents reply-to-self loops).</p></div></div>
+      <div class="hop h-mind"><div class="dot"><span class="n">3</span><span class="stem"></span></div><div class="hbody"><p><span class="h">The actor launches <code>shellm --traj</code></span> — the only loop in the story. Its prompt says: send any reply in your <em>first</em> bash block, then do follow-up work.</p></div></div>
+      <div class="hop h-chat"><div class="dot"><span class="n">4</span><span class="stem"></span></div><div class="hbody"><p><span class="h">The reply is itself a bus step</span> — generated code runs <code>chat reply nick "…"</code>, another plain append. Your repl's tail renders it. Request/response is an illusion over publish/subscribe.</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">06 · The whole machine</span>
+    <div class="prose">
+      <h2>One bus, many hands</h2>
+      <p><code>identity shell</code> picks the bus (env vars). <code>thinkers start</code> turns on the reactive side. Everything else writes or reads:</p>
+    </div>
+    <div class="bus">
+      <div class="busrow">
+        <div class="busnode w-mind"><span class="bn">inner_monologue</span><span class="bd">llm call → thought / idle / action</span></div>
+        <div class="busnode w-mind"><span class="bn">actor</span><span class="bd">shellm --traj → machinery + replies</span></div>
+        <div class="busnode w-chat"><span class="bn">you · chat</span><span class="bd">message steps</span></div>
+        <div class="busnode w-mach"><span class="bn">shellm loop</span><span class="bd">reasoning / shell-output / final</span></div>
+      </div>
+      <div class="arrows"><span>↓ write</span><span>↓ write</span><span>↓ write</span><span>↓ write</span></div>
+      <div class="busbar">
+        <span class="bn">trajectory.jsonl — the mind log</span>
+        <span class="bd">append-only · mkdir-lock serialized · order = arrival</span>
+      </div>
+      <div class="arrows"><span>↓ read</span><span>↓ read</span><span>↓ read</span><span>↓ read</span></div>
+      <div class="busrow readers">
+        <div class="busnode"><span class="bn">dispatcher</span><span class="bd">new step → fire subscribed thinkers</span></div>
+        <div class="busnode"><span class="bn">chat repl / TUI</span><span class="bd">tail + render</span></div>
+        <div class="busnode"><span class="bn">web viewer</span><span class="bd">group runs, walk fork trees</span></div>
+        <div class="busnode"><span class="bn">shellm (resume)</span><span class="bd">rebuild LLM context from steps</span></div>
+      </div>
+    </div>
+    <div class="prose">
+      <p>The loop that makes it feel alive: thinker steps trigger the dispatcher, the dispatcher fires thinkers, thinkers write more steps. Machinery steps land on the bus too, but today's thinker subscriptions tune them out — only sourced steps drive dispatch.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">Appendix · a session, line by line</span>
+    <div class="prose">
+      <h2>zimbot answers a question</h2>
+      <p>A complete, simplified session with a made-up identity <strong>zimbot</strong>: two thinkers running, you in the chat repl. <code>step_id</code>/<code>ts</code> are dropped except where cross-links need them, and long content is trimmed — everything else is exactly what would land on disk.</p>
+    </div>
+    <div class="setupterm">
+      <pre><span class="cmt"># pick the bus: subshell with TRAJ_ID/ROOT_TRAJ_ID → zimbot's root trajectory</span>
+<span class="ps">$</span> identity shell zimbot
+
+<span class="cmt"># turn on the reactive side: dispatcher tails the mind log, fires these two on matching steps</span>
+<span class="ps">$</span> thinkers start inner_monologue actor
+
+<span class="cmt"># attach yourself as a bus client (append messages + tail the stream — no LLM in this command)</span>
+<span class="ps">$</span> chat repl --from nick</pre>
+    </div>
+
+    <div class="filehead"><span class="fnum">file ①</span> trajectories/a1b2c3d4-root/trajectory.jsonl <span class="chip mind">the mind log</span></div>
+    <p class="filesub">zimbot's root trajectory. Read the <code>source</code> column: present = a voice on the bus, absent = the actor's shellm loop working.</p>
+    <div class="applog">
+
+      <div class="aline f-struct">
+        <div class="anote"><span class="w struct">header</span>Written when zimbot was created. This step's <code>step_id</code> <em>is</em> the trajectory's ID — the thing <code>info.txt</code>'s <code>root_trajectory=</code> points at.</div>
+        <pre class="ajson">{"type":<span class="ty">"trajectory"</span>, <span class="fk">"step_id":"a1b2c3d4-…"</span>}</pre>
+      </div>
+
+      <div class="aline f-mind">
+        <div class="anote"><span class="w mind">seed</span>Identity bootstrap — who zimbot is, appended at creation time.</div>
+        <pre class="ajson">{"type":<span class="ty">"thought"</span>, "source":"seed", "content":"I am zimbot. I keep my workdir tidy and answer nick honestly."}</pre>
+      </div>
+
+      <div class="aline f-mind">
+        <div class="anote"><span class="w mind">inner_monologue</span>Thinkers are up. Nothing on the bus yet, so the monologue ticks over — the viewer folds runs of these into strips.</div>
+        <pre class="ajson">{"type":<span class="ty">"idle"</span>, "source":"inner_monologue", "content":"(nothing new)"}</pre>
+      </div>
+
+      <div class="aline f-chat">
+        <div class="anote"><span class="w chat">you · chat repl</span>You hit enter. This is the <em>entire</em> mechanism of <code>chat send</code> — one appended step. No agent has been "called."</div>
+        <pre class="ajson">{"type":<span class="ty">"message"</span>, "source":"chat", "from":"nick", "to":"zimbot", "content":"zimbot — what's eating disk in your workdir? gimme a line I can paste in slack"}</pre>
+      </div>
+
+      <div class="aline f-mind">
+        <div class="anote"><span class="w mind">inner_monologue</span>The dispatcher saw a <code>message</code> and fired both subscribers. The monologue reacts with commentary (one <code>llm</code> call, then <code>traj append</code>) …</div>
+        <pre class="ajson">{"type":<span class="ty">"thought"</span>, "source":"inner_monologue", "content":"nick wants disk numbers — the actor should take this"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run · iteration 0</span>… and the actor launches <code>shellm --traj a1b2c3d4</code> — a loop pouring into <em>this same file</em>. From here, source-less steps are its machinery. Note the trigger text embedded in <code>command</code>.</div>
+        <pre class="ajson">{"type":<span class="ty">"shellm-run"</span>, "command":"shellm --traj a1b2c3d4 … MESSAGE from nick: what's eating disk…", "model":"claude-opus-4-7", "resumed":true}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run</span>What was sent to the LLM: identity + memories + recent stream, then the trigger.</div>
+        <pre class="ajson">{"type":<span class="ty">"prompt"</span>, "content":"&lt;context&gt;…recent stream…&lt;/context&gt;\n\nMESSAGE from nick: what's eating disk…"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run · iteration 1</span>The model's thinking plus the bash it wrote. Executing this block is a <em>unix</em> fork — not a trajectory fork.</div>
+        <pre class="ajson">{"type":<span class="ty">"reasoning"</span>, "thought":"Reply first, then measure.", "cmd":"chat reply nick \"on it — measuring\"\ndu -sh workdir/* | sort -rh | head -3"}</pre>
+      </div>
+
+      <div class="aline f-chat">
+        <div class="anote"><span class="w chat">generated code → chat</span>The running bash called <code>chat reply</code> — a plain append, so a <em>sourced</em> step lands mid-run. Your repl renders it immediately.</div>
+        <pre class="ajson">{"type":<span class="ty">"message"</span>, "source":"chat", "from":"zimbot", "to":"nick", "content":"on it — measuring"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run</span>Captured stdout of iteration 1, fed back to the model as the next turn. Over 4&nbsp;KB it would spill to <code>blobs/</code> with a <code>stdout_ref</code>.</div>
+        <pre class="ajson">{"type":<span class="ty">"shell-output"</span>, "stdout":"812M workdir/cache\n310M workdir/repos\n88M workdir/notes", "exit":0}</pre>
+      </div>
+
+      <div class="aline f-mind">
+        <div class="anote"><span class="w mind">inner_monologue</span>Concurrency, visible: the monologue keeps thinking <em>while</em> the actor's run is mid-flight. This interleaving is why flat-era grouping needs <code>run_id</code>.</div>
+        <pre class="ajson">{"type":<span class="ty">"thought"</span>, "source":"inner_monologue", "content":"812M of cache again — worth remembering"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run · iteration 2</span>The model delegates the wording to a <em>nested</em> shellm call — no <code>--traj</code>, so this one will fork the topology.</div>
+        <pre class="ajson">{"type":<span class="ty">"reasoning"</span>, "thought":"Delegate the wording.", "cmd":"summary=$(shellm \"one slack-ready line: 812M cache, 310M repos, 88M notes\")\necho \"$summary\""}</pre>
+      </div>
+
+      <div class="aline f-forkc">
+        <div class="anote"><span class="w forkc">child process</span>The nested shellm saw <code>_SHELLM_PARENT_TRAJ_ID</code> in its environment and cross-linked itself: a new trajectory dir, nested inside this one. See file&nbsp;② below.</div>
+        <pre class="ajson">{"type":<span class="ty">"fork"</span>, "child":"e5f6a7b8-…", "child_ref":"e5f6a7b8-one-slack-ready-line/trajectory.jsonl", <span class="fk">"step_id":"f9c0d1e2-…"</span>}</pre>
+      </div>
+
+      <div class="aline f-forkc">
+        <div class="anote"><span class="w forkc">child process</span>Write-back: the child finished and posted its answer into the parent. No <code>source</code>, but <code>from_traj</code> marks it as a completion link, not loop machinery.</div>
+        <pre class="ajson">{"type":<span class="ty">"thought"</span>, "content":"disk: 1.2G total — 812M is cache (clearable); repos 310M, notes 88M", "from_traj":"e5f6a7b8-…", <span class="fk">"from_step":"…"</span>}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run</span>Iteration 2's captured stdout — the child's final answer, echoed by the parent's bash.</div>
+        <pre class="ajson">{"type":<span class="ty">"shell-output"</span>, "stdout":"disk: 1.2G total — 812M is cache (clearable); repos 310M, notes 88M", "exit":0}</pre>
+      </div>
+
+      <div class="aline f-chat">
+        <div class="anote"><span class="w chat">generated code → chat</span>Iteration 3's bash sends the real reply before the loop records anything…</div>
+        <pre class="ajson">{"type":<span class="ty">"message"</span>, "source":"chat", "from":"zimbot", "to":"nick", "content":"disk: 1.2G total — 812M is cache (clearable); repos 310M, notes 88M"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">actor's run · closes</span>… and the same block set <code>FINAL=…</code>, so the loop writes a single <code>final</code> step for this iteration (carrying the code) instead of a reasoning/output pair. The run is over; machinery stops.</div>
+        <pre class="ajson">{"type":<span class="ty">"final"</span>, "thought":"Sent the summary.", "cmd":"chat reply nick \"disk: 1.2G…\"\nFINAL=\"replied to nick\"", "content":"replied to nick"}</pre>
+      </div>
+
+      <div class="aline f-mind">
+        <div class="anote"><span class="w mind">inner_monologue</span>Life goes on. The bus is quiet again.</div>
+        <pre class="ajson">{"type":<span class="ty">"thought"</span>, "source":"inner_monologue", "content":"handled — nothing else pending"}</pre>
+      </div>
+
+    </div>
+
+    <div class="filehead"><span class="fnum">file ②</span> trajectories/a1b2c3d4-root/e5f6a7b8-one-slack-ready-line/trajectory.jsonl <span class="chip mach">ordinary trajectory</span></div>
+    <p class="filesub">The forked child — what the nested <code>shellm "one slack-ready line: …"</code> call produced. Notice: <em>no <code>source</code> anywhere</em>. An ordinary trajectory is machinery all the way down; only mind logs have voices.</p>
+    <div class="applog">
+
+      <div class="aline f-struct">
+        <div class="anote"><span class="w struct">header</span>The child's header carries the back-links to the parent — the other half of the <code>fork</code> step's cross-reference (they share <code>parent_step</code>/<code>step_id</code>).</div>
+        <pre class="ajson">{"type":<span class="ty">"trajectory"</span>, <span class="fk">"step_id":"e5f6a7b8-…"</span>, "parent_traj":"a1b2c3d4-…", <span class="fk">"parent_step":"f9c0d1e2-…"</span>, "parent_traj_ref":"../trajectory.jsonl"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">child loop</span>A fresh run header — <code>resumed: false</code>, own conversation, own workdir.</div>
+        <pre class="ajson">{"type":<span class="ty">"shellm-run"</span>, "command":"shellm \"one slack-ready line: 812M cache, 310M repos, 88M notes\"", "resumed":false}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">child loop</span>The child's context is just its prompt — it knows nothing of zimbot, nick, or the mind log.</div>
+        <pre class="ajson">{"type":<span class="ty">"prompt"</span>, "content":"one slack-ready line: 812M cache, 310M repos, 88M notes"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">background</span>Async summary from a fast model, for labeling this run in explorers. (Runs started with <code>--traj</code> skip this — which is why the mind log above has none.)</div>
+        <pre class="ajson">{"type":<span class="ty">"run-summary"</span>, "tldr":"Write a one-line disk usage summary"}</pre>
+      </div>
+
+      <div class="aline f-mach">
+        <div class="anote"><span class="w mach">child loop · closes</span>The model answered with no bash block at all, so the whole response becomes the final answer (the no-code path). This <code>content</code> is what flowed back: stdout → <code>$summary</code> in the parent, write-back thought in the mind log.</div>
+        <pre class="ajson">{"type":<span class="ty">"final"</span>, "thought":"No tools needed.", "content":"disk: 1.2G total — 812M is cache (clearable); repos 310M, notes 88M"}</pre>
+      </div>
+
+    </div>
+
+    <div class="prose" style="margin-top: 2rem;">
+      <h3>What you actually saw in the repl</h3>
+      <p>Out of all twenty-three steps across both files, the repl rendered exactly three — the <code>message</code> steps. Everything else is the machine room:</p>
+    </div>
+    <div class="setupterm">
+      <pre><span class="ps">nick&gt;</span> zimbot — what's eating disk in your workdir? gimme a line I can paste in slack
+<span class="cmt">zimbot: on it — measuring</span>
+<span class="cmt">zimbot: disk: 1.2G total — 812M is cache (clearable); repos 310M, notes 88M</span></pre>
+    </div>
+  </section>
+
+  <div class="footer">
+    <p>Sources: <code>design/trajectory_spec.md</code>, <code>design/THINKERS_spec.md</code>, <code>bin/shellm</code>, <code>bin/traj</code>, <code>bin/chat</code>, <code>thinkers/*/step</code>, and real gen-001 mind logs. Planned changes to run attribution (explicit <code>run_id</code> / <code>trigger_step</code> stamping, heuristic deletion) are in <code>PLAN.md</code> at the repo root.</p>
+  </div>
+
+</div>
+
+<script>
+  (function () {
+    var fig = document.getElementById("logfig");
+    var btn = document.getElementById("grpbtn");
+    var label = document.getElementById("grplabel");
+    btn.addEventListener("click", function () {
+      var on = fig.classList.toggle("grouped");
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      label.textContent = on ? "back to raw interleaved log" : "group the actor's run";
+    });
+  })();
+</script>
