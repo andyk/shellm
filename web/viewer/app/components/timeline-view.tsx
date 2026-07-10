@@ -44,7 +44,8 @@ const ROW_CLICK_H = 20; // click target taller than the square
 const COLLAPSED_W = 40;
 const LANE_GAP = 24; // inter-lane gutter, reserved for edge routing
 const CELL_PAD = 8; // lane-edge padding for cells/blocks
-const NEST_PAD = 26; // extra indent for steps nested inside a block
+const BLOCK_INSET = CELL_PAD - 2; // block edge inset from the lane edge
+const NEST_PAD = 10; // nested steps align with the block's inner padding
 
 function durationOf(started: string, ended: string | null): string | null {
   if (!started || !ended) return null;
@@ -158,13 +159,16 @@ export function TimelineView({
     if (collapsed.has(layout.lanes[cell.lane].id)) {
       return laneX[cell.lane] + laneW[cell.lane] / 2;
     }
-    return laneX[cell.lane] + CELL_PAD + (cell.inBlock ? NEST_PAD : 0) + CELL / 2;
+    if (cell.inBlock) {
+      return laneX[cell.lane] + BLOCK_INSET + NEST_PAD + CELL / 2;
+    }
+    return laneX[cell.lane] + CELL_PAD + CELL / 2;
   };
 
   const blockRect = (block: TimelineBlock) => {
     const isCollapsed = collapsed.has(layout.lanes[block.lane].id);
-    const left = laneX[block.lane] + (isCollapsed ? 4 : CELL_PAD - 2);
-    const right = laneX[block.lane] + laneW[block.lane] - (isCollapsed ? 4 : CELL_PAD - 2);
+    const left = laneX[block.lane] + (isCollapsed ? 4 : BLOCK_INSET);
+    const right = laneX[block.lane] + laneW[block.lane] - (isCollapsed ? 4 : BLOCK_INSET);
     const top = layout.rowY[block.startRow] + 2;
     const bottom = layout.rowY[block.endRow] + layout.rowH[block.endRow] - 2;
     return { left, right, top, bottom, collapsed: isCollapsed };
@@ -189,7 +193,12 @@ export function TimelineView({
 
     const rowBottom = (row: number) => layout.rowY[row] + layout.rowH[row];
 
-    const paths: { edge: (typeof layout.edges)[number]; d: string }[] = [];
+    const paths: {
+      edge: (typeof layout.edges)[number];
+      d: string;
+      start: { x: number; y: number };
+      end: { x: number; y: number };
+    }[] = [];
     for (const edge of layout.edges) {
       const srcLane = laneOf(edge.fromId);
       const tgtLane = laneOf(edge.toId);
@@ -241,7 +250,7 @@ export function TimelineView({
         pts.push({ x: gx, y: by }, { x: arriveX, y: by });
       }
 
-      paths.push({ edge, d: roundedPath(pts) });
+      paths.push({ edge, d: roundedPath(pts), start: pts[0], end: pts[pts.length - 1] });
     }
     return paths;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -281,7 +290,7 @@ export function TimelineView({
                     isCollapsed ? `expand ${lane.label}` : `collapse ${lane.label}`
                   }
                   style={{ left: laneX[i], width: laneW[i], height: HEADER_H }}
-                  className="group absolute top-0 flex items-center gap-1 overflow-hidden rounded-t border-x border-t border-border/50 px-2 text-left hover:bg-accent/50"
+                  className="group absolute top-0 flex items-center gap-1 overflow-hidden rounded-t bg-muted/[0.12] px-2 text-left hover:bg-accent/50"
                 >
                   {isCollapsed ? (
                     <ChevronsLeftRight className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -307,13 +316,14 @@ export function TimelineView({
 
           {/* body */}
           <div className="relative" style={{ height: bodyHeight, width }}>
-            {/* lane columns */}
+            {/* lane columns — fills only, no borders; the gutters between
+                them are open routing channels */}
             {layout.lanes.map((lane, i) => (
               <div
                 key={lane.id}
                 className={cn(
-                  "absolute top-0 border-x border-border/40",
-                  collapsed.has(lane.id) ? "bg-muted/20" : "bg-muted/[0.07]"
+                  "absolute top-0 rounded-b",
+                  collapsed.has(lane.id) ? "bg-muted/25" : "bg-muted/[0.12]"
                 )}
                 style={{ left: laneX[i], width: laneW[i], height: bodyHeight }}
               />
@@ -358,24 +368,11 @@ export function TimelineView({
               width={width}
               height={bodyHeight}
             >
-              <defs>
-                {Object.entries(EDGE_STROKE).map(([kind, color]) => (
-                  <marker
-                    key={kind}
-                    id={`arrow-${kind}`}
-                    viewBox="0 0 8 8"
-                    refX="7"
-                    refY="4"
-                    markerWidth="5.5"
-                    markerHeight="5.5"
-                    orient="auto-start-reverse"
-                  >
-                    <path d="M 0 0 L 8 4 L 0 8 z" fill={color} />
-                  </marker>
-                ))}
-              </defs>
-              {edgePaths.map(({ edge, d }) => {
+              {/* No arrowheads: time flows down, so direction is implied —
+                  endpoints are dots (source small, target larger). */}
+              {edgePaths.map(({ edge, d, start, end }) => {
                 const s = edgeStyle(edge);
+                const color = EDGE_STROKE[edge.kind];
                 return (
                   <g key={edge.id} opacity={s.opacity}>
                     {s.halo && (
@@ -386,13 +383,9 @@ export function TimelineView({
                         strokeWidth={s.width + 2.5}
                       />
                     )}
-                    <path
-                      d={d}
-                      fill="none"
-                      stroke={EDGE_STROKE[edge.kind]}
-                      strokeWidth={s.width}
-                      markerEnd={`url(#arrow-${edge.kind})`}
-                    />
+                    <path d={d} fill="none" stroke={color} strokeWidth={s.width} />
+                    <circle cx={start.x} cy={start.y} r={s.width + 0.5} fill={color} />
+                    <circle cx={end.x} cy={end.y} r={s.width + 1.5} fill={color} />
                   </g>
                 );
               })}
@@ -484,7 +477,7 @@ export function TimelineView({
                             laneX[cell.lane] +
                             laneW[cell.lane] -
                             (squareX - CELL / 2) -
-                            CELL_PAD,
+                            (cell.inBlock ? BLOCK_INSET + NEST_PAD : CELL_PAD),
                           top: y - ROW_CLICK_H / 2,
                           height: ROW_CLICK_H,
                         }

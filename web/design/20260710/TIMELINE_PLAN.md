@@ -275,6 +275,12 @@ correlation, any mobile-specific layout.
   columns got subtle fills/borders; headers align to the new geometry.
   Deferred from the brainstorm: `edges: all/focus/off` toggle,
   click-to-pin trace mode, connection "ports" on squares.
+- **Round 4 (polish)**: column delineation is now lane *fills only* — no
+  border lines, so gutters read as open channels; arrowheads replaced with
+  **endpoint dots** (small at source, larger at target — time flows down,
+  direction is implied, and dots need no orientation math); nested in-run
+  steps align with the block's inner padding (`NEST_PAD` 26→10) instead of
+  floating mid-block. Verified light + dark.
 - **Live-run finding (botnick-neo, 2026-07-10 ~14:44)**: partial pass —
   `launched_by`/`trigger_step` landed on run headers, but (a) **identities
   snapshot `thinkers/` at creation** (`THINKERS_DIR=$IDENTITY_DIR/thinkers`),
