@@ -1000,19 +1000,19 @@ TAILHELP
             shellm-run|run-summary|prompt) color="$c_meta" ;;
         esac
 
-        local source_tag=""
-        [[ -n "$source" ]] && source_tag="($source) "
+        local type_tag="$entry_type"
+        [[ -n "$source" ]] && type_tag="$entry_type, $source"
 
         local short_id="${step_id:0:8}"
         local traj_tag=""
         [[ -n "$traj_hex" ]] && traj_tag="${c_dim}${traj_hex}/${c_reset}"
 
-        printf '%s%s%s %s%s%s%s %s[%s]%s %s%s\n' \
+        printf '%s%s%s %s%s%s%s %s[%s]%s %s\n' \
             "$c_dim" "$time_display" "$c_reset" \
             "$traj_tag" \
             "$c_dim" "$short_id" "$c_reset" \
-            "$color" "$entry_type" "$c_reset" \
-            "$source_tag" "$content"
+            "$color" "$type_tag" "$c_reset" \
+            "$content"
     }
 
     # Pipe handler: raw output or formatted
@@ -1684,19 +1684,19 @@ CATHELP
             shellm-run|run-summary|prompt) color="$c_meta" ;;
         esac
 
-        local source_tag=""
-        [[ -n "$source" ]] && source_tag="($source) "
+        local type_tag="$entry_type"
+        [[ -n "$source" ]] && type_tag="$entry_type, $source"
 
         local short_id="${step_id:0:8}"
         local traj_tag=""
         [[ -n "$traj_hex" ]] && traj_tag="${c_dim}${traj_hex}/${c_reset}"
 
-        printf '%s%s%s %s%s%s%s %s[%s]%s %s%s\n' \
+        printf '%s%s%s %s%s%s%s %s[%s]%s %s\n' \
             "$c_dim" "$time_display" "$c_reset" \
             "$traj_tag" \
             "$c_dim" "$short_id" "$c_reset" \
-            "$color" "$entry_type" "$c_reset" \
-            "$source_tag" "$content"
+            "$color" "$type_tag" "$c_reset" \
+            "$content"
     }
 
     # Output a single line (raw or formatted)
