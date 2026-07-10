@@ -52,3 +52,4 @@ If nothing else is happening, do NOT idle, and do not emit filler ("waiting", ".
 ## Rules
 
 - Thoughts should be first-person, natural, short, and specific to the recent stream.
+- Output plain prose. Never wrap your output in JSON. The recent stream shows steps as JSON envelopes (`{"type":"thought","content":...}`) — the runner adds that envelope for you; your output is only the content. If you find yourself typing `{"type":` — stop and just write the sentence.

@@ -135,9 +135,20 @@ step_ids — a different program), SSE tailing, stream virtualization,
   unknown-run_id orphans. 11 passed; frontend typecheck clean. Verified
   end-to-end with a stubbed `llm`: two runs appended into one trajectory via
   `--traj` grouped exactly by `load_trajectory`.
-- **Not done**: work item 3 (monologue content bug), 5b (fresh real-session
-  fixture), 6 (trajectory_spec registry; the data-model.md grouping section
-  was updated alongside the code).
+- **Done — work item 3**: monologue JSON-wrapped content fixed at the
+  writer, per gen-001 accepted proposal 04. Root cause: `_recent_stream`
+  shows the model raw JSON step lines, which it occasionally mimics.
+  Two-part fix: an output-format rule in
+  `thinkers/inner_monologue/prompt.md` (plain prose, never the JSON
+  envelope), plus a defensive unwrap in `thinkers/inner_monologue/step`
+  (a response that parses as a JSON object with a `content` key is
+  unwrapped before the type classifier; an `action`-typed envelope is
+  re-prefixed so it still classifies as an action). Verified against the
+  g001r1 evidence case plus edge cases (non-JSON brace-prefixed prose,
+  envelope without content key) — all classify correctly.
+- **Not done**: 5b (fresh real-session fixture), 6 (trajectory_spec
+  registry + the `merge` decision; the data-model.md grouping section was
+  updated alongside the code).
 
 ## Work items (in order)
 

@@ -66,6 +66,21 @@ if [[ -z "$response" ]]; then
     sleep 1   # brief backoff so transient API failures don't tight-loop
 fi
 
+# Defensive unwrap: the model occasionally mimics the JSON step envelopes it
+# sees in the recent stream and emits one as its whole response; recover the
+# inner content instead of double-wrapping it (gen-001 proposal 04).
+if [[ "$response" == "{"* ]]; then
+    unwrapped=$(printf '%s' "$response" | jq -r 'select(type == "object") | .content // empty' 2>/dev/null) || true
+    if [[ -n "$unwrapped" ]]; then
+        unwrapped_type=$(printf '%s' "$response" | jq -r 'select(type == "object") | .type // empty' 2>/dev/null) || true
+        # Preserve an action envelope's intent through the prefix classifier
+        if [[ "$unwrapped_type" == "action" && "$unwrapped" != action:* ]]; then
+            unwrapped="action: $unwrapped"
+        fi
+        response="$unwrapped"
+    fi
+fi
+
 # Determine step type and strip prefix from content
 step_type="thought"
 step_content="$response"
