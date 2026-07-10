@@ -9,7 +9,9 @@ import type { Mindlog, NormalizedStep, RunGroup } from "~/lib/types";
 // --- geometry constants (px) ---
 export const GUTTER_W = 72; // wall-clock column
 export const LANE_W = 200;
+export const MONO_LANE_W = 320; // the monologue is the narrative spine — wider
 export const ROW_H = 26;
+export const TALL_ROW_H = 40; // two-line rows for monologue thoughts/actions
 export const BLOCK_ROW_H = 54; // rows where a run block starts (2-line summary)
 export const GAP_ROW_H = 26;
 export const HEADER_H = 34; // sticky lane-header strip
@@ -203,7 +205,9 @@ export function buildTimeline(mindlog: Pick<Mindlog, "steps" | "runs">): Timelin
       blockByRunId.set(run.run_id, block);
     } else {
       const lane = laneFor(laneIdFor(step));
-      const row = pushRow(ROW_H, step.ts);
+      // monologue thoughts get two preview lines — they carry the narrative
+      const tall = step.source === "inner_monologue" && step.type !== "idle";
+      const row = pushRow(tall ? TALL_ROW_H : ROW_H, step.ts);
       const cell = { step, lane, row };
       cells.push(cell);
       cellByStepId.set(step.step_id, cell);

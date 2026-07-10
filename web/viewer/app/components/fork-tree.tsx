@@ -57,7 +57,7 @@ function NodeRow({
         <Link
           to={
             depth === 0
-              ? `/i/${encodeURIComponent(identityId)}`
+              ? `/i/${encodeURIComponent(identityId)}/mindlog`
               : `/i/${encodeURIComponent(identityId)}/t/${encodeURIComponent(node.traj_id)}`
           }
           className="flex min-w-0 flex-1 items-center gap-1 hover:underline"

@@ -281,6 +281,17 @@ correlation, any mobile-specific layout.
   direction is implied, and dots need no orientation math); nested in-run
   steps align with the block's inner padding (`NEST_PAD` 26→10) instead of
   floating mid-block. Verified light + dark.
+- **Round 5**: lanes are now **hideable and reorderable** — hover a lane
+  header for ‹ › (move), collapse, and hide controls; hidden lanes show as
+  restore chips above the grid; all state URL-persisted (`?hidden=`,
+  `?laneorder=`); edges touching hidden lanes are dropped. Legend made
+  honest: swatches mirror resting opacity (trigger solid, ghosts faint)
+  with endpoint dots and a "hover a step to trace" hint. **Modals
+  enriched**: run modal shows launched-by, a clickable *triggered by* row,
+  and a *result* box (the final's content); step modal shows *triggered
+  by*, *written inside* (its run), and *triggered run* rows — all
+  cross-navigable, so a whole thought→action→run→observation chain can be
+  walked inside the modal.
 - **Live-run finding (botnick-neo, 2026-07-10 ~14:44)**: partial pass —
   `launched_by`/`trigger_step` landed on run headers, but (a) **identities
   snapshot `thinkers/` at creation** (`THINKERS_DIR=$IDENTITY_DIR/thinkers`),
@@ -292,6 +303,14 @@ correlation, any mobile-specific layout.
   container). Neither is a code bug; both are fixed by creating a fresh
   identity (fresh thinker copies + fresh env mounts). The monologue stamp
   path was verified correct in isolation (stubbed-llm harness).
+- **Round 6**: run modal is now high-level-first — tldr/trigger/result up
+  top, machinery collapsed behind a `steps (N)` toggle. Monologue lane
+  widened to 320px with **two-line** previews (`TALL_ROW_H` rows for
+  non-idle monologue steps) so the narrative reads at a glance.
+  **Timeline is the identity's default page**: `/i/<id>` → Timeline,
+  mind log moved to `/i/<id>/mindlog` (tab order: Timeline · Mind log ·
+  Thinkers · Memories; fork-tree root + sub-traj breadcrumb still point
+  at the mind log explicitly).
 - **Remaining**: live verification on a **freshly created** identity
   (Nick); capture it as the PLAN.md 5b fixture; optional stretch items per
   T4/T8 (newest-at-top toggle, ghost squares, `?after=`).

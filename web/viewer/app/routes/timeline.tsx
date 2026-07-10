@@ -21,11 +21,13 @@ export function meta() {
   return [{ title: "shellm · timeline" }];
 }
 
+// Swatch opacity mirrors the canvas: triggers are always on, the rest rest
+// as ghosts until an attached step or run is hovered.
 const EDGE_LEGEND = [
-  { label: "trigger → run", color: "#f59e0b" },
-  { label: "wake → thinker", color: "#38bdf8" },
-  { label: "run → wrote", color: "#60a5fa" },
-  { label: "fork → merge", color: "#e879f9" },
+  { label: "trigger → run", color: "#f59e0b", opacity: 0.9 },
+  { label: "wake → thinker", color: "#38bdf8", opacity: 0.3 },
+  { label: "run → wrote", color: "#60a5fa", opacity: 0.3 },
+  { label: "fork → merge", color: "#e879f9", opacity: 0.3 },
 ];
 
 export default function TimelinePage() {
@@ -100,24 +102,29 @@ export default function TimelinePage() {
               </span>
             ))}
             <span className="mx-1 h-4 w-px bg-border" />
-            {EDGE_LEGEND.map(({ label, color }) => (
+            {EDGE_LEGEND.map(({ label, color, opacity }) => (
               <span
                 key={label}
                 className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
               >
                 <svg width="18" height="8">
                   <line
-                    x1="0"
+                    x1="1"
                     y1="4"
-                    x2="18"
+                    x2="14"
                     y2="4"
                     stroke={color}
                     strokeWidth="1.5"
+                    opacity={opacity}
                   />
+                  <circle cx="15.5" cy="4" r="2.5" fill={color} opacity={opacity} />
                 </svg>
                 {label}
               </span>
             ))}
+            <span className="font-mono text-[10px] text-muted-foreground/70">
+              · hover a step to trace
+            </span>
           </div>
         </div>
         <TimelineView layout={layout} live={live} />

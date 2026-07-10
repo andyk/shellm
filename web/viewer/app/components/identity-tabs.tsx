@@ -4,8 +4,8 @@ import { LiveBadge } from "~/components/live-badge";
 import { cn } from "~/lib/utils";
 
 const TABS = [
-  { key: "mindlog", label: "Mind log", path: "" },
-  { key: "timeline", label: "Timeline", path: "/timeline" },
+  { key: "timeline", label: "Timeline", path: "" },
+  { key: "mindlog", label: "Mind log", path: "/mindlog" },
   { key: "thinkers", label: "Thinkers", path: "/thinkers" },
   { key: "memories", label: "Memories", path: "/memories" },
 ] as const;

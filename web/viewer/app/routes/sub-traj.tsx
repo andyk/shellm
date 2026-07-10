@@ -75,7 +75,7 @@ export default function SubTrajPage() {
           </Link>
           <span className="text-muted-foreground">/</span>
           <Link
-            to={`/i/${encodeURIComponent(identityId)}`}
+            to={`/i/${encodeURIComponent(identityId)}/mindlog`}
             className="font-mono text-sm hover:underline"
           >
             {traj.identity.name}
