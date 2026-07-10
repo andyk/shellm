@@ -262,6 +262,19 @@ correlation, any mobile-specific layout.
   arrive at the target's **top**, so lines never strike through a row's
   preview text and adjacent-lane edges no longer degenerate; run-block
   padding/nesting polish.
+- **Round 3 (arrow brainstorm outcome)**: edges rebuilt as **orthogonal
+  routes through dedicated 24px inter-lane gutters** — depart the square's
+  bottom, run along the source row's bottom boundary into the gutter,
+  vertically inside the gutter, then horizontally along the *target's own
+  row* (collision-free by construction: ordinal rows hold one event each);
+  rounded elbows. **Tiered visibility**: trigger→run edges always on
+  (sparse, one per run); dispatch/assoc/merge rest at 14% ghost and pop to
+  full on hovering an attached cell/block (non-incident edges drop to
+  near-zero); visible edges get a background-colored **halo** under-stroke
+  so residual crossings (e.g. through a block interior) stay legible. Lane
+  columns got subtle fills/borders; headers align to the new geometry.
+  Deferred from the brainstorm: `edges: all/focus/off` toggle,
+  click-to-pin trace mode, connection "ports" on squares.
 - **Live-run finding (botnick-neo, 2026-07-10 ~14:44)**: partial pass —
   `launched_by`/`trigger_step` landed on run headers, but (a) **identities
   snapshot `thinkers/` at creation** (`THINKERS_DIR=$IDENTITY_DIR/thinkers`),

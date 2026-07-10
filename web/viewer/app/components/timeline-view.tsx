@@ -1,8 +1,17 @@
 // Timeline tab: swimlane view of a mind log. Time runs down; each writer
 // gets a lane; runs are summary blocks in the launcher's lane; exact causal
-// edges (trigger/dispatch/assoc/merge) are drawn as an SVG overlay. Row
-// geometry comes precomputed from ~/lib/timeline-model; lane x-geometry is
-// computed here because lanes are collapsible.
+// edges (trigger/dispatch/assoc/merge) are drawn as an SVG overlay.
+//
+// Edge routing is orthogonal through dedicated inter-lane gutters: an edge
+// leaves its source downward, runs along the source row's bottom boundary
+// into the gutter beside the source lane, travels vertically inside the
+// gutter, then horizontally along the target's own row. Because ordinal
+// rows hold exactly one event each, those horizontal runs cross only empty
+// lane space — edges never strike through text by construction.
+//
+// Visibility is tiered: trigger→run edges (the structural story, one per
+// run) are always on; dispatch/assoc/merge edges rest as faint ghosts and
+// pop to full strength when an attached cell or block is hovered.
 
 import { ArrowDownToLine, ChevronsLeftRight, ChevronsRightLeft, Pause } from "lucide-react";
 import { parseAsString, useQueryState } from "nuqs";
@@ -33,6 +42,7 @@ const EDGE_STROKE: Record<EdgeKind, string> = {
 const CELL = 12; // square size
 const ROW_CLICK_H = 20; // click target taller than the square
 const COLLAPSED_W = 40;
+const LANE_GAP = 24; // inter-lane gutter, reserved for edge routing
 const CELL_PAD = 8; // lane-edge padding for cells/blocks
 const NEST_PAD = 26; // extra indent for steps nested inside a block
 
@@ -54,26 +64,29 @@ function blockTitle(block: TimelineBlock): string {
   return cmd.replace(/\s+/g, " ").trim() || "shellm run";
 }
 
-/**
- * Curved edge path. Sources depart downward (out of a square's bottom, so
- * the line never strikes through the source row's text — targets are always
- * later, i.e. lower); targets are approached horizontally.
- */
-function edgePath(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  fromSide: boolean,
-  toTop: boolean
-): string {
-  const dir = x2 >= x1 ? 1 : -1;
-  const bend = Math.max(24, Math.min(70, Math.abs(x2 - x1) / 2.5));
-  const c1 = fromSide
-    ? `${x1 + bend * dir} ${y1}`
-    : `${x1} ${y1 + Math.max(12, Math.min(48, (y2 - y1) * 0.8))}`;
-  const c2 = toTop ? `${x2} ${y2 - Math.max(14, Math.min(40, y2 - y1))}` : `${x2 - bend * dir} ${y2}`;
-  return `M ${x1} ${y1} C ${c1}, ${c2}, ${x2} ${y2}`;
+/** Orthogonal polyline with rounded corners. */
+function roundedPath(points: { x: number; y: number }[], r = 7): string {
+  if (points.length < 2) return "";
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i - 1];
+    const c = points[i];
+    const n = points[i + 1];
+    const inLen = Math.hypot(c.x - p.x, c.y - p.y);
+    const outLen = Math.hypot(n.x - c.x, n.y - c.y);
+    const rr = Math.min(r, inLen / 2, outLen / 2);
+    if (rr < 0.5) {
+      d += ` L ${c.x} ${c.y}`;
+      continue;
+    }
+    const inU = { x: (c.x - p.x) / inLen, y: (c.y - p.y) / inLen };
+    const outU = { x: (n.x - c.x) / outLen, y: (n.y - c.y) / outLen };
+    d += ` L ${c.x - inU.x * rr} ${c.y - inU.y * rr}`;
+    d += ` Q ${c.x} ${c.y} ${c.x + outU.x * rr} ${c.y + outU.y * rr}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x} ${last.y}`;
+  return d;
 }
 
 export function TimelineView({
@@ -104,18 +117,19 @@ export function TimelineView({
     setCollapsedParam([...next].join(",") || null);
   };
 
-  // Lane x-geometry (variable widths because of collapse)
+  // Lane x-geometry: a routing gutter precedes every lane
   const { laneX, laneW, width } = useMemo(() => {
     const laneX: number[] = [];
     const laneW: number[] = [];
     let x = GUTTER_W;
     for (const lane of layout.lanes) {
+      x += LANE_GAP;
       laneX.push(x);
       const w = collapsed.has(lane.id) ? COLLAPSED_W : LANE_W;
       laneW.push(w);
       x += w;
     }
-    return { laneX, laneW, width: x };
+    return { laneX, laneW, width: x + LANE_GAP };
   }, [layout.lanes, collapsed]);
 
   const bodyHeight = layout.totalHeight;
@@ -138,7 +152,7 @@ export function TimelineView({
     if (el && pinned) el.scrollTop = el.scrollHeight;
   }, [bodyHeight, pinned]);
 
-  // --- anchor geometry -----------------------------------------------------
+  // --- geometry helpers ------------------------------------------------------
 
   const cellSquareX = (cell: TimelineCell): number => {
     if (collapsed.has(layout.lanes[cell.lane].id)) {
@@ -167,63 +181,81 @@ export function TimelineView({
     return m;
   }, [layout.blocks]);
 
-  // Edges anchor at the actual squares / block borders (not lane edges —
-  // lane-edge anchors degenerate for adjacent lanes).
+  // --- orthogonal edge routing ----------------------------------------------
+
   const edgePaths = useMemo(() => {
-    const centerOf = (id: string): { x: number; y: number } | null => {
-      const cell = cellById.get(id);
-      if (cell) return { x: cellSquareX(cell), y: rowCenterY(layout, cell.row) };
-      const block = blockById.get(id);
-      if (block) {
-        const r = blockRect(block);
-        return { x: (r.left + r.right) / 2, y: rowCenterY(layout, block.startRow) };
-      }
-      return null;
-    };
-    const anchorOf = (
-      id: string,
-      towardX: number,
-      arrival: boolean
-    ): { x: number; y: number; side: boolean; top: boolean } | null => {
-      const cell = cellById.get(id);
-      if (cell) {
-        const cx = cellSquareX(cell);
-        const cy = rowCenterY(layout, cell.row);
-        if (arrival) {
-          // from the left: land on the square's side (nothing is left of
-          // it); from the right: land on its top, or the line would strike
-          // through the row's own preview text
-          if (towardX <= cx) {
-            return { x: cx - CELL / 2 - 4, y: cy, side: true, top: false };
-          }
-          return { x: cx, y: cy - CELL / 2 - 2, side: false, top: true };
-        }
-        // depart out of the square's bottom, never through the row's text
-        return { x: cx, y: cy + CELL / 2 + 1, side: false, top: false };
-      }
-      const block = blockById.get(id);
-      if (block) {
-        const r = blockRect(block);
-        const cx = (r.left + r.right) / 2;
-        const x = towardX >= cx ? r.right + (arrival ? 3 : 1) : r.left - (arrival ? 3 : 1);
-        return { x, y: rowCenterY(layout, block.startRow), side: true, top: false };
-      }
-      return null;
-    };
+    const laneOf = (id: string): number | null =>
+      cellById.get(id)?.lane ?? blockById.get(id)?.lane ?? null;
+
+    const rowBottom = (row: number) => layout.rowY[row] + layout.rowH[row];
 
     const paths: { edge: (typeof layout.edges)[number]; d: string }[] = [];
     for (const edge of layout.edges) {
-      const fromC = centerOf(edge.fromId);
-      const toC = centerOf(edge.toId);
-      if (!fromC || !toC) continue;
-      const from = anchorOf(edge.fromId, toC.x, false);
-      const to = anchorOf(edge.toId, fromC.x, true);
-      if (!from || !to) continue;
-      paths.push({ edge, d: edgePath(from.x, from.y, to.x, to.y, from.side, to.top) });
+      const srcLane = laneOf(edge.fromId);
+      const tgtLane = laneOf(edge.toId);
+      if (srcLane === null || tgtLane === null) continue;
+
+      // gutter beside the source lane, on the side facing the target
+      const goRight = tgtLane > srcLane;
+      const gx = goRight
+        ? laneX[srcLane] + laneW[srcLane] + LANE_GAP / 2
+        : laneX[srcLane] - LANE_GAP / 2;
+
+      const pts: { x: number; y: number }[] = [];
+
+      // -- departure --
+      const srcCell = cellById.get(edge.fromId);
+      if (srcCell) {
+        // out of the square's bottom, along the row boundary, into the gutter
+        const sx = cellSquareX(srcCell);
+        const sy = rowCenterY(layout, srcCell.row);
+        const sBound = rowBottom(srcCell.row);
+        pts.push({ x: sx, y: sy + CELL / 2 + 1 }, { x: sx, y: sBound }, { x: gx, y: sBound });
+      } else {
+        const block = blockById.get(edge.fromId)!;
+        const r = blockRect(block);
+        const by = rowCenterY(layout, block.startRow);
+        pts.push({ x: goRight ? r.right : r.left, y: by }, { x: gx, y: by });
+      }
+
+      // -- arrival --
+      const tgtCell = cellById.get(edge.toId);
+      if (tgtCell) {
+        const tx = cellSquareX(tgtCell);
+        const ty = rowCenterY(layout, tgtCell.row);
+        if (gx <= tx) {
+          // approach from the left, straight into the square's side
+          pts.push({ x: gx, y: ty }, { x: tx - CELL / 2 - 3, y: ty });
+        } else {
+          // approach from the right: run along the boundary above the
+          // target's row, then drop into the square's top — never across
+          // the row's own text
+          const tBound = layout.rowY[tgtCell.row];
+          pts.push({ x: gx, y: tBound }, { x: tx, y: tBound }, { x: tx, y: ty - CELL / 2 - 2 });
+        }
+      } else {
+        const block = blockById.get(edge.toId)!;
+        const r = blockRect(block);
+        const by = rowCenterY(layout, block.startRow);
+        const arriveX = gx <= (r.left + r.right) / 2 ? r.left - 2 : r.right + 2;
+        pts.push({ x: gx, y: by }, { x: arriveX, y: by });
+      }
+
+      paths.push({ edge, d: roundedPath(pts) });
     }
     return paths;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, cellById, blockById, laneX, laneW, collapsed]);
+
+  // Tiered visibility: triggers always on; the rest ghost until hovered.
+  const edgeStyle = (edge: (typeof layout.edges)[number]) => {
+    const hot = hovered !== null && (edge.fromId === hovered || edge.toId === hovered);
+    if (hot) return { opacity: 1, width: 2.2, halo: true };
+    if (hovered !== null)
+      return { opacity: edge.kind === "trigger" ? 0.12 : 0.05, width: 1.25, halo: false };
+    if (edge.kind === "trigger") return { opacity: 0.7, width: 1.5, halo: true };
+    return { opacity: 0.14, width: 1.25, halo: false };
+  };
 
   return (
     <div className="relative">
@@ -235,10 +267,9 @@ export function TimelineView({
         <div className="relative" style={{ width, minWidth: "100%" }}>
           {/* sticky lane headers */}
           <div
-            className="sticky top-0 z-20 flex border-b bg-background/95 backdrop-blur"
+            className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur"
             style={{ height: HEADER_H, width }}
           >
-            <div style={{ width: GUTTER_W }} className="shrink-0" />
             {layout.lanes.map((lane, i) => {
               const isCollapsed = collapsed.has(lane.id);
               return (
@@ -249,8 +280,8 @@ export function TimelineView({
                   title={
                     isCollapsed ? `expand ${lane.label}` : `collapse ${lane.label}`
                   }
-                  style={{ width: laneW[i] }}
-                  className="group flex shrink-0 items-center gap-1 overflow-hidden border-l px-2 text-left hover:bg-accent/50"
+                  style={{ left: laneX[i], width: laneW[i], height: HEADER_H }}
+                  className="group absolute top-0 flex items-center gap-1 overflow-hidden rounded-t border-x border-t border-border/50 px-2 text-left hover:bg-accent/50"
                 >
                   {isCollapsed ? (
                     <ChevronsLeftRight className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -276,13 +307,13 @@ export function TimelineView({
 
           {/* body */}
           <div className="relative" style={{ height: bodyHeight, width }}>
-            {/* lane guides; collapsed lanes get a faint fill */}
+            {/* lane columns */}
             {layout.lanes.map((lane, i) => (
               <div
                 key={lane.id}
                 className={cn(
-                  "absolute top-0 border-l border-border/50",
-                  collapsed.has(lane.id) && "bg-muted/20"
+                  "absolute top-0 border-x border-border/40",
+                  collapsed.has(lane.id) ? "bg-muted/20" : "bg-muted/[0.07]"
                 )}
                 style={{ left: laneX[i], width: laneW[i], height: bodyHeight }}
               />
@@ -335,8 +366,8 @@ export function TimelineView({
                     viewBox="0 0 8 8"
                     refX="7"
                     refY="4"
-                    markerWidth="6"
-                    markerHeight="6"
+                    markerWidth="5.5"
+                    markerHeight="5.5"
                     orient="auto-start-reverse"
                   >
                     <path d="M 0 0 L 8 4 L 0 8 z" fill={color} />
@@ -344,18 +375,25 @@ export function TimelineView({
                 ))}
               </defs>
               {edgePaths.map(({ edge, d }) => {
-                const hot =
-                  hovered !== null && (edge.fromId === hovered || edge.toId === hovered);
+                const s = edgeStyle(edge);
                 return (
-                  <path
-                    key={edge.id}
-                    d={d}
-                    fill="none"
-                    stroke={EDGE_STROKE[edge.kind]}
-                    strokeWidth={hot ? 2 : 1.25}
-                    opacity={hovered === null ? 0.45 : hot ? 0.95 : 0.12}
-                    markerEnd={`url(#arrow-${edge.kind})`}
-                  />
+                  <g key={edge.id} opacity={s.opacity}>
+                    {s.halo && (
+                      <path
+                        d={d}
+                        fill="none"
+                        stroke="var(--color-background)"
+                        strokeWidth={s.width + 2.5}
+                      />
+                    )}
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke={EDGE_STROKE[edge.kind]}
+                      strokeWidth={s.width}
+                      markerEnd={`url(#arrow-${edge.kind})`}
+                    />
+                  </g>
                 );
               })}
             </svg>
