@@ -254,7 +254,25 @@ correlation, any mobile-specific layout.
   in-run steps, 4m gap divider, light+dark, modals, hover). 13 pytest,
   typecheck clean, no console errors. NOTE: restart `shellm-web` after
   pulling backend changes — uvicorn (non-dev) serves stale code.
-- **Remaining**: live-session verification (start thinkers on a fresh
-  identity and watch it tick — doubles as PLAN.md 5b fixture capture);
-  optional stretch items per T4/T8 (newest-at-top toggle, ghost squares,
-  `?after=`).
+- **Round 2 (Nick's feedback)**: collapsible lanes (click a lane header to
+  shrink it to a 40px square-strip; URL-persisted via `?collapsed=`; lane
+  x-geometry moved from the model into the view since widths vary); edge
+  anchoring reworked — edges attach to the actual squares/block borders,
+  depart from a square's **bottom** and, when approaching from the right,
+  arrive at the target's **top**, so lines never strike through a row's
+  preview text and adjacent-lane edges no longer degenerate; run-block
+  padding/nesting polish.
+- **Live-run finding (botnick-neo, 2026-07-10 ~14:44)**: partial pass —
+  `launched_by`/`trigger_step` landed on run headers, but (a) **identities
+  snapshot `thinkers/` at creation** (`THINKERS_DIR=$IDENTITY_DIR/thinkers`),
+  so botnick-neo (created 13:14, pre-stamps) ran the old monologue/generic
+  thinkers → no `trigger_step` on monologue steps; (b) **docker tool mounts
+  pin the file inode** — editing `bin/traj` on the host replaced the inode,
+  so the pre-existing container kept the pre-stamp `traj append` → no
+  auto-`run_id` on in-container observations (their `+0000` ts betray the
+  container). Neither is a code bug; both are fixed by creating a fresh
+  identity (fresh thinker copies + fresh env mounts). The monologue stamp
+  path was verified correct in isolation (stubbed-llm harness).
+- **Remaining**: live verification on a **freshly created** identity
+  (Nick); capture it as the PLAN.md 5b fixture; optional stretch items per
+  T4/T8 (newest-at-top toggle, ghost squares, `?after=`).
