@@ -521,14 +521,13 @@ export function TimelineView({
               })}
             </svg>
 
-            {/* run blocks */}
+            {/* run blocks (background + border; the summary chip is painted
+                in a separate layer above the cells, see below) */}
             {layout.blocks.map((block) => {
               const r = blockRect(block);
               if (!r) return null; // hidden lane
               const running = block.open && live;
               const hot = hovered === block.run.run_id;
-              const iters = block.members.filter((m) => m.type === "shell-output").length;
-              const duration = durationOf(block.run.started_ts, block.run.ended_ts);
               return (
                 <button
                   key={block.run.run_id}
@@ -537,10 +536,7 @@ export function TimelineView({
                   onMouseEnter={() => setHovered(block.run.run_id)}
                   onMouseLeave={() => setHovered(null)}
                   className={cn(
-                    // no overflow-hidden: it would become the sticky summary's
-                    // scroll container and pin the summary 38px into the block
-                    "absolute z-10 flex flex-col rounded-md border text-left",
-                    r.collapsed ? "px-0.5 py-0.5" : "px-2.5 py-1.5",
+                    "absolute z-10 rounded-md border text-left",
                     "border-blue-300 bg-blue-50/70 hover:bg-blue-100/70",
                     "dark:border-blue-800 dark:bg-blue-950/40 dark:hover:bg-blue-900/40",
                     running && "animate-pulse",
@@ -553,30 +549,7 @@ export function TimelineView({
                     height: Math.max(r.bottom - r.top, 24),
                   }}
                   title={`[run] ${blockTitle(block)}`}
-                >
-                  {!r.collapsed && (
-                    /* sticky so long blocks keep their summary in view mid-scroll */
-                    <span
-                      className="sticky flex w-full flex-col rounded bg-blue-50/90 px-1 dark:bg-blue-950/90"
-                      style={{ top: HEADER_H + 4 }}
-                    >
-                      <span className="w-full truncate text-[11px] italic leading-4">
-                        {blockTitle(block)}
-                      </span>
-                      <span className="w-full truncate font-mono text-[9px] leading-4 text-muted-foreground">
-                        {block.open && !block.run.ended_ts
-                          ? live
-                            ? "running"
-                            : "incomplete"
-                          : duration ?? "done"}
-                        {iters > 0 && <> · {iters} iter</>}
-                        {block.run.model && (
-                          <> · {block.run.model.replace(/^claude-/, "")}</>
-                        )}
-                      </span>
-                    </span>
-                  )}
-                </button>
+                />
               );
             })}
 
@@ -643,6 +616,54 @@ export function TimelineView({
                     </span>
                   )}
                 </button>
+              );
+            })}
+
+            {/* run summary chips — a layer above the cells so the sticky
+                chip cleanly occludes nested steps while it floats, instead
+                of z-fighting their text */}
+            {layout.blocks.map((block) => {
+              const r = blockRect(block);
+              if (!r || r.collapsed) return null;
+              const iters = block.members.filter((m) => m.type === "shell-output").length;
+              const duration = durationOf(block.run.started_ts, block.run.ended_ts);
+              return (
+                <div
+                  key={`chip-${block.run.run_id}`}
+                  className="pointer-events-none absolute z-10 flex flex-col px-1.5 py-1"
+                  style={{
+                    left: r.left,
+                    width: r.right - r.left,
+                    top: r.top,
+                    height: Math.max(r.bottom - r.top, 24),
+                  }}
+                >
+                  {/* sticky so long blocks keep their summary in view mid-scroll */}
+                  <button
+                    type="button"
+                    onClick={() => setSelected({ kind: "run", block })}
+                    onMouseEnter={() => setHovered(block.run.run_id)}
+                    onMouseLeave={() => setHovered(null)}
+                    className="pointer-events-auto sticky flex w-full flex-col rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-left shadow-sm dark:border-blue-900 dark:bg-blue-950"
+                    style={{ top: HEADER_H + 4 }}
+                    title={`[run] ${blockTitle(block)}`}
+                  >
+                    <span className="w-full truncate text-[11px] italic leading-4">
+                      {blockTitle(block)}
+                    </span>
+                    <span className="w-full truncate font-mono text-[9px] leading-4 text-muted-foreground">
+                      {block.open && !block.run.ended_ts
+                        ? live
+                          ? "running"
+                          : "incomplete"
+                        : duration ?? "done"}
+                      {iters > 0 && <> · {iters} iter</>}
+                      {block.run.model && (
+                        <> · {block.run.model.replace(/^claude-/, "")}</>
+                      )}
+                    </span>
+                  </button>
+                </div>
               );
             })}
           </div>
