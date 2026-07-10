@@ -199,6 +199,10 @@ _build_shellm_flags() {
 
     printf '%s\n' "--env" "${SHELLM_THINKER_ENV:-$IDENTITY_NAME}"
     printf '%s\n' "--workdir" "$run_dir"
+    # IDENTITY_NAME must reach the generated code's env: `chat reply` dies
+    # without it (observed: actor unable to reply, model flailing into
+    # `chat send` variants). Non-directory --var values are plain env vars.
+    printf '%s\n' "--var" "IDENTITY_NAME=$IDENTITY_NAME"
     printf '%s\n' "--var" "MEM_DIR=$abs_mem_dir"
     printf '%s\n' "--var" "SKILLS_DIR=$abs_skills_dir"
     printf '%s\n' "--var" "SKILLS_KERNEL_DIR=$abs_kernel_dir"

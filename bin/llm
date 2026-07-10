@@ -54,7 +54,7 @@ Options:
   -t, --max-tokens N       Max output tokens. Default: model-specific cap
   -M, --messages JSON      Messages array JSON, e.g. [{"role":"user","content":"hi"}]
   --no-stream              Disable streaming (streaming is on by default)
-  --provider NAME          Provider: anthropic, openai, or gemini
+  --provider NAME          Provider: anthropic, openai, gemini, or openrouter
   --thinking [LEVEL]       Enable thinking (Anthropic: adaptive; Gemini: minimal/low/medium/high)
   --effort LEVEL           Thinking effort/provider output effort
   --raw                    Print raw non-streaming API response JSON
@@ -65,6 +65,7 @@ Models:
               claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus
   OpenAI:     gpt-5.5, gpt-5, gpt-4o, o1, o3, o4
   Gemini:     gemini-3.5-flash, gemini-2.0-flash, gemini-*
+  OpenRouter: z-ai/glm-5.2, meta-llama/*, ... (any vendor/model name)
 
 Thinking & effort:
   These flags control how much reasoning the model does before answering.
@@ -98,6 +99,7 @@ Environment:
   ANTHROPIC_API_KEY        Required for Anthropic models
   OPENAI_API_KEY           Required for OpenAI models
   GEMINI_API_KEY           Required for Gemini models
+  OPENROUTER_API_KEY       Required for OpenRouter models
   LLM_API_URL              Override provider API URL
 
 Examples:
@@ -105,6 +107,7 @@ Examples:
   echo "summarize this" | llm -m gpt-5
   llm --thinking -m claude-opus-4-7 "solve this carefully"
   llm --raw -m gemini-2.0-flash "return a JSON greeting"
+  llm -m z-ai/glm-5.2 "explain quicksort"
 EOF
     exit "${1:-0}"
 }
@@ -161,6 +164,9 @@ detect_provider() {
         claude-*)                        echo "anthropic" ;;
         gpt-*|o1*|o3*|o4*|chatgpt-*) echo "openai" ;;
         gemini-*)                        echo "gemini" ;;
+        # Vendor-prefixed names (z-ai/glm-5.2, meta-llama/..., etc.) are
+        # OpenRouter's model-naming convention.
+        */*)                             echo "openrouter" ;;
         *)                               die "Cannot detect provider for model '$model'. Use --provider." ;;
     esac
 }
@@ -193,6 +199,8 @@ get_model_max_tokens() {
         # Google Gemini (caps from ListModels API; 1.5 family retired in 2026)
         gemini-2.0-flash*) echo 8192 ;;
         gemini-*)          echo 65536 ;;
+        # OpenRouter (vendor-prefixed) — caps vary per model; mid default
+        */*) echo 16384 ;;
         # Conservative fallback for unknown models
         *) echo 4096 ;;
     esac
@@ -297,6 +305,9 @@ build_payload_gemini() {
     jq -n "${jq_args[@]}" "$jq_filter"
 }
 
+# OpenRouter is OpenAI-compatible (chat/completions wire format)
+build_payload_openrouter() { build_payload_openai; }
+
 # ---------------------------------------------------------------------------
 # URL and headers per provider
 # ---------------------------------------------------------------------------
@@ -315,6 +326,12 @@ get_url_headers() {
             url="${LLM_API_URL:-https://api.openai.com/v1/chat/completions}"
             headers=(-H "Content-Type: application/json"
                      -H "Authorization: Bearer $OPENAI_API_KEY")
+            ;;
+        openrouter)
+            [[ -z "${OPENROUTER_API_KEY:-}" ]] && die "OPENROUTER_API_KEY is not set"
+            url="${LLM_API_URL:-https://openrouter.ai/api/v1/chat/completions}"
+            headers=(-H "Content-Type: application/json"
+                     -H "Authorization: Bearer $OPENROUTER_API_KEY")
             ;;
         gemini)
             [[ -z "${GEMINI_API_KEY:-}" ]] && die "GEMINI_API_KEY is not set"
@@ -345,6 +362,9 @@ extract_text_openai() {
 extract_text_gemini() {
     jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null
 }
+
+# OpenRouter is OpenAI-compatible
+extract_text_openrouter() { extract_text_openai; }
 
 # ---------------------------------------------------------------------------
 # Streaming handlers
@@ -440,6 +460,9 @@ stream_gemini() {
     fi
 }
 
+# OpenRouter is OpenAI-compatible (SSE chat/completions chunks)
+stream_openrouter() { stream_openai; }
+
 # ---------------------------------------------------------------------------
 # Main execution
 # ---------------------------------------------------------------------------
@@ -459,8 +482,8 @@ if [[ "$LLM_STREAM" -eq 1 ]]; then
     _curl_err=$(mktemp)
     "stream_${LLM_PROVIDER}" < <(curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>"$_curl_err")
     # If we get here, the stream handler didn't die — check for curl errors
+    # (no `local` here: this is top-level script code, not a function)
     if [[ -s "$_curl_err" ]]; then
-        local _ce
         _ce=$(cat "$_curl_err")
         rm -f "$_curl_err"
         die "curl error: $_ce"
