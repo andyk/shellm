@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellm-killall — panic button: kill every shellm-related process.
+#
+# Targets (by exact argv patterns, not a loose "shellm" grep, so editors,
+# greps, and shells that merely mention shellm paths are never touched):
+#   - shellm agent loops (bin/shellm, bin/shellm-explore, bin/sub, bin/chat)
+#   - llm API callers and their streaming curl children
+#   - thinkers dispatchers and thinker step scripts
+#   - traj tail followers and orphaned `tail -F .../trajectory.jsonl` feeders
+#   - per-run docker containers (name shellm-<pid>)
+#   - shellm-web viewer (only with --web; it burns no tokens)
+#
+# Matched processes are killed with their full descendant trees, so code
+# being executed by an agent dies with it. TERM first, KILL after a grace
+# period.
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: shellm-killall [-n|--dry-run] [--web]
+
+  -n, --dry-run   List what would be killed, kill nothing
+  --web           Also kill the shellm-web viewer
+  -h, --help      Show this help
+EOF
+    exit "${1:-0}"
+}
+
+DRY_RUN=0
+KILL_WEB=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run) DRY_RUN=1; shift ;;
+        --web)        KILL_WEB=1; shift ;;
+        -h|--help)    usage 0 ;;
+        *)            printf 'Unknown option: %s\n' "$1" >&2; usage 1 ;;
+    esac
+done
+
+# Argv patterns (ERE, matched by pgrep -f against the full command line).
+# Script processes appear as "<...>/bash <path>/<script> args" via shebang,
+# so anchoring on "bash " + the script path is both precise and complete.
+PATTERNS=(
+    'bash [^ ]*/bin/(shellm|shellm-explore|llm|chat|sub)( |$)'
+    'bash [^ ]*/bin/thinkers( |$)'
+    'bash [^ ]*/thinkers/[^ /]+/step( |$)'
+    'bash [^ ]*/bin/traj tail'
+    'tail -n 0 -F [^ ]*trajectory\.jsonl'
+)
+if [[ "$KILL_WEB" -eq 1 ]]; then
+    PATTERNS+=('(^|[/ ])shellm-web( |$)')
+fi
+
+# Never kill ourselves or our ancestors (running this from inside an agent
+# would otherwise cut the branch we're sitting on before we finish).
+protected=" $$ "
+_p=$$
+while :; do
+    _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ') || break
+    [[ -n "$_p" && "$_p" != "0" && "$_p" != "1" ]] || break
+    protected="${protected}${_p} "
+done
+
+in_list() {  # in_list <pid> <list-string>
+    [[ "$2" == *" $1 "* ]]
+}
+
+# Collect directly-matched PIDs
+matched=" "
+for pat in "${PATTERNS[@]}"; do
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        if in_list "$pid" "$protected"; then
+            printf 'warning: skipping PID %s (ancestor of this script — are you running inside shellm?)\n' "$pid" >&2
+            continue
+        fi
+        in_list "$pid" "$matched" || matched="${matched}${pid} "
+    done < <(pgrep -f "$pat" 2>/dev/null || true)
+done
+
+# Expand to full descendant trees so executed code, curl streams, and
+# subshells die with their agents. Snapshot the table once; iterate to a
+# fixed point (grandchildren etc.).
+PS_TABLE=$(ps ax -o pid=,ppid= 2>/dev/null) || PS_TABLE=""
+changed=1
+while [[ "$changed" -eq 1 ]]; do
+    changed=0
+    while read -r pid ppid; do
+        [[ -n "$pid" && -n "$ppid" ]] || continue
+        if in_list "$ppid" "$matched" && ! in_list "$pid" "$matched" \
+            && ! in_list "$pid" "$protected"; then
+            matched="${matched}${pid} "
+            changed=1
+        fi
+    done <<< "$PS_TABLE"
+done
+
+# shellcheck disable=SC2206
+pids=($matched)
+
+# Report
+if [[ "${#pids[@]}" -eq 0 ]]; then
+    echo "No shellm processes found."
+else
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'Would kill %d process(es):\n' "${#pids[@]}"
+    else
+        printf 'Killing %d process(es):\n' "${#pids[@]}"
+    fi
+    for pid in "${pids[@]}"; do
+        # Process may already be gone; show what we can
+        ps -o pid=,command= -p "$pid" 2>/dev/null || true
+    done | sed 's/^/  /'
+fi
+
+if [[ "$DRY_RUN" -eq 0 && "${#pids[@]}" -gt 0 ]]; then
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    # Grace period, then KILL survivors
+    survivors=()
+    for _ in 1 2 3 4 5 6; do
+        survivors=()
+        for pid in "${pids[@]}"; do
+            kill -0 "$pid" 2>/dev/null && survivors+=("$pid")
+        done
+        [[ "${#survivors[@]}" -eq 0 ]] && break
+        sleep 0.5
+    done
+    if [[ "${#survivors[@]}" -gt 0 ]]; then
+        printf 'Force-killing %d survivor(s)\n' "${#survivors[@]}"
+        kill -KILL "${survivors[@]}" 2>/dev/null || true
+    fi
+fi
+
+# Per-run docker containers (shellm-<pid>). These are execution sandboxes
+# tied to (now-dead) host agent pids; safe to remove. Broker containers
+# (label shellm.broker=1) are shared/persistent — report, don't touch.
+if command -v docker >/dev/null 2>&1; then
+    containers=$(docker ps -q --filter 'name=^shellm-' 2>/dev/null) || containers=""
+    if [[ -n "$containers" ]]; then
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo "Would remove docker container(s):"
+            docker ps --filter 'name=^shellm-' --format '  {{.Names}} ({{.Status}})' 2>/dev/null || true
+        else
+            echo "Removing docker container(s):"
+            docker ps --filter 'name=^shellm-' --format '  {{.Names}} ({{.Status}})' 2>/dev/null || true
+            # shellcheck disable=SC2086
+            docker rm -f $containers >/dev/null 2>&1 || true
+        fi
+    fi
+    brokers=$(docker ps -q --filter 'label=shellm.broker=1' 2>/dev/null) || brokers=""
+    if [[ -n "$brokers" ]]; then
+        echo "Note: broker container(s) left running (persistent; stop via shellm-docker-broker):"
+        docker ps --filter 'label=shellm.broker=1' --format '  {{.Names}} ({{.Status}})' 2>/dev/null || true
+    fi
+fi
+
+[[ "$DRY_RUN" -eq 1 ]] && echo "(dry run — nothing was killed)"
+exit 0
