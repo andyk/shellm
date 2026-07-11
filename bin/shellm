@@ -799,6 +799,16 @@ docker_setup() {
             [[ -e "$_target" ]] || continue
             local _tdir
             _tdir=$(dirname "$_target")
+            # Never mount host system directories: they would shadow the
+            # container's own /usr, /bin, etc. and break it (observed: a
+            # venv symlink to /usr/bin/python3 caused macOS /usr/bin to be
+            # mounted over Ubuntu's, killing every exec in the container).
+            case "$_tdir" in
+                /|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/libexec|/libexec/*|\
+                /etc|/etc/*|/var|/var/*|/opt|/opt/*|/tmp|/tmp/*|/private|/private/*|\
+                /System|/System/*|/Library|/Library/*|/Applications|/Applications/*|/dev|/dev/*)
+                    continue ;;
+            esac
             # Skip if already under a mounted dir
             local _covered=0
             for _sd in "${seen_dirs[@]}"; do
