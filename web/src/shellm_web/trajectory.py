@@ -57,7 +57,9 @@ def step_preview(raw: dict[str, Any]) -> str:
     if step_type == "run-summary":
         return _collapse(_first_str(raw, "tldr"), 160)
     if step_type == "final":
-        return _collapse(_first_str(raw, "content", "thought"), 160)
+        content = _collapse(_first_str(raw, "content", "thought"), 100)
+        cmd = _collapse(_first_str(raw, "cmd"), 120)
+        return f"{content} | {cmd}" if content and cmd else content or cmd
     if step_type == "fork":
         return f"-> {_first_str(raw, 'child_ref', 'child')}"
     if step_type == "merge":

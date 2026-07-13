@@ -212,6 +212,25 @@ export function StepContent({
         </div>
       );
     }
+    case "final": {
+      const thought = str(raw.thought);
+      const cmd = str(raw.cmd);
+      const content = str(raw.content);
+      return (
+        <div className="space-y-1.5">
+          {thought && <ExpandableText text={thought} expandAll={expandAll} />}
+          {cmd && <CodeBlock code={cmd} lang="bash" wrap />}
+          {content && (
+            <div className="rounded border bg-muted/30 px-2 py-1.5">
+              <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                result
+              </div>
+              <ExpandableText text={content} expandAll={expandAll} />
+            </div>
+          )}
+        </div>
+      );
+    }
     case "message": {
       const from = str(raw.from);
       const to = str(raw.to);

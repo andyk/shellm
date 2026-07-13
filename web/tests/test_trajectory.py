@@ -1,4 +1,4 @@
-"""Run-grouping regression tests against real trajectories in this repo."""
+"""Run-grouping tests: committed gen-001 logs plus synthetic fixtures."""
 
 from pathlib import Path
 
@@ -9,7 +9,6 @@ from shellm_web.trajectory import load_trajectory, step_preview
 
 REPO = Path(__file__).parents[2]
 GEN1 = REPO / "improve" / "generations" / "gen-001" / "identities"
-BOTNICK = REPO / ".identities" / "botnick"
 
 
 def _root_traj_dir(identity_dir: Path) -> Path:
@@ -22,7 +21,6 @@ def _root_traj_dir(identity_dir: Path) -> Path:
 
 
 needs_gen1 = pytest.mark.skipif(not GEN1.is_dir(), reason="gen-001 data not present")
-needs_botnick = pytest.mark.skipif(not BOTNICK.is_dir(), reason="botnick data not present")
 
 
 @needs_gen1
@@ -115,21 +113,21 @@ def test_run_id_grouping_exact_with_interleaved_runs():
     assert steps["px"]["run_id"] is None
 
 
-@needs_botnick
-def test_botnick_fork_era():
-    result = load_trajectory(_root_traj_dir(BOTNICK))
-    assert result["step_count"] == 953
+def test_fork_era_mind_log(synth_identity):
+    traj_dir = _root_traj_dir(synth_identity)
+    result = load_trajectory(traj_dir)
+    assert result["step_count"] == 7
     # fork era: no inline machinery in the mind log
     assert result["runs"] == []
     forks = [s for s in result["steps"] if s["type"] == "fork"]
-    assert len(forks) == 173
-    assert all(s["fork"]["resolved"] for s in forks)
+    assert len(forks) == 3
+    # third fork's child dir is missing on disk: unresolved, never crashed on
+    assert [s["fork"]["resolved"] for s in forks] == [True, True, False]
+    assert [s["fork"]["slug"] for s in forks[:2]] == ["bbbbbbbb-research", "cccccccc-notes"]
     writebacks = [s for s in result["steps"] if "writeback" in s]
-    assert len(writebacks) == 142
+    assert len(writebacks) == 2
     # a fork's child trajectory really is a child of this root
-    fork = forks[0]
-    traj_dir = _root_traj_dir(BOTNICK)
-    child = load_trajectory(traj_dir / fork["fork"]["slug"])
+    child = load_trajectory(traj_dir / forks[0]["fork"]["slug"])
     first = child["steps"][0]["raw"]
     assert first["parent_traj"] == result["traj_id"]
 

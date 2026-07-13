@@ -7,42 +7,36 @@ from fastapi import HTTPException
 
 from shellm_web import discovery, safety, tree
 
-REPO = Path(__file__).parents[2]
-BOTNICK = REPO / ".identities" / "botnick"
 
-needs_botnick = pytest.mark.skipif(not BOTNICK.is_dir(), reason="botnick data not present")
-
-
-def _botnick_root() -> Path:
-    identities = discovery.scan_identities(BOTNICK.parent)
-    identity = next(i for i in identities if i.path == BOTNICK)
+def _root_dir(identity_dir: Path) -> Path:
+    identities = discovery.scan_identities(identity_dir.parent)
+    identity = next(i for i in identities if i.path == identity_dir)
     traj_dir = discovery.find_root_traj_dir(identity)
     assert traj_dir is not None
     return traj_dir
 
 
-@needs_botnick
-def test_tree_shallow():
-    root = _botnick_root()
+def test_tree_shallow(synth_identity):
+    root = _root_dir(synth_identity)
     node = tree.build_tree(root, depth=1)
-    assert node["child_count"] == 173
-    assert len(node["children"]) >= 170  # a couple may be unresolvable
+    assert node["child_count"] == 3
+    # the dangling fork has no child dir on disk -> only 2 resolvable
+    assert [c["slug"] for c in node["children"]] == ["bbbbbbbb-research", "cccccccc-notes"]
     child = node["children"][0]
-    assert child["step_count"] > 0
+    assert child["step_count"] == 4
+    assert child["has_final"] is True
     # depth=1: grandchildren omitted even when child_count > 0
     assert all("children" not in c for c in node["children"])
 
 
-@needs_botnick
-def test_tree_depth_zero_omits_children():
-    node = tree.build_tree(_botnick_root(), depth=0)
+def test_tree_depth_zero_omits_children(synth_identity):
+    node = tree.build_tree(_root_dir(synth_identity), depth=0)
     assert "children" not in node
-    assert node["child_count"] == 173
+    assert node["child_count"] == 3
 
 
-@needs_botnick
-def test_find_traj_dir_and_breadcrumb():
-    root = _botnick_root()
+def test_find_traj_dir_and_breadcrumb(synth_identity):
+    root = _root_dir(synth_identity)
     node = tree.build_tree(root, depth=1)
     child = node["children"][0]
     child_dir = tree.find_traj_dir(root, child["traj_id"])
