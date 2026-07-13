@@ -60,13 +60,27 @@ response=$(printf '%s' "$full_message" | \
     llm -m "$THINK_MODEL" \
     -s "Output only a single thought or action. No explanation, no commands, no preamble.") || true
 
-# The inner monologue is an infinite loop via trigger_self: it must ALWAYS
-# append something to the traj so the dispatcher re-fires.  Empty/duplicate
-# responses are degraded but still emit a thought to keep the loop alive.
+# The inner monologue is an infinite loop via trigger_self: appending keeps
+# the dispatcher re-firing. Empty responses emit a placeholder to keep the
+# loop alive, with exponential backoff so a dead/struggling LLM doesn't spin
+# the loop at full speed; after enough consecutive empties the monologue goes
+# dormant (no append -> no self-trigger) until the next external step wakes
+# it. A non-empty response resets the counter.
+empty_count_file="$IDENTITY_DIR/run/inner_monologue.empty_count"
 if [[ -z "$response" ]]; then
-    printf 'inner_monologue/step: empty response from llm — emitting placeholder\n' >&2
+    empty_count=$(cat "$empty_count_file" 2>/dev/null) || empty_count=0
+    empty_count=$((empty_count + 1))
+    mkdir -p "$(dirname "$empty_count_file")"
+    printf '%s' "$empty_count" > "$empty_count_file"
+    if [[ "$empty_count" -ge 10 ]]; then
+        printf 'inner_monologue/step: %s consecutive empty responses — going dormant until the next external trigger\n' "$empty_count" >&2
+        exit 0
+    fi
+    printf 'inner_monologue/step: empty response from llm — emitting placeholder (%s consecutive)\n' "$empty_count" >&2
     response="(inner monologue received an empty response from the LLM; continuing)"
-    sleep 1   # brief backoff so transient API failures don't tight-loop
+    sleep $(( empty_count < 6 ? (1 << empty_count) : 60 ))
+else
+    rm -f "$empty_count_file"
 fi
 
 # Defensive unwrap: the model occasionally mimics the JSON step envelopes it
@@ -102,16 +116,10 @@ case "$response" in
         ;;
 esac
 
-# Write to traj — always append (even duplicates) to keep trigger_self alive
-last_content=""
-if traj exists 2>/dev/null; then
-    last_content=$(traj last --field content 2>/dev/null) || true
-fi
-
-if [[ "$response" == "$last_content" ]]; then
-    step_content="$step_content (repeat)"
-fi
-
+# Write to traj — always append (even duplicates) to keep trigger_self alive.
+# Duplicates are appended verbatim: _recent_stream collapses repeated steps
+# into one line with a repeats count when building thinker context, and a
+# mutated suffix would defeat that equality check.
 jq -nc \
     --arg type "$step_type" \
     --arg content "$step_content" \

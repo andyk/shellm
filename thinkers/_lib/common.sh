@@ -119,6 +119,13 @@ _recent_stream() {
     local n="${1:-${THINK_CONTEXT_TAIL:-20}}"
     # Tolerant parse (fromjson?): skip corrupt lines rather than dying —
     # concurrent appends have historically produced occasional bad lines.
+    # A step that repeats the previous step of its own type+source lane
+    # collapses into the earlier line, which gains a "repeats" count. Showing
+    # a model N copies of the same line invites it to continue the pattern
+    # (small models loop hard on this), and the copies crowd real history out
+    # of the tail window. Per-lane comparison so duplicates still collapse
+    # when other writers' steps interleave (e.g. a looping monologue action
+    # with the actor's reasoning steps between occurrences).
     traj cat "${ROOT_TRAJ_ID:-$TRAJ_ID}" --raw 2>/dev/null \
         | jq -cR 'fromjson? // empty
             | select(.type == "thought" or .type == "action" or .type == "observation"
@@ -126,6 +133,19 @@ _recent_stream() {
                      or .type == "final" or .type == "reasoning")
             | .content = ((.content // "") | tostring
                 | if length > 1500 then .[0:1500] + "…[truncated]" else . end)' \
+        2>/dev/null \
+        | jq -cs 'reduce .[] as $s ({last: {}, out: []};
+            ([$s.type, $s.source] | tostring) as $k
+            | (($s.content // "") | tostring) as $c
+            | (.last[$k] // -1) as $i
+            | if $i >= 0 and .out[$i].c == $c
+              then .out[$i].n += 1
+              else (.out | length) as $j
+                   | .out += [{step: $s, n: 1, c: $c}]
+                   | .last[$k] = $j
+              end)
+          | .out[]
+          | if .n > 1 then .step + {repeats: .n} else .step end' \
         2>/dev/null \
         | tail -n "$n"
 }

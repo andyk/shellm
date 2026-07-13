@@ -101,6 +101,11 @@ Environment:
   GEMINI_API_KEY           Required for Gemini models
   OPENROUTER_API_KEY       Required for OpenRouter models
   LLM_API_URL              Override provider API URL
+  LLM_TEMPERATURE          Sampling temperature (OpenAI-compatible providers only)
+  LLM_TOP_P                Nucleus sampling top_p (OpenAI-compatible providers only)
+  LLM_EXTRA_BODY           JSON object merged into the request payload
+                           (OpenAI-compatible providers only), e.g.
+                           '{"repetition_penalty":1.15}'
 
 Examples:
   llm -m claude-sonnet-4-5-20250929 "explain quicksort"
@@ -277,6 +282,26 @@ build_payload_openai() {
     if [[ -n "$LLM_THINKING_LEVEL" ]]; then
         jq_args+=(--arg effort "$LLM_THINKING_LEVEL")
         jq_filter="${jq_filter%\}} , reasoning:{effort:\$effort, summary:\"auto\"}}"
+    fi
+
+    # Optional sampling knobs. llm sends none by default, so the server's
+    # defaults rule; small local models often need explicit temperature and
+    # repetition penalties to avoid verbatim looping.
+    if [[ -n "${LLM_TEMPERATURE:-}" ]]; then
+        [[ "$LLM_TEMPERATURE" =~ ^[0-9]*\.?[0-9]+$ ]] || die "LLM_TEMPERATURE must be a number: $LLM_TEMPERATURE"
+        jq_args+=(--argjson temperature "$LLM_TEMPERATURE")
+        jq_filter="${jq_filter} + {temperature:\$temperature}"
+    fi
+    if [[ -n "${LLM_TOP_P:-}" ]]; then
+        [[ "$LLM_TOP_P" =~ ^[0-9]*\.?[0-9]+$ ]] || die "LLM_TOP_P must be a number: $LLM_TOP_P"
+        jq_args+=(--argjson top_p "$LLM_TOP_P")
+        jq_filter="${jq_filter} + {top_p:\$top_p}"
+    fi
+    if [[ -n "${LLM_EXTRA_BODY:-}" ]]; then
+        printf '%s' "$LLM_EXTRA_BODY" | jq -e 'type == "object"' >/dev/null 2>&1 \
+            || die "LLM_EXTRA_BODY must be a JSON object: $LLM_EXTRA_BODY"
+        jq_args+=(--argjson extra_body "$LLM_EXTRA_BODY")
+        jq_filter="${jq_filter} + \$extra_body"
     fi
 
     jq -n "${jq_args[@]}" "$jq_filter"
