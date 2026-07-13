@@ -2244,44 +2244,6 @@ exit \$__shellm_rc
             --arg cmd "$code" \
             --arg run_id "$_run_step_id" \
             '{type:"reasoning", thought:$thought, cmd:$cmd, run_id:$run_id}')
-
-        # Check for final answer before recording output
-        if [[ -f "$final_path" ]]; then
-            [[ "$QUIET" -eq 0 ]] && echo >&2
-            progress "Final answer received"
-            local final_answer
-            final_answer=$(cat "$final_path")
-            rm -f "$final_path"
-            # Record as a final step instead of reasoning
-            printf '%s' "$(jq -n \
-                --arg thought "$reasoning" \
-                --arg cmd "$code" \
-                --arg content "$final_answer" \
-                --arg run_id "$_run_step_id" \
-                '{type:"final", thought:$thought, cmd:$cmd, content:$content, run_id:$run_id}')" \
-                | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
-            redact_sensitive "$final_answer"
-            [[ "$QUIET" -eq 0 ]] && echo >&2
-            progress_dim "Trajectory: $_run_traj_id"
-            # Write thought step to parent traj referencing this sub-traj
-            # Skip when using --traj (steps already went to the shared traj)
-            if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" && -z "$_use_traj" ]]; then
-                local _last_step_id _child_dir_name _from_traj_ref
-                _last_step_id=$(traj last --traj_dir "$_run_traj_dir" "$_run_traj_id" --field step_id 2>/dev/null) || true
-                _child_dir_name=$(basename "$run_name")
-                _from_traj_ref="$_child_dir_name"
-                jq -nc \
-                    --arg content "$final_answer" \
-                    --arg from_traj "$_run_traj_id" \
-                    --arg from_step "${_last_step_id:-}" \
-                    --arg from_traj_ref "$_from_traj_ref" \
-                    '{type:"merge", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
-                    | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
-            fi
-            return 0
-        fi
-
-        # Record reasoning step
         printf '%s' "$reasoning_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
 
         # Record shell-output step (user role in multi-turn)
@@ -2317,6 +2279,41 @@ exit \$__shellm_rc
             printf '%s' "$feedback_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
         else
             printf '%s' "$output_json" | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
+        fi
+
+        # Check for final answer. The terminating block's reasoning and
+        # shell-output are recorded above like any other iteration; final
+        # carries only the answer and is always the run's last loop step.
+        if [[ -f "$final_path" ]]; then
+            [[ "$QUIET" -eq 0 ]] && echo >&2
+            progress "Final answer received"
+            local final_answer
+            final_answer=$(cat "$final_path")
+            rm -f "$final_path"
+            printf '%s' "$(jq -n \
+                --arg content "$final_answer" \
+                --arg run_id "$_run_step_id" \
+                '{type:"final", content:$content, run_id:$run_id}')" \
+                | traj append --traj_dir "$_run_traj_dir" "$_run_traj_id" >/dev/null
+            redact_sensitive "$final_answer"
+            [[ "$QUIET" -eq 0 ]] && echo >&2
+            progress_dim "Trajectory: $_run_traj_id"
+            # Write thought step to parent traj referencing this sub-traj
+            # Skip when using --traj (steps already went to the shared traj)
+            if [[ -n "${_SHELLM_PARENT_TRAJ_ID:-}" && -z "$_use_traj" ]]; then
+                local _last_step_id _child_dir_name _from_traj_ref
+                _last_step_id=$(traj last --traj_dir "$_run_traj_dir" "$_run_traj_id" --field step_id 2>/dev/null) || true
+                _child_dir_name=$(basename "$run_name")
+                _from_traj_ref="$_child_dir_name"
+                jq -nc \
+                    --arg content "$final_answer" \
+                    --arg from_traj "$_run_traj_id" \
+                    --arg from_step "${_last_step_id:-}" \
+                    --arg from_traj_ref "$_from_traj_ref" \
+                    '{type:"merge", content:$content, from_traj:$from_traj, from_step:$from_step, from_traj_ref:$from_traj_ref}' \
+                    | traj append --traj_dir "$_run_traj_dir" "$_SHELLM_PARENT_TRAJ_ID" >/dev/null 2>/dev/null || true
+            fi
+            return 0
         fi
     done
 
