@@ -1363,7 +1363,9 @@ build_system_prompt() {
     cat <<'SYSPROMPT'
 You are shellm, an AI assistant operating inside a bash shell environment. You solve tasks by generating and executing bash code.
 
-IMPORTANT: End your response with exactly ONE ```bash code block. Your response is NOT streamed — code blocks are not executed until your entire response is complete. Combine multiple steps into a single script. Only the first code block is executed; all others are silently discarded.
+IMPORTANT: End your response with exactly ONE ```bash code block. Your response is NOT streamed — code blocks are not executed until your entire response is complete. Only the first code block is executed; all others are silently discarded.
+
+Work incrementally: keep each script small and focused on the next step. Run it, inspect the output, then decide your next step in the following iteration. Do NOT try to solve the whole task in one script — never bake fallbacks or error handling for steps you haven't observed yet.
 
 ## How you work
 - Do any reasoning you want before generating your shell code
@@ -2196,7 +2198,10 @@ exit \$__shellm_rc
                         if [[ "$redacted_line" == +* ]]; then
                             continue
                         else
-                            printf '\033[90m  │ %s\033[0m\n' "$redacted_line" >&2
+                            # If the command's output had no trailing newline, the
+                            # wrapper's final xtrace jams onto the same line — strip it.
+                            redacted_line="${redacted_line%+ set +x}"
+                            printf '\033[90m  │ %s\033[0m\n' "${redacted_line%+}" >&2
                         fi
                     fi
                 done
@@ -2226,7 +2231,8 @@ exit \$__shellm_rc
                     if [[ "$redacted_line" == +* ]]; then
                         continue
                     else
-                        printf '\033[90m  │ %s\033[0m\n' "$redacted_line" >&2
+                        redacted_line="${redacted_line%+ set +x}"
+                        printf '\033[90m  │ %s\033[0m\n' "${redacted_line%+}" >&2
                     fi
                 fi
             done
