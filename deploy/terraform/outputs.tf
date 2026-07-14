@@ -17,3 +17,8 @@ output "tunnel_id" {
   description = "Cloudflare tunnel ID"
   value       = cloudflare_zero_trust_tunnel_cloudflared.shellm.id
 }
+
+output "update_command" {
+  description = "Update the box to the latest pushed branch: eval \"$(terraform output -raw update_command)\""
+  value       = "aws ssm start-session --region ${var.aws_region} --target ${aws_instance.shellm.id} --document-name AWS-StartInteractiveCommand --parameters command='sudo bash /opt/shellm/app/deploy/update.sh'"
+}

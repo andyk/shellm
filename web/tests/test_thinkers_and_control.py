@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import stat
 from pathlib import Path
 
@@ -135,6 +136,10 @@ def stub_bin(tmp_path: Path, monkeypatch) -> Path:
 
 def _write_stub(stub: Path, name: str, exit_code: int = 0, stderr: str = "") -> None:
     script = stub / name
+    # shlex.quote, not json.dumps: double quotes leave `backticks` in the
+    # message live as command substitution — a stderr string mentioning
+    # `thinkers stop` would fork-bomb the stub.
+    stderr_line = f"echo {shlex.quote(stderr)} >&2\n" if stderr else ""
     script.write_text(
         "#!/usr/bin/env bash\n"
         "{\n"
@@ -148,7 +153,7 @@ def _write_stub(stub: Path, name: str, exit_code: int = 0, stderr: str = "") -> 
         '  echo "APIKEY=$ANTHROPIC_API_KEY"\n'
         '  echo "STDIN=$(cat)"\n'
         f"}} >> {stub}/calls.txt\n"
-        + (f"echo {json.dumps(stderr)} >&2\n" if stderr else "")
+        + stderr_line
         + f"exit {exit_code}\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)

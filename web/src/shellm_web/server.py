@@ -298,10 +298,16 @@ def create_app(
     def thinkers_start(identity_id: str, body: ThinkerActionBody) -> dict:
         _require_controls()
         identity = _identity_or_404(root, identity_id)
-        if not thinkers.list_thinker_dirs(identity.path):
+        enabled = thinkers.list_thinker_dirs(identity.path)
+        if not enabled:
             raise HTTPException(status_code=409, detail="Identity has no thinkers")
         _checked_thinker_names(identity, body.names)
-        return control.thinkers_start(root, identity, body.names, body.no_self_trigger)
+        # Expand "start all" to explicit names: the CLI's named-start path
+        # kicks each thinker once with a manual-trigger step, while its
+        # start-all path only arms the dispatcher — thinkers would then sit
+        # idle until some new trajectory step happens to arrive.
+        names = body.names or [d.name for d in enabled]
+        return control.thinkers_start(root, identity, names, body.no_self_trigger)
 
     @app.post("/api/identities/{identity_id}/thinkers/stop")
     def thinkers_stop(identity_id: str, body: ThinkerActionBody) -> dict:

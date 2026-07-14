@@ -192,7 +192,7 @@ arbitrary bash on this box; the cap is the real safety net.
 | Shell on the box | `$(terraform output -raw ssm_session_command)` |
 | Watch first-boot progress | in a session: `tail -f /var/log/shellm-bootstrap.log` |
 | App logs | `journalctl -u shellm-web -f` |
-| Update the app | `sudo -u shellm git -C /opt/shellm/app pull && sudo -u shellm rm -rf /opt/shellm/app/web/src/shellm_web/static && sudo systemctl restart shellm-web` |
+| Update the app (after pushing!) | `eval "$(terraform output -raw update_command)"` — streams deploy/update.sh (pull, rebuild, restart, health check) |
 | Add/remove viewers | edit `allowed_emails`, `terraform apply` |
 | Panic | Kill All in the UI → `shellm-killall` on the box → stop the instance |
 | Rebuild from scratch | `terraform destroy && terraform apply`, then re-install the API key (identities/trajectories are lost — copy them off first if they matter) |
