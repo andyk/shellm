@@ -1,13 +1,19 @@
-import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Skull } from "lucide-react";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router";
+import { toast } from "sonner";
 
+import { StartStopButtons, useControlsEnabled } from "~/components/thinker-controls";
 import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
 import {
   Empty,
   EmptyDescription,
   EmptyHeader,
   EmptyTitle,
 } from "~/components/ui/empty";
+import { Input } from "~/components/ui/input";
 import { LoadingDots } from "~/components/ui/loading-dots";
 import {
   Table,
@@ -17,7 +23,7 @@ import {
   TableHeader,
   TableRow,
 } from "~/components/ui/table";
-import { fetchIdentities } from "~/lib/api";
+import { createIdentity, fetchIdentities, killAll } from "~/lib/api";
 import type { Identity } from "~/lib/types";
 
 export function meta() {
@@ -49,7 +55,111 @@ function LiveBadge({ live }: { live: boolean }) {
   );
 }
 
+function DispatcherCell({ identity }: { identity: Identity }) {
+  if (identity.dispatcher?.running) {
+    return (
+      <span className="font-mono text-xs text-green-700 dark:text-green-400">
+        ● PID {identity.dispatcher.pid}
+      </span>
+    );
+  }
+  return <span className="text-xs text-muted-foreground">stopped</span>;
+}
+
+function NewIdentityForm() {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: createIdentity,
+    onSuccess: (created) => {
+      toast.success(`Created identity ${created.name}`);
+      queryClient.invalidateQueries({ queryKey: ["identities"] });
+      setOpen(false);
+      setName("");
+      navigate(`/i/${encodeURIComponent(created.id)}/thinkers`);
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  if (!open) {
+    return (
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+        <Plus className="size-3" />
+        New identity
+      </Button>
+    );
+  }
+  return (
+    <form
+      className="flex items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (name.trim()) mutation.mutate(name.trim());
+      }}
+    >
+      <Input
+        autoFocus
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="lowercase-name"
+        pattern="[a-z0-9][a-z0-9-]*"
+        title="lowercase alphanumeric + hyphens"
+        className="h-8 w-44 font-mono text-xs"
+      />
+      <Button type="submit" size="sm" disabled={mutation.isPending || !name.trim()}>
+        Create
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={() => setOpen(false)}
+      >
+        Cancel
+      </Button>
+    </form>
+  );
+}
+
+function KillAllButton() {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: killAll,
+    onSuccess: (result) => {
+      const summary = result.stdout.trim() || "No shellm processes found.";
+      if (result.dry_run) {
+        if (window.confirm(`${summary}\n\nProceed with kill?`)) {
+          mutation.mutate(false);
+          return;
+        }
+        toast.info("Kill-all cancelled");
+      } else {
+        toast.success("Kill-all complete", { description: summary });
+        queryClient.invalidateQueries();
+      }
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  return (
+    <Button
+      variant="destructive"
+      size="sm"
+      disabled={mutation.isPending}
+      title="Kill every shellm process on this machine (dispatchers, agents, thinker steps)"
+      onClick={() => mutation.mutate(true)}
+    >
+      <Skull className="size-3" />
+      Kill all
+    </Button>
+  );
+}
+
 export default function Home() {
+  const controlsEnabled = useControlsEnabled();
   const { data: identities, isLoading } = useQuery({
     queryKey: ["identities"],
     queryFn: fetchIdentities,
@@ -64,72 +174,109 @@ export default function Home() {
     );
   }
 
-  if (!identities || identities.length === 0) {
-    return (
-      <Empty>
-        <EmptyHeader>
-          <EmptyTitle>No identities found</EmptyTitle>
-          <EmptyDescription>
-            No directories with an info.txt containing root_trajectory= were
-            found under the serve root.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    );
-  }
-
   const groups = new Map<string, Identity[]>();
-  for (const identity of identities) {
+  for (const identity of identities ?? []) {
     const list = groups.get(identity.group) ?? [];
     list.push(identity);
     groups.set(identity.group, list);
   }
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-8 px-4">
-      {[...groups.entries()].map(([group, members]) => (
-        <section key={group}>
-          <h2 className="mb-2 font-mono text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            {group}
-          </h2>
-          <div className="rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Identity</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Last activity</TableHead>
-                  <TableHead className="text-right">Steps</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {members.map((identity) => (
-                  <TableRow key={identity.id} className="cursor-pointer">
-                    <TableCell>
-                      <Link
-                        to={`/i/${encodeURIComponent(identity.id)}`}
-                        className="flex items-center gap-2 font-mono font-medium hover:underline"
-                      >
-                        {identity.name}
-                        <LiveBadge live={identity.live} />
-                      </Link>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {identity.created ?? "—"}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {relativeTime(identity.last_activity_ts)}
-                    </TableCell>
-                    <TableCell className="text-right font-mono tabular-nums">
-                      {identity.step_count}
-                    </TableCell>
+    <div className="mx-auto w-full max-w-6xl space-y-8 px-4">
+      {controlsEnabled && (
+        <div className="flex items-center justify-between">
+          <NewIdentityForm />
+          <KillAllButton />
+        </div>
+      )}
+      {!identities || identities.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>No identities found</EmptyTitle>
+            <EmptyDescription>
+              No directories with an info.txt containing root_trajectory= were
+              found under the serve root.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        [...groups.entries()].map(([group, members]) => (
+          <section key={group}>
+            <h2 className="mb-2 font-mono text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {group}
+            </h2>
+            <div className="rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Identity</TableHead>
+                    <TableHead>Dispatcher</TableHead>
+                    <TableHead>Thinkers</TableHead>
+                    <TableHead className="text-right">In flight</TableHead>
+                    <TableHead>Last activity</TableHead>
+                    <TableHead className="text-right">Steps</TableHead>
+                    {controlsEnabled && (
+                      <TableHead className="text-right">Actions</TableHead>
+                    )}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </section>
-      ))}
+                </TableHeader>
+                <TableBody>
+                  {members.map((identity) => (
+                    <TableRow key={identity.id}>
+                      <TableCell>
+                        <Link
+                          to={`/i/${encodeURIComponent(identity.id)}`}
+                          className="flex items-center gap-2 font-mono font-medium hover:underline"
+                        >
+                          {identity.name}
+                          <LiveBadge live={identity.live} />
+                        </Link>
+                      </TableCell>
+                      <TableCell>
+                        <DispatcherCell identity={identity} />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {identity.thinkers_total > 0
+                          ? `${identity.thinkers_active}/${identity.thinkers_total} active`
+                          : "—"}
+                      </TableCell>
+                      <TableCell
+                        className={
+                          "text-right font-mono tabular-nums" +
+                          (identity.steps_in_flight > 0
+                            ? " font-semibold text-green-700 dark:text-green-400"
+                            : " text-muted-foreground")
+                        }
+                      >
+                        {identity.steps_in_flight}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {relativeTime(identity.last_activity_ts)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono tabular-nums">
+                        {identity.step_count}
+                      </TableCell>
+                      {controlsEnabled && (
+                        <TableCell className="text-right">
+                          {identity.thinkers_total > 0 && (
+                            <div className="flex justify-end">
+                              <StartStopButtons
+                                identityId={identity.id}
+                                names={[]}
+                                running={identity.dispatcher?.running ?? false}
+                              />
+                            </div>
+                          )}
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </section>
+        ))
+      )}
     </div>
   );
 }

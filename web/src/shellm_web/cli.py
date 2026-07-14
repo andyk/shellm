@@ -77,19 +77,19 @@ def _build_frontend() -> None:
     shutil.copytree(build_dir, STATIC_DIR)
 
 
-def _run_production(root: Path, host: str, port: int, rebuild: bool) -> None:
+def _run_production(root: Path, host: str, port: int, rebuild: bool, read_only: bool) -> None:
     import uvicorn
 
     from shellm_web.server import create_app
 
     if rebuild or not (STATIC_DIR / "index.html").is_file():
         _build_frontend()
-    app = create_app(root, STATIC_DIR)
+    app = create_app(root, STATIC_DIR, read_only=read_only)
     print(f"shellm-web serving {root} at http://{host}:{port}", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-def _run_dev(root: Path, host: str, port: int) -> None:
+def _run_dev(root: Path, host: str, port: int, read_only: bool) -> None:
     import uvicorn
 
     runtime = _js_runtime()
@@ -102,6 +102,8 @@ def _run_dev(root: Path, host: str, port: int) -> None:
     )
     try:
         os.environ["SHELLM_WEB_ROOT"] = str(root)
+        if read_only:
+            os.environ["SHELLM_WEB_READONLY"] = "1"
         uvicorn.run(
             "shellm_web:create_app_from_env",
             host=host,
@@ -126,17 +128,24 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help="Port (default: first free in 8080-8089)")
     parser.add_argument("--dev", action="store_true", help="Run vite dev server + uvicorn --reload")
     parser.add_argument("--rebuild", action="store_true", help="Force a frontend rebuild")
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Disable control endpoints (start/stop/chat/create). "
+        "Recommended when binding beyond 127.0.0.1 until auth exists.",
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     if not root.is_dir():
         raise SystemExit(f"Not a directory: {root}")
     port = args.port or _find_available_port(args.host, DEFAULT_PORT_RANGE)
+    read_only = args.read_only or os.environ.get("SHELLM_WEB_READONLY", "") not in ("", "0")
 
     if args.dev:
-        _run_dev(root, args.host, port)
+        _run_dev(root, args.host, port, read_only)
     else:
-        _run_production(root, args.host, port, args.rebuild)
+        _run_production(root, args.host, port, args.rebuild, read_only)
 
 
 if __name__ == "__main__":

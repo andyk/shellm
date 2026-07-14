@@ -1,9 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
+import { Zap } from "lucide-react";
 import { useState } from "react";
 import { useParams } from "react-router";
 
 import { IdentityTabs } from "~/components/identity-tabs";
+import {
+  StartStopButtons,
+  useControlsEnabled,
+  useThinkerMutation,
+} from "~/components/thinker-controls";
 import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
 import {
   Empty,
   EmptyDescription,
@@ -11,14 +18,24 @@ import {
   EmptyTitle,
 } from "~/components/ui/empty";
 import { LoadingDots } from "~/components/ui/loading-dots";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "~/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import {
   fetchDispatch,
   fetchIdentityStatus,
   fetchLog,
   fetchLogs,
+  fetchThinkers,
   pollWhileLive,
 } from "~/lib/api";
+import type { ThinkerInfo, ThinkerState } from "~/lib/types";
 import { cn } from "~/lib/utils";
 
 export function meta() {
@@ -27,6 +44,182 @@ export function meta() {
 
 function kb(bytes: number): string {
   return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
+}
+
+function relativeTime(iso: string | null): string {
+  if (!iso) return "—";
+  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+const STATE_STYLES: Record<ThinkerState, string> = {
+  stopped: "bg-muted text-muted-foreground",
+  idle: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
+  active: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300",
+  running:
+    "bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300",
+};
+
+function StateBadge({ thinker }: { thinker: ThinkerInfo }) {
+  let label: string = thinker.state;
+  if (thinker.state === "active") label = `active (${thinker.steps_in_flight})`;
+  if (thinker.state === "running" && thinker.pid != null)
+    label = `running (PID ${thinker.pid})`;
+  return <Badge className={STATE_STYLES[thinker.state]}>{label}</Badge>;
+}
+
+function ThinkerRow({
+  identityId,
+  thinker,
+  dispatcherRunning,
+}: {
+  identityId: string;
+  thinker: ThinkerInfo;
+  dispatcherRunning: boolean;
+}) {
+  const controlsEnabled = useControlsEnabled();
+  const mutation = useThinkerMutation(identityId);
+  const stopped = thinker.state === "stopped";
+  return (
+    <TableRow>
+      <TableCell className="font-mono font-medium">{thinker.name}</TableCell>
+      <TableCell>
+        <StateBadge thinker={thinker} />
+      </TableCell>
+      <TableCell>
+        <div className="flex flex-wrap gap-1">
+          {thinker.types.map((type) => (
+            <Badge key={type} variant="outline" className="text-[10px]">
+              {type}
+            </Badge>
+          ))}
+        </div>
+      </TableCell>
+      <TableCell>
+        {thinker.pending.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {thinker.pending.map((type) => (
+              <Badge
+                key={type}
+                className="bg-amber-100 text-[10px] text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+              >
+                {type}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </TableCell>
+      <TableCell className="font-mono text-[11px] text-muted-foreground">
+        {thinker.log_bytes != null
+          ? `${kb(thinker.log_bytes)} · ${relativeTime(thinker.log_mtime)}`
+          : "—"}
+      </TableCell>
+      <TableCell className="text-right">
+        {controlsEnabled && (
+          <div className="flex justify-end gap-1">
+            <StartStopButtons
+              identityId={identityId}
+              names={[thinker.name]}
+              running={!stopped && dispatcherRunning}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Fire this thinker's step once (manual trigger)"
+              disabled={mutation.isPending}
+              onClick={() =>
+                mutation.mutate({ action: "step", names: [thinker.name] })
+              }
+            >
+              <Zap className="size-3" />
+              step
+            </Button>
+          </div>
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function StatusPanel({ identityId }: { identityId: string }) {
+  const { data: status } = useQuery({
+    queryKey: ["thinkers", identityId],
+    queryFn: () => fetchThinkers(identityId),
+    refetchInterval: 2000,
+  });
+
+  if (!status) {
+    return (
+      <div className="flex justify-center py-10">
+        <LoadingDots />
+      </div>
+    );
+  }
+
+  const dispatcherRunning = status.dispatcher.running;
+  return (
+    <div className="mb-6 space-y-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card px-4 py-3">
+        <span className="text-sm font-medium">Dispatcher</span>
+        {dispatcherRunning ? (
+          <Badge className={STATE_STYLES.active}>
+            running (PID {status.dispatcher.pid})
+          </Badge>
+        ) : (
+          <Badge className={STATE_STYLES.stopped}>stopped</Badge>
+        )}
+        <span className="font-mono text-xs text-muted-foreground">
+          {status.active_thinkers}/{status.thinkers_total} thinkers active ·{" "}
+          {status.steps_in_flight} step(s) in flight
+          {status.pending_total > 0 && ` · ${status.pending_total} pending`}
+        </span>
+        <div className="ml-auto">
+          <StartStopButtons
+            identityId={identityId}
+            names={[]}
+            running={dispatcherRunning}
+            startDisabled={dispatcherRunning}
+            startDisabledReason="Dispatcher already running — start thinkers individually or stop first"
+          />
+        </div>
+      </div>
+      {status.thinkers.length === 0 ? (
+        <div className="py-4 text-center text-sm text-muted-foreground">
+          No thinkers installed for this identity.
+        </div>
+      ) : (
+        <div className="rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Thinker</TableHead>
+                <TableHead>State</TableHead>
+                <TableHead>Subscribes to</TableHead>
+                <TableHead>Pending</TableHead>
+                <TableHead>Log</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {status.thinkers.map((thinker) => (
+                <ThinkerRow
+                  key={thinker.name}
+                  identityId={identityId}
+                  thinker={thinker}
+                  dispatcherRunning={dispatcherRunning}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LogView({
@@ -173,6 +366,7 @@ export default function ThinkersPage() {
   return (
     <div className="mx-auto w-full max-w-6xl px-4">
       <IdentityTabs identityId={identityId} live={live} active="thinkers" />
+      <StatusPanel identityId={identityId} />
       {!logs || logs.length === 0 ? (
         <Empty>
           <EmptyHeader>

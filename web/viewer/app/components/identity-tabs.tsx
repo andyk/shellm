@@ -7,6 +7,7 @@ const TABS = [
   { key: "timeline", label: "Timeline", path: "" },
   { key: "mindlog", label: "Mind log", path: "/mindlog" },
   { key: "thinkers", label: "Thinkers", path: "/thinkers" },
+  { key: "chat", label: "Chat", path: "/chat" },
   { key: "memories", label: "Memories", path: "/memories" },
 ] as const;
 
