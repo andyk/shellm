@@ -1,0 +1,31 @@
+# shellm-web systemd unit. Installed by deploy/setup.sh, which substitutes
+# @SHELLM_HOME@ (default /opt/shellm; the repo lives at @SHELLM_HOME@/app).
+#
+# The web server binds 127.0.0.1 only — expose it exclusively through the
+# Cloudflare tunnel (see deploy/DEPLOY.md). Dispatchers started from the UI
+# run in their own sessions and survive restarts of this service.
+
+[Unit]
+Description=shellm web viewer + control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shellm
+WorkingDirectory=@SHELLM_HOME@/app
+Environment="PATH=@SHELLM_HOME@/.local/bin:@SHELLM_HOME@/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+# Lock CORS to your public hostname once the tunnel is up:
+#Environment="SHELLM_WEB_ALLOWED_ORIGINS=https://agents.example.com"
+# For a view-only deployment (no start/stop/chat/config mutations):
+#Environment="SHELLM_WEB_READONLY=1"
+ExecStart=@SHELLM_HOME@/app/bin/shellm-web @SHELLM_HOME@/app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=3
+
+# The agent needs broad shell access by design — do NOT run anything else on
+# this machine. Kill switches: `systemctl stop shellm-web` stops the control
+# plane; `@SHELLM_HOME@/app/bin/shellm-killall` stops all agent processes.
+
+[Install]
+WantedBy=multi-user.target

@@ -422,6 +422,22 @@ def test_env_endpoints(client: TestClient, control_identity: Path):
     )
 
 
+def test_cors_allowlist_from_env(control_identity: Path, monkeypatch):
+    monkeypatch.setenv("SHELLM_WEB_ALLOWED_ORIGINS", "https://agents.example.com")
+    pinned = TestClient(create_app(control_identity.parent.parent))
+    allowed = pinned.get("/api/health", headers={"Origin": "https://agents.example.com"})
+    assert allowed.headers.get("access-control-allow-origin") == "https://agents.example.com"
+    denied = pinned.get("/api/health", headers={"Origin": "https://evil.example.com"})
+    assert "access-control-allow-origin" not in denied.headers
+
+    # default "*": any origin is allowed (starlette echoes the origin when
+    # credentials are enabled rather than sending a literal *)
+    monkeypatch.delenv("SHELLM_WEB_ALLOWED_ORIGINS")
+    open_client = TestClient(create_app(control_identity.parent.parent))
+    resp = open_client.get("/api/health", headers={"Origin": "https://anywhere.example"})
+    assert resp.headers.get("access-control-allow-origin") == "https://anywhere.example"
+
+
 def test_read_only_blocks_mutations(control_identity: Path):
     ro_client = TestClient(create_app(control_identity.parent.parent, read_only=True))
     assert ro_client.get("/api/config").json()["controls_enabled"] is False

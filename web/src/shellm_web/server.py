@@ -1,6 +1,7 @@
 """FastAPI app factory for the shellm web viewer."""
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -77,9 +78,16 @@ def create_app(
 ) -> FastAPI:
     root = root.resolve()
     app = FastAPI(title="shellm web viewer", version=VERSION)
+    # Default "*" suits local use; deployments should pin this to their
+    # public origin(s) via SHELLM_WEB_ALLOWED_ORIGINS (comma-separated).
+    allowed_origins = [
+        origin.strip()
+        for origin in os.environ.get("SHELLM_WEB_ALLOWED_ORIGINS", "*").split(",")
+        if origin.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
