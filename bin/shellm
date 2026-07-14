@@ -1192,13 +1192,31 @@ call_llm() {
     # despite the pipeline.
     local llm_exit=0
     if [[ "$QUIET" -eq 0 ]]; then
-        { llm "${args[@]}" 2>"$stderr_file"; echo $? > "$text_file.rc"; } | tee "$text_file" >&2
+        # Thinking (llm's stderr) streams live as dim italic lines; the
+        # response streams with markdown code fences filtered out. Both
+        # filters are line-buffered, and awk newline-terminates the final
+        # line so following progress banners never jam onto the stream.
+        # Response display phases the RLM loop visually: prose narration is
+        # dim italic (like thinking), the bash block is bright cyan. Fence
+        # lines toggle the state and are dropped.
+        # Labeled loop phases: "thinking…" heads the thinking stream, which
+        # passes through tee byte-by-byte (dim italic, live — an awk here
+        # would buffer the newline-less thinking paragraph until EOF and
+        # print it after the code). "▶ bash" is emitted by the response
+        # filter when the code fence opens.
+        { llm "${args[@]}" \
+            2> >({ printf '\033[3;90m  thinking… '; tee "$stderr_file"; printf '\033[0m\n'; } >&2); \
+            echo $? > "$text_file.rc"; } \
+            | tee "$text_file" | awk '
+                /^[[:space:]]*```/ { incode = !incode; if (incode) print "\033[0m\n\033[1;34m▶ bash\033[0m"; next }
+                incode { printf "\033[36m%s\033[0m\n", $0; next }
+                { printf "\033[3;90m%s\033[0m\n", $0 }' >&2
         llm_exit=$(cat "$text_file.rc" 2>/dev/null) || llm_exit=0
         rm -f "$text_file.rc"
-        # Replay stderr (thinking output + errors) to terminal and thinking file
-        if [[ -s "$stderr_file" ]]; then
-            cat "$stderr_file" >&2
-            [[ -n "$thinking_output_file" ]] && cp "$stderr_file" "$thinking_output_file"
+        # Give the async stderr tee a beat to finish writing the file
+        sleep 0.3
+        if [[ -s "$stderr_file" && -n "$thinking_output_file" ]]; then
+            cp "$stderr_file" "$thinking_output_file"
         fi
     else
         llm "${args[@]}" > "$text_file" 2>"$stderr_file" || llm_exit=$?
@@ -1720,8 +1738,11 @@ run_loop() {
     # Preserve the root trajectory ID so chat history/reply work in forked trajs
     export ROOT_TRAJ_ID="${ROOT_TRAJ_ID:-$_run_traj_id}"
 
-    progress "Trajectory: $_run_traj_id (dir: $_run_traj_dir)"
-    progress "Workdir: $workdir"
+    # Show ~-relative paths: shorter and no personal absolute paths on screen.
+    # (~ via variable: bash 4.3+ tilde-expands a literal ~ in the replacement)
+    local _tilde='~'
+    progress "Trajectory: $_run_traj_id (dir: ${_run_traj_dir/#$HOME/$_tilde})"
+    progress "Workdir: ${workdir/#$HOME/$_tilde}"
 
     # Load context into variables for env var passing
     local context_info=""
@@ -2035,13 +2056,9 @@ run_loop() {
             return 0
         fi
 
-        # Show the code being executed
-        local code_lines
-        code_lines=$(echo "$code" | wc -l | tr -d ' ')
-        progress "Executing bash ($code_lines lines):"
-        echo "$code" | while IFS= read -r line; do
-            progress_dim "  $line"
-        done
+        # The code just streamed under its "▶ bash" header; a terse "run"
+        # marks the execution phase (output lines + exit status follow).
+        progress "run"
 
         # Determine final file path: use workdir (mounted in container) for Docker mode
         local final_path="$rundir/final"
@@ -2174,8 +2191,10 @@ exit \$__shellm_rc
                     local redacted_line
                     redacted_line=$(redact_sensitive "$line")
                     if [[ "$QUIET" -eq 0 ]]; then
+                        # xtrace command echoes are pure duplication (the code
+                        # just streamed in cyan) — show output lines only.
                         if [[ "$redacted_line" == +* ]]; then
-                            printf '\033[36m  $ %s\033[0m\n' "${redacted_line#+ }" >&2
+                            continue
                         else
                             printf '\033[90m  │ %s\033[0m\n' "$redacted_line" >&2
                         fi
@@ -2205,7 +2224,7 @@ exit \$__shellm_rc
                 redacted_line=$(redact_sensitive "$line")
                 if [[ "$QUIET" -eq 0 ]]; then
                     if [[ "$redacted_line" == +* ]]; then
-                        printf '\033[36m  $ %s\033[0m\n' "${redacted_line#+ }" >&2
+                        continue
                     else
                         printf '\033[90m  │ %s\033[0m\n' "$redacted_line" >&2
                     fi
