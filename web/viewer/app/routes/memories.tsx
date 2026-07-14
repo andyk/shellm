@@ -57,7 +57,7 @@ export default function MemoriesPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4">
+    <div className="mx-auto w-full max-w-7xl px-4">
       <IdentityTabs identityId={identityId} live={live} active="memories" />
       {!memories || memories.length === 0 ? (
         <Empty>

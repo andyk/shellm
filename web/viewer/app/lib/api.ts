@@ -3,7 +3,9 @@ import type {
   Config,
   ControlResult,
   DispatchEvent,
+  EnvEntry,
   Identity,
+  IdentityEnv,
   IdentityStatus,
   KillallResult,
   LogInfo,
@@ -25,11 +27,15 @@ async function getJson<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function sendJson<T>(
+  method: string,
+  path: string,
+  body: unknown
+): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
     // Control endpoints put the CLI's message in detail.message; plain
@@ -45,6 +51,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+function postJson<T>(path: string, body: unknown): Promise<T> {
+  return sendJson("POST", path, body ?? {});
 }
 
 export function fetchConfig(): Promise<Config> {
@@ -149,6 +159,17 @@ export function stepThinker(
   );
 }
 
+export function setThinkerEnabled(
+  identityId: string,
+  name: string,
+  enabled: boolean
+): Promise<{ ok: boolean; name: string; disabled: boolean; needs_restart?: boolean }> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/thinkers/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}`,
+    {}
+  );
+}
+
 export function fetchChat(identityId: string, tail = 200): Promise<ChatLog> {
   return getJson(
     `/api/identities/${encodeURIComponent(identityId)}/chat?tail=${tail}`
@@ -172,6 +193,33 @@ export function createIdentity(name: string): Promise<{ id: string; name: string
 
 export function killAll(dryRun: boolean): Promise<KillallResult> {
   return postJson("/api/killall", { dry_run: dryRun });
+}
+
+export function fetchIdentityEnv(identityId: string): Promise<IdentityEnv> {
+  return getJson(`/api/identities/${encodeURIComponent(identityId)}/env`);
+}
+
+export function putEnvVar(
+  identityId: string,
+  key: string,
+  value: string
+): Promise<EnvEntry> {
+  return sendJson(
+    "PUT",
+    `/api/identities/${encodeURIComponent(identityId)}/env`,
+    { key, value }
+  );
+}
+
+export function deleteEnvVar(
+  identityId: string,
+  key: string
+): Promise<{ ok: boolean; key: string }> {
+  return sendJson(
+    "DELETE",
+    `/api/identities/${encodeURIComponent(identityId)}/env/${encodeURIComponent(key)}`,
+    undefined
+  );
 }
 
 export const IN_PROGRESS_POLL_MS = 2000;

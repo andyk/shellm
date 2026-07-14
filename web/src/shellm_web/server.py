@@ -14,6 +14,7 @@ from shellm_web import (
     chat,
     control,
     discovery,
+    envfile,
     liveness,
     logs,
     safety,
@@ -66,6 +67,11 @@ class KillallBody(BaseModel):
     dry_run: bool = False
 
 
+class EnvVarBody(BaseModel):
+    key: str
+    value: str
+
+
 def create_app(
     root: Path, static_dir: Path | None = None, *, read_only: bool = False
 ) -> FastAPI:
@@ -84,12 +90,20 @@ def create_app(
             raise HTTPException(status_code=403, detail="Server is read-only")
 
     def _checked_thinker_names(identity: discovery.IdentityInfo, names: list[str]) -> None:
-        installed = {d.name for d in thinkers.list_thinker_dirs(identity.path)}
+        enabled = {d.name for d in thinkers.list_thinker_dirs(identity.path)}
+        installed = {
+            d.name for d in thinkers.list_thinker_dirs(identity.path, include_disabled=True)
+        }
         for name in names:
             if not safety.THINKER_NAME_RE.match(name):
                 raise HTTPException(status_code=422, detail=f"Invalid thinker name: {name}")
             if name not in installed:
                 raise HTTPException(status_code=404, detail=f"Thinker not found: {name}")
+            if name not in enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Thinker '{name}' is disabled — enable it first",
+                )
 
     @app.get("/api/health")
     def health() -> dict:
@@ -295,6 +309,44 @@ def create_app(
         _checked_thinker_names(identity, [name])
         return control.thinkers_step(root, identity, name)
 
+    def _thinker_dir_or_404(identity: discovery.IdentityInfo, name: str) -> Path:
+        if not safety.THINKER_NAME_RE.match(name):
+            raise HTTPException(status_code=422, detail=f"Invalid thinker name: {name}")
+        for tdir in thinkers.list_thinker_dirs(identity.path, include_disabled=True):
+            if tdir.name == name:
+                return tdir
+        raise HTTPException(status_code=404, detail=f"Thinker not found: {name}")
+
+    @app.post("/api/identities/{identity_id}/thinkers/{name}/disable")
+    def thinkers_disable(identity_id: str, name: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        tdir = _thinker_dir_or_404(identity, name)
+        status = thinkers.thinkers_status(identity.path)
+        entry = next(t for t in status["thinkers"] if t["name"] == name)
+        stopped = False
+        if entry["state"] not in ("stopped", "disabled"):
+            control.thinkers_stop(root, identity, [name])
+            stopped = True
+        (tdir / "disabled").touch()
+        return {"ok": True, "name": name, "disabled": True, "stopped_first": stopped}
+
+    @app.post("/api/identities/{identity_id}/thinkers/{name}/enable")
+    def thinkers_enable(identity_id: str, name: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        tdir = _thinker_dir_or_404(identity, name)
+        (tdir / "disabled").unlink(missing_ok=True)
+        # The dispatcher builds its subscription map at startup; a thinker
+        # enabled while it runs won't receive events until a restart.
+        dispatcher_running = thinkers.thinkers_status(identity.path)["dispatcher"]["running"]
+        return {
+            "ok": True,
+            "name": name,
+            "disabled": False,
+            "needs_restart": dispatcher_running,
+        }
+
     @app.get("/api/identities/{identity_id}/chat")
     def identity_chat(
         identity_id: str, tail: int = Query(default=200, ge=1, le=2000)
@@ -332,6 +384,50 @@ def create_app(
     def api_killall(body: KillallBody) -> dict:
         _require_controls()
         return control.killall(body.dry_run)
+
+    @app.get("/api/identities/{identity_id}/env")
+    def identity_env_get(identity_id: str) -> dict:
+        identity = _identity_or_404(root, identity_id)
+        own = [
+            envfile.redacted_entry(key, value)
+            for key, value in envfile.parse_env_file(identity.path / ".env")
+        ]
+        own_keys = {entry["key"] for entry in own}
+        inherited = [
+            {**envfile.redacted_entry(key, value), "overridden": key in own_keys}
+            for key, value in envfile.parse_env_file(root / ".env")
+        ]
+        return {
+            "identity": {"id": identity.id, "name": identity.name},
+            "env": own,
+            "inherited": inherited,
+            "note": "Changes take effect the next time thinkers are started.",
+        }
+
+    @app.put("/api/identities/{identity_id}/env")
+    def identity_env_put(identity_id: str, body: EnvVarBody) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        if not envfile.ENV_KEY_RE.match(body.key):
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid variable name (letters, digits, underscores)",
+            )
+        if any(ch in body.value for ch in "\n\r\x00"):
+            raise HTTPException(status_code=422, detail="Value must be a single line")
+        envfile.upsert_env_var(identity.path / ".env", body.key, body.value)
+        return {"ok": True, **envfile.redacted_entry(body.key, body.value)}
+
+    @app.delete("/api/identities/{identity_id}/env/{key}")
+    def identity_env_delete(identity_id: str, key: str) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        if not envfile.ENV_KEY_RE.match(key):
+            raise HTTPException(status_code=422, detail="Invalid variable name")
+        removed = envfile.delete_env_var(identity.path / ".env", key)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Variable not found")
+        return {"ok": True, "key": key}
 
     # Static frontend (registered last so /api wins)
     if static_dir and static_dir.exists():

@@ -8,4 +8,5 @@ export default [
   route("i/:identityId/thinkers", "routes/thinkers.tsx"),
   route("i/:identityId/chat", "routes/chat.tsx"),
   route("i/:identityId/memories", "routes/memories.tsx"),
+  route("i/:identityId/config", "routes/config.tsx"),
 ] satisfies RouteConfig;

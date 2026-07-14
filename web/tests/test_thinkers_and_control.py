@@ -300,6 +300,128 @@ def test_killall(client: TestClient, stub_bin: Path):
     assert "ARGS=--dry-run" in _calls(stub_bin)
 
 
+def test_disabled_marker_states(control_identity: Path):
+    (control_identity / "thinkers" / "beta_two" / "disabled").touch()
+    status = thinkers.thinkers_status(control_identity)
+    beta = next(t for t in status["thinkers"] if t["name"] == "beta_two")
+    assert beta["state"] == "disabled"
+    assert status["thinkers_total"] == 1
+    assert status["thinkers_disabled"] == 1
+    summary = thinkers.thinkers_summary(control_identity)
+    assert summary["thinkers_total"] == 1
+
+
+def test_enable_disable_endpoints(client: TestClient, control_identity: Path, stub_bin: Path):
+    _write_stub(stub_bin, "thinkers")
+    marker = control_identity / "thinkers" / "beta_two" / "disabled"
+
+    # disable a stopped thinker: marker written, no CLI stop needed
+    resp = client.post("/api/identities/.identities~ctl/thinkers/beta_two/disable")
+    assert resp.status_code == 200
+    assert resp.json()["stopped_first"] is False
+    assert marker.is_file()
+    assert not (stub_bin / "calls.txt").exists()
+
+    # starting or stepping a disabled thinker is a 409 with a clear message
+    resp = client.post(
+        "/api/identities/.identities~ctl/thinkers/start", json={"names": ["beta_two"]}
+    )
+    assert resp.status_code == 409
+    assert "disabled" in resp.json()["detail"]
+
+    # enable removes the marker; dispatcher down -> no restart hint
+    resp = client.post("/api/identities/.identities~ctl/thinkers/beta_two/enable")
+    assert resp.status_code == 200
+    assert resp.json()["needs_restart"] is False
+    assert not marker.is_file()
+
+    # disabling an idle thinker (dispatcher up + active) stops it via the CLI
+    run = control_identity / "run"
+    run.mkdir(exist_ok=True)
+    (run / "dispatcher.pid").write_text(str(os.getpid()))
+    (run / "active_thinkers").write_text("beta_two\n")
+    resp = client.post("/api/identities/.identities~ctl/thinkers/beta_two/disable")
+    assert resp.status_code == 200
+    assert resp.json()["stopped_first"] is True
+    assert "ARGS=stop beta_two" in _calls(stub_bin)
+    assert marker.is_file()
+
+    # enabling while the dispatcher runs flags the restart requirement
+    resp = client.post("/api/identities/.identities~ctl/thinkers/beta_two/enable")
+    assert resp.json()["needs_restart"] is True
+
+
+def test_env_endpoints(client: TestClient, control_identity: Path):
+    identity_env = control_identity / ".env"
+    identity_env.write_text(
+        "# identity secrets\n"
+        "ANTHROPIC_API_KEY=sk-ant-abc123456789xyzw\n"
+        "SHELLM_MODEL=claude-opus-4-7\n"
+    )
+    root_env = control_identity.parent.parent / ".env"
+    root_env.write_text("OPENAI_API_KEY=sk-oai-9876543210abcdef\nLANG=C\n")
+
+    body = client.get("/api/identities/.identities~ctl/env").json()
+    by_key = {entry["key"]: entry for entry in body["env"]}
+    # secret: redacted peek only, never the full value
+    assert by_key["ANTHROPIC_API_KEY"]["secret"] is True
+    assert by_key["ANTHROPIC_API_KEY"]["value"] == "sk-ant…xyzw"
+    assert "abc123456789" not in str(body)
+    # non-secret: full value
+    assert by_key["SHELLM_MODEL"] == {
+        "key": "SHELLM_MODEL",
+        "value": "claude-opus-4-7",
+        "secret": False,
+    }
+    inherited = {entry["key"]: entry for entry in body["inherited"]}
+    assert inherited["OPENAI_API_KEY"]["secret"] is True
+    assert inherited["OPENAI_API_KEY"]["overridden"] is False
+
+    # upsert: update existing + add new (value with spaces gets quoted)
+    resp = client.put(
+        "/api/identities/.identities~ctl/env",
+        json={"key": "ANTHROPIC_API_KEY", "value": "sk-ant-new456789012pqrs"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["value"] == "sk-ant…pqrs"
+    client.put(
+        "/api/identities/.identities~ctl/env",
+        json={"key": "GREETING", "value": "hello world"},
+    )
+    text = identity_env.read_text()
+    assert "# identity secrets" in text  # comments preserved
+    assert "ANTHROPIC_API_KEY=sk-ant-new456789012pqrs" in text
+    assert "GREETING='hello world'" in text
+    assert text.count("ANTHROPIC_API_KEY") == 1
+
+    # invalid key / multiline value
+    assert (
+        client.put(
+            "/api/identities/.identities~ctl/env",
+            json={"key": "BAD-KEY", "value": "x"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/identities/.identities~ctl/env",
+            json={"key": "OK", "value": "a\nb"},
+        ).status_code
+        == 422
+    )
+
+    # delete
+    assert (
+        client.delete("/api/identities/.identities~ctl/env/GREETING").status_code
+        == 200
+    )
+    assert "GREETING" not in identity_env.read_text()
+    assert (
+        client.delete("/api/identities/.identities~ctl/env/GREETING").status_code
+        == 404
+    )
+
+
 def test_read_only_blocks_mutations(control_identity: Path):
     ro_client = TestClient(create_app(control_identity.parent.parent, read_only=True))
     assert ro_client.get("/api/config").json()["controls_enabled"] is False
@@ -307,9 +429,20 @@ def test_read_only_blocks_mutations(control_identity: Path):
         ("/api/identities/.identities~ctl/thinkers/start", {}),
         ("/api/identities/.identities~ctl/thinkers/stop", {}),
         ("/api/identities/.identities~ctl/thinkers/alpha/step", None),
+        ("/api/identities/.identities~ctl/thinkers/alpha/disable", None),
+        ("/api/identities/.identities~ctl/thinkers/alpha/enable", None),
         ("/api/identities/.identities~ctl/chat", {"content": "x", "from_name": "n"}),
         ("/api/identities", {"name": "x"}),
         ("/api/killall", {}),
     ]:
         resp = ro_client.post(path, json=body)
         assert resp.status_code == 403, path
+    assert (
+        ro_client.put(
+            "/api/identities/.identities~ctl/env", json={"key": "K", "value": "v"}
+        ).status_code
+        == 403
+    )
+    assert (
+        ro_client.delete("/api/identities/.identities~ctl/env/K").status_code == 403
+    )

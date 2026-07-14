@@ -13,7 +13,14 @@ from pathlib import Path
 from shellm_web.liveness import pid_alive
 
 
-def list_thinker_dirs(identity_dir: Path) -> list[Path]:
+def is_disabled(thinker_dir: Path) -> bool:
+    """Marker file the CLI honors too: touch <thinker>/disabled."""
+    return (thinker_dir / "disabled").is_file()
+
+
+def list_thinker_dirs(
+    identity_dir: Path, include_disabled: bool = False
+) -> list[Path]:
     """Thinker dirs under <identity>/thinkers/: need step + subscriptions.jsonl."""
     thinkers_root = identity_dir / "thinkers"
     if not thinkers_root.is_dir():
@@ -21,6 +28,8 @@ def list_thinker_dirs(identity_dir: Path) -> list[Path]:
     result = []
     for child in sorted(thinkers_root.iterdir()):
         if not child.is_dir() or child.name.startswith("_"):
+            continue
+        if not include_disabled and is_disabled(child):
             continue
         if (child / "step").is_file() and (child / "subscriptions.jsonl").is_file():
             result.append(child)
@@ -95,15 +104,18 @@ def thinkers_status(identity_dir: Path) -> dict:
     pending = _pending_by_thinker(run_dir)
 
     thinkers = []
-    for thinker_dir in list_thinker_dirs(identity_dir):
+    for thinker_dir in list_thinker_dirs(identity_dir, include_disabled=True):
         name = thinker_dir.name
         types, trigger_self = _subscription_info(thinker_dir)
         steps_in_flight = live_steps.get(name, 0)
 
-        # Precedence mirrors cmd_status: a live per-thinker daemon pid wins,
-        # then stopped (dispatcher down or not active), then active/idle.
+        # Precedence mirrors cmd_status: disabled marker wins, then a live
+        # per-thinker daemon pid, then stopped (dispatcher down or not
+        # active), then active/idle.
         daemon_alive, daemon_pid = pid_alive(run_dir / "thinkers" / f"{name}.pid")
-        if daemon_alive:
+        if is_disabled(thinker_dir):
+            state = "disabled"
+        elif daemon_alive:
             state = "running"
         elif not dispatcher_alive or name not in active_set:
             state = "stopped"
@@ -136,13 +148,15 @@ def thinkers_status(identity_dir: Path) -> dict:
             }
         )
 
+    enabled_count = sum(1 for t in thinkers if t["state"] != "disabled")
     return {
         "dispatcher": {
             "running": dispatcher_alive,
             "pid": dispatcher_pid if dispatcher_alive else None,
         },
-        "active_thinkers": len(active_set),
-        "thinkers_total": len(thinkers),
+        "active_thinkers": len(active_set) if dispatcher_alive else 0,
+        "thinkers_total": enabled_count,
+        "thinkers_disabled": len(thinkers) - enabled_count,
         "steps_in_flight": sum(live_steps.values()),
         "pending_total": sum(len(v) for v in pending.values()),
         "thinkers": thinkers,

@@ -27,7 +27,7 @@ export interface Identity {
   steps_in_flight: number;
 }
 
-export type ThinkerState = "stopped" | "idle" | "active" | "running";
+export type ThinkerState = "stopped" | "idle" | "active" | "running" | "disabled";
 
 export interface ThinkerInfo {
   name: string;
@@ -46,6 +46,7 @@ export interface ThinkersStatus {
   dispatcher: DispatcherStatus;
   active_thinkers: number;
   thinkers_total: number;
+  thinkers_disabled: number;
   steps_in_flight: number;
   pending_total: number;
   thinkers: ThinkerInfo[];
@@ -73,6 +74,20 @@ export interface ChatLog {
   identity: { id: string; name: string };
   live: boolean;
   messages: ChatMessage[];
+}
+
+export interface EnvEntry {
+  key: string;
+  value: string; // full value for non-secrets, redacted peek for secrets
+  secret: boolean;
+  overridden?: boolean; // inherited entries only
+}
+
+export interface IdentityEnv {
+  identity: { id: string; name: string };
+  env: EnvEntry[];
+  inherited: EnvEntry[];
+  note: string;
 }
 
 export interface KillallResult {

@@ -132,7 +132,7 @@ export default function SubTrajPage() {
 
         <div className="flex gap-4">
           <aside className="hidden w-52 shrink-0 md:block">
-            <div className="sticky top-16 max-h-[calc(100vh-5rem)] overflow-y-auto pb-4">
+            <div className="sticky top-28 max-h-[calc(100vh-8rem)] overflow-y-auto pb-4">
               <ForkTree
                 identityId={identityId}
                 currentTrajId={traj.traj_id}

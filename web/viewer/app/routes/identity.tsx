@@ -168,7 +168,7 @@ export default function IdentityPage() {
 
         <div className="flex gap-4">
           <aside className="hidden w-52 shrink-0 md:block">
-            <div className="sticky top-16 max-h-[calc(100vh-5rem)] space-y-4 overflow-y-auto pb-4">
+            <div className="sticky top-28 max-h-[calc(100vh-8rem)] space-y-4 overflow-y-auto pb-4">
               <div>
                 <h3 className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                   Step types

@@ -142,6 +142,8 @@ _list_thinker_dirs() {
         name=$(basename "$dir")
         # Skip internal directories
         [[ "$name" == _* ]] && continue
+        # Skip thinkers disabled via marker file (touch <thinker>/disabled)
+        [[ -f "$dir/disabled" ]] && continue
         # Must have step and subscriptions.jsonl
         [[ -f "$dir/step" && -f "$dir/subscriptions.jsonl" ]] || continue
         printf '%s\n' "$dir"
@@ -567,6 +569,8 @@ cmd_start() {
         for name in "$@"; do
             local thinker_dir="$THINKERS_DIR/$name"
             [[ -d "$thinker_dir" ]] || die "Thinker not found: $name"
+            [[ -f "$thinker_dir/disabled" ]] && \
+                die "Thinker '$name' is disabled (remove $thinker_dir/disabled to enable)"
             [[ -f "$thinker_dir/step" && -f "$thinker_dir/subscriptions.jsonl" ]] || \
                 die "Thinker '$name' missing step or subscriptions.jsonl"
         done

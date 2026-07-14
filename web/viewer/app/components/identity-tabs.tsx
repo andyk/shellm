@@ -9,6 +9,7 @@ const TABS = [
   { key: "thinkers", label: "Thinkers", path: "/thinkers" },
   { key: "chat", label: "Chat", path: "/chat" },
   { key: "memories", label: "Memories", path: "/memories" },
+  { key: "config", label: "Config", path: "/config" },
 ] as const;
 
 /** Header row shared by the identity sub-pages: breadcrumb + tab links. */
@@ -28,7 +29,7 @@ export function IdentityTabs({
   const displayName = name ?? identityId.split("~").pop() ?? identityId;
 
   return (
-    <div className="mb-4 flex flex-wrap items-center gap-3">
+    <div className="sticky top-12 z-40 -mx-4 mb-4 flex flex-wrap items-center gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur">
       <Link to="/" className="text-sm text-muted-foreground hover:underline">
         identities
       </Link>

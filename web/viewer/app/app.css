@@ -23,6 +23,8 @@
 
 html {
   min-height: 100%;
+  /* Keep layout width stable whether or not a scrollbar is present */
+  scrollbar-gutter: stable;
 }
 
 html,

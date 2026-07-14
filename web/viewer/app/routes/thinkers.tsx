@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Zap } from "lucide-react";
 import { useState } from "react";
 import { useParams } from "react-router";
+import { toast } from "sonner";
 
 import { IdentityTabs } from "~/components/identity-tabs";
 import {
@@ -34,6 +35,7 @@ import {
   fetchLogs,
   fetchThinkers,
   pollWhileLive,
+  setThinkerEnabled,
 } from "~/lib/api";
 import type { ThinkerInfo, ThinkerState } from "~/lib/types";
 import { cn } from "~/lib/utils";
@@ -63,6 +65,7 @@ const STATE_STYLES: Record<ThinkerState, string> = {
   active: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300",
   running:
     "bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300",
+  disabled: "border border-dashed bg-transparent text-muted-foreground",
 };
 
 function StateBadge({ thinker }: { thinker: ThinkerInfo }) {
@@ -84,9 +87,30 @@ function ThinkerRow({
 }) {
   const controlsEnabled = useControlsEnabled();
   const mutation = useThinkerMutation(identityId);
+  const queryClient = useQueryClient();
+  const toggleMutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      setThinkerEnabled(identityId, thinker.name, enabled),
+    onSuccess: (result) => {
+      if (result.disabled) {
+        toast.success(`Disabled ${result.name} — "Start all" will skip it`);
+      } else if (result.needs_restart) {
+        toast.success(`Enabled ${result.name}`, {
+          description:
+            "The running dispatcher won't see its subscriptions — stop and start thinkers to pick it up.",
+        });
+      } else {
+        toast.success(`Enabled ${result.name}`);
+      }
+      queryClient.invalidateQueries({ queryKey: ["thinkers", identityId] });
+      queryClient.invalidateQueries({ queryKey: ["identities"] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const disabled = thinker.state === "disabled";
   const stopped = thinker.state === "stopped";
   return (
-    <TableRow>
+    <TableRow className={disabled ? "opacity-60" : undefined}>
       <TableCell className="font-mono font-medium">{thinker.name}</TableCell>
       <TableCell>
         <StateBadge thinker={thinker} />
@@ -122,22 +146,40 @@ function ThinkerRow({
       <TableCell className="text-right">
         {controlsEnabled && (
           <div className="flex justify-end gap-1">
-            <StartStopButtons
-              identityId={identityId}
-              names={[thinker.name]}
-              running={!stopped && dispatcherRunning}
-            />
+            {!disabled && (
+              <>
+                <StartStopButtons
+                  identityId={identityId}
+                  names={[thinker.name]}
+                  running={!stopped && dispatcherRunning}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="Fire this thinker's step once (manual trigger)"
+                  disabled={mutation.isPending}
+                  onClick={() =>
+                    mutation.mutate({ action: "step", names: [thinker.name] })
+                  }
+                >
+                  <Zap className="size-3" />
+                  step
+                </Button>
+              </>
+            )}
             <Button
               variant="ghost"
               size="sm"
-              title="Fire this thinker's step once (manual trigger)"
-              disabled={mutation.isPending}
-              onClick={() =>
-                mutation.mutate({ action: "step", names: [thinker.name] })
+              className="text-muted-foreground"
+              title={
+                disabled
+                  ? `Enable ${thinker.name}`
+                  : `Disable ${thinker.name} — "Start all" and the dispatcher will skip it`
               }
+              disabled={toggleMutation.isPending}
+              onClick={() => toggleMutation.mutate(disabled)}
             >
-              <Zap className="size-3" />
-              step
+              {disabled ? "Enable" : "Disable"}
             </Button>
           </div>
         )}
@@ -177,6 +219,7 @@ function StatusPanel({ identityId }: { identityId: string }) {
           {status.active_thinkers}/{status.thinkers_total} thinkers active ·{" "}
           {status.steps_in_flight} step(s) in flight
           {status.pending_total > 0 && ` · ${status.pending_total} pending`}
+          {status.thinkers_disabled > 0 && ` · ${status.thinkers_disabled} disabled`}
         </span>
         <div className="ml-auto">
           <StartStopButtons
@@ -364,7 +407,7 @@ export default function ThinkersPage() {
     .filter((name) => name !== "dispatcher.log");
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4">
+    <div className="mx-auto w-full max-w-7xl px-4">
       <IdentityTabs identityId={identityId} live={live} active="thinkers" />
       <StatusPanel identityId={identityId} />
       {!logs || logs.length === 0 ? (
