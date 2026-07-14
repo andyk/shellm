@@ -31,6 +31,15 @@ echo "==> Installing system packages"
 apt-get update -qq
 apt-get install -y -qq git jq curl unzip
 
+# Real Node is required for the frontend build: without it, bun shims
+# `node` with itself and react-router's build crashes on react-dom's
+# bun-specific server entry (renderToPipeableStream missing).
+if ! command -v node >/dev/null 2>&1; then
+    echo "==> Installing Node.js 22"
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y -qq nodejs
+fi
+
 echo "==> Creating service user $SHELLM_USER (home: $SHELLM_HOME)"
 if ! id "$SHELLM_USER" >/dev/null 2>&1; then
     useradd --system --create-home --home-dir "$SHELLM_HOME" --shell /bin/bash "$SHELLM_USER"

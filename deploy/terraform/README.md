@@ -117,10 +117,42 @@ First boot takes ~5 minutes (apt, uv/bun install, frontend build). Then
 open the `url` output — you'll hit the Access login; anyone not on
 `allowed_emails` gets blocked.
 
-### The API key (recommended flow: keep it off your laptop entirely)
+### The API keys (.env)
 
-Leave `anthropic_api_key` unset in tfvars and install the key on the box
-after each (re)creation:
+**Recommended: mirror your whole local `.env` via SSM Parameter Store
+(zero-touch, survives rebuilds).** One SecureString parameter holds the
+full root `.env` — ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENAI_ORG,
+GEMINI_API_KEY, OPENROUTER_API_KEY, whatever else you keep there. Upload
+from your laptop (never enters Terraform state):
+
+```bash
+aws ssm put-parameter --name /shellm/env --type SecureString \
+    --value "$(cat ~/laude/repos/shellm/.env)" --overwrite \
+    --region <your-region>
+```
+
+Every boot overwrites `/opt/shellm/app/.env` (mode 600) with the parameter
+value; the instance role can read exactly that one parameter and nothing
+else. Parameter name = the `env_parameter` variable (default
+`/shellm/env`; `""` disables). Standard-tier parameters cap at 4 KB —
+plenty for an env file.
+
+- **Add/rotate keys:** edit your local `.env`, re-run the put-parameter
+  command, then either replace the instance or re-fetch in place:
+
+  ```bash
+  # in an SSM session — pull the new .env without a rebuild
+  sudo -u shellm bash -c 'aws ssm get-parameter --name /shellm/env \
+      --with-decryption --region <your-region> \
+      --query Parameter.Value --output text > /opt/shellm/app/.env'
+  ```
+
+  (No service restart needed — thinkers source `.env` at every start.)
+
+If the parameter is missing at boot, the bootstrap warns and continues
+with the seeded stub — fall back to the manual flow below.
+
+**Fallback: install a key manually over SSM** after any (re)creation:
 
 ```bash
 # 1. wait for first boot to finish (~5 min)
@@ -163,6 +195,20 @@ arbitrary bash on this box; the cap is the real safety net.
 | Panic | Kill All in the UI → `shellm-killall` on the box → stop the instance |
 | Rebuild from scratch | `terraform destroy && terraform apply`, then re-install the API key (identities/trajectories are lost — copy them off first if they matter) |
 | Pause billing | stop the instance in the console (~$3/mo for the disk); the tunnel reconnects on start |
+
+## Troubleshooting
+
+- **Bootstrap log ends with `deploy/setup.sh: No such file or directory`**:
+  the box cloned a ref that predates the `deploy/` folder — almost always
+  `shellm_branch` unset/commented in tfvars (default is `main`). Set the
+  branch, push anything missing, and `terraform apply` (user_data changed,
+  so the instance replaces itself).
+- **Golden rule: the box runs what's *pushed* to `shellm_branch`, never
+  your laptop's working tree.** Any local fix needs commit+push before the
+  box can see it. Verify what the remote actually has with
+  `git ls-tree -r origin/<branch> --name-only | grep <file>`.
+- **Thinker logs loop with `ANTHROPIC_API_KEY is not set`**: the key isn't
+  on the box (fresh or recreated instance) — redo "The API key" steps.
 
 ## Notes & caveats
 

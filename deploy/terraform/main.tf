@@ -149,6 +149,24 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+data "aws_caller_identity" "current" {}
+
+# Read-only access to the single parameter holding the .env contents.
+resource "aws_iam_role_policy" "env_parameter" {
+  count = var.env_parameter != "" ? 1 : 0
+
+  name_prefix = "shellm-env-"
+  role        = aws_iam_role.shellm.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ssm:GetParameter"]
+      Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.env_parameter}"
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "shellm" {
   name_prefix = "shellm-"
   role        = aws_iam_role.shellm.name
@@ -167,11 +185,13 @@ resource "aws_instance" "shellm" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
-    tunnel_token = cloudflare_zero_trust_tunnel_cloudflared.shellm.tunnel_token
-    repo         = var.shellm_repo
-    branch       = var.shellm_branch
-    hostname     = local.hostname
-    api_key      = var.anthropic_api_key
+    tunnel_token      = cloudflare_zero_trust_tunnel_cloudflared.shellm.tunnel_token
+    repo              = var.shellm_repo
+    branch            = var.shellm_branch
+    hostname          = local.hostname
+    api_key       = var.anthropic_api_key
+    env_parameter = var.env_parameter
+    region        = var.aws_region
   })
   user_data_replace_on_change = true
 

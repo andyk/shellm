@@ -63,10 +63,25 @@ variable "access_session_duration" {
 variable "anthropic_api_key" {
   description = <<-EOT
     Optional: spend-capped Anthropic API key written to the VM's .env on first
-    boot. NOTE: lands in Terraform state — keep state local/private, or leave
-    this empty and add the key over SSM after apply instead.
+    boot. NOTE: lands in Terraform state — prefer api_key_parameter instead.
   EOT
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "env_parameter" {
+  description = <<-EOT
+    Name of an SSM SecureString parameter holding the FULL contents of the
+    box's root .env (ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENAI_ORG,
+    GEMINI_API_KEY, OPENROUTER_API_KEY, ...). Create/update it out-of-band
+    from your local shellm/.env (never enters Terraform state):
+      aws ssm put-parameter --name /shellm/env --type SecureString \
+          --value "$(cat ~/laude/repos/shellm/.env)" --overwrite \
+          --region <region>
+    Every boot writes it to /opt/shellm/app/.env; rebuilds self-heal.
+    Set to "" to disable.
+  EOT
+  type        = string
+  default     = "/shellm/env"
 }
