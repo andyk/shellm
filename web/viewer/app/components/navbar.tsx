@@ -32,7 +32,7 @@ export function Navbar() {
     <header className="sticky top-0 z-50 border-b border-border bg-background">
       <div className="flex h-12 items-center justify-between px-4">
         <Link to="/" className="font-mono text-sm font-semibold tracking-tight">
-          shellmWOOOO
+          shellm
         </Link>
         <ThemeToggle />
       </div>
