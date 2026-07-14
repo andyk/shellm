@@ -22,6 +22,8 @@ One `terraform apply` builds the whole stack from `deploy/DEPLOY.md`:
 - A Cloudflare API token in `CLOUDFLARE_API_TOKEN` with:
   - **Account → Cloudflare Tunnel → Edit**
   - **Account → Access: Apps and Policies → Edit**
+  - **Account → Access: Organizations, Identity Providers, and Groups → Edit**
+    (for the email-OTP login method)
   - **Zone → DNS → Edit** (scoped to your zone)
 - Your Cloudflare **account ID** and the zone's **zone ID** (both on the
   dashboard).

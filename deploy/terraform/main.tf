@@ -69,12 +69,24 @@ resource "cloudflare_record" "shellm" {
   proxied = true
 }
 
+# Email OTP login: allow-listed users enter their email and get a 6-digit
+# code — no Cloudflare account needed.
+resource "cloudflare_zero_trust_access_identity_provider" "otp" {
+  account_id = var.cloudflare_account_id
+  name       = "Email one-time PIN"
+  type       = "onetimepin"
+}
+
 resource "cloudflare_zero_trust_access_application" "shellm" {
   zone_id          = var.cloudflare_zone_id
   name             = "shellm (${local.hostname})"
   domain           = local.hostname
   type             = "self_hosted"
   session_duration = var.access_session_duration
+
+  # Pin to OTP and skip the login-method picker entirely.
+  allowed_idps              = [cloudflare_zero_trust_access_identity_provider.otp.id]
+  auto_redirect_to_identity = true
 }
 
 resource "cloudflare_zero_trust_access_policy" "allowlist" {
