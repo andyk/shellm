@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored —
+# it (and the state file) contain secrets; keep both out of the repo.
+
+aws_region = "us-east-1"
+
+# Cloudflare — IDs are on the zone overview page / Zero Trust dashboard
+cloudflare_account_id = "REPLACE_ME"
+cloudflare_zone_id    = "REPLACE_ME"
+domain                = "example.com"
+subdomain             = "agents"
+
+allowed_emails = [
+  "nick@jalbert.io",
+  "boss@example.com",
+]
+
+# Deploy a specific branch while the feature branch is unmerged
+# shellm_branch = "nj/run_local_llm"
+
+# Optional: written to the VM's .env on first boot (lands in TF state!).
+# Leave unset to add the key via SSM after apply instead.
+# anthropic_api_key = "sk-ant-..."

@@ -1,0 +1,63 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Ec2ForTerraform",
+      "Effect": "Allow",
+      "Action": ["ec2:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamScopedToShellmRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/shellm-*"
+    },
+    {
+      "Sid": "IamInstanceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::*:instance-profile/shellm-*"
+    },
+    {
+      "Sid": "SsmShellAccess",
+      "Effect": "Allow",
+      "Action": ["ssm:StartSession"],
+      "Resource": [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ssm:*:*:document/AWS-StartInteractiveCommand",
+        "arn:aws:ssm:*::document/SSM-SessionManagerRunShell"
+      ]
+    },
+    {
+      "Sid": "SsmSessionLifecycle",
+      "Effect": "Allow",
+      "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
+      "Resource": "arn:aws:ssm:*:*:session/*"
+    },
+    {
+      "Sid": "SsmDescribe",
+      "Effect": "Allow",
+      "Action": ["ssm:DescribeSessions", "ssm:DescribeInstanceInformation"],
+      "Resource": "*"
+    }
+  ]
+}
