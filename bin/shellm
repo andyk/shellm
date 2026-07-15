@@ -144,8 +144,11 @@ Options:
   --print-system-prompt Print the system prompt and exit
 
 Environment:
-  ANTHROPIC_API_KEY        Required. Your Anthropic API key.
+  <PROVIDER>_API_KEY      Key for SHELLM_MODEL's provider (ANTHROPIC_API_KEY
+                          for claude-*, OPENROUTER_API_KEY for vendor/model, ...)
   SHELLM_MODEL            Model to use
+  SHELLM_FAST_MODEL       Cheap model class for utility calls (summaries,
+                          mem search); defaults to SHELLM_MODEL's provider
   SHELLM_MAX_ITERATIONS   Max loop iterations
   SHELLM_MAX_TOKENS       Max tokens per response
   SHELLM_EFFORT           Thinking effort level (low/medium/high/xhigh/max)
@@ -1533,7 +1536,17 @@ generate_run_summary() {
     shift 5
     local file_paths=("$@")
 
-    local summary_model="${SHELLM_SUMMARY_MODEL:-claude-haiku-4-5-20251001}"
+    # Summaries want a cheap model. Resolution: explicit SHELLM_SUMMARY_MODEL,
+    # then the fast class (SHELLM_FAST_MODEL), then haiku when the run is on
+    # Anthropic, else stay on the run's own provider (a claude-* fallback
+    # would need an ANTHROPIC_API_KEY non-Anthropic deployments don't have).
+    local summary_model="${SHELLM_SUMMARY_MODEL:-${SHELLM_FAST_MODEL:-}}"
+    if [[ -z "$summary_model" ]]; then
+        case "$SHELLM_MODEL" in
+            claude-*) summary_model="claude-haiku-4-5-20251001" ;;
+            *)        summary_model="$SHELLM_MODEL" ;;
+        esac
+    fi
 
     # Read stdin content if available
     local stdin_content=""
