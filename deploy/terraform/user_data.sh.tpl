@@ -21,11 +21,6 @@ rm -rf /tmp/shellm-src
 git clone --depth 1 --branch '${branch}' '${repo}' /tmp/shellm-src
 SHELLM_REPO='${repo}' SHELLM_BRANCH='${branch}' bash /tmp/shellm-src/deploy/setup.sh
 
-%{ if api_key != "" ~}
-# --- API key from terraform.tfvars ----------------------------------------
-sed -i 's|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${api_key}|' /opt/shellm/app/.env
-%{ endif ~}
-
 %{ if env_parameter != "" ~}
 # --- .env from SSM Parameter Store (survives rebuilds) ---------------------
 # The parameter holds the FULL root .env (all provider API keys). A missing

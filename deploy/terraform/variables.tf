@@ -60,16 +60,6 @@ variable "access_session_duration" {
   default     = "168h"
 }
 
-variable "anthropic_api_key" {
-  description = <<-EOT
-    Optional: spend-capped Anthropic API key written to the VM's .env on first
-    boot. NOTE: lands in Terraform state — prefer api_key_parameter instead.
-  EOT
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
 variable "env_parameter" {
   description = <<-EOT
     Name of an SSM SecureString parameter holding the FULL contents of the
@@ -79,7 +69,13 @@ variable "env_parameter" {
       aws ssm put-parameter --name /shellm/env --type SecureString \
           --value "$(cat ~/laude/repos/shellm/.env)" --overwrite \
           --region <region>
-    Every boot writes it to /opt/shellm/app/.env; rebuilds self-heal.
+    First boot writes it to /opt/shellm/app/.env, so instance rebuilds
+    self-heal. NOTE: user-data runs once per instance — after changing the
+    parameter, either force a rebuild:
+      terraform apply -replace=aws_instance.shellm
+    or update the running box in place over SSM:
+      aws ssm start-session --target <instance-id> --region <region>
+      # then on the box: re-run the fetch and restart shellm-web
     Set to "" to disable.
   EOT
   type        = string

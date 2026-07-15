@@ -54,9 +54,8 @@ per session.)
 ## What goes where
 
 - **`terraform.tfvars`** — facts about the infrastructure (region, account
-  and zone IDs, domain, emails, branch). Not secrets; edit when the infra
-  should change. Gitignored anyway because the optional API key can live
-  there.
+  and zone IDs, domain, emails, branch). No secrets live here; edit when
+  the infra should change. (Gitignored regardless.)
 - **Shell environment** — credentials for the tools: AWS creds live in
   `~/.aws` via `aws configure` (no export needed for the default profile),
   and `CLOUDFLARE_API_TOKEN` is the one real export, handled by direnv:
@@ -119,13 +118,12 @@ First boot takes ~5 minutes (apt, uv/bun install, frontend build). Then
 open the `url` output — you'll hit the Access login; anyone not on
 `allowed_emails` gets blocked.
 
-### The API keys (.env)
+### The .env (API keys + model choice)
 
-**Recommended: mirror your whole local `.env` via SSM Parameter Store
-(zero-touch, survives rebuilds).** One SecureString parameter holds the
-full root `.env` — ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENAI_ORG,
-GEMINI_API_KEY, OPENROUTER_API_KEY, whatever else you keep there. Upload
-from your laptop (never enters Terraform state):
+The box's whole `.env` lives in **one SSM SecureString parameter** — the
+provider API key(s) plus config like `SHELLM_MODEL`. This is the only
+secrets path: nothing sensitive enters tfvars or Terraform state. Upload
+from your laptop:
 
 ```bash
 aws ssm put-parameter --name /shellm/env --type SecureString \
@@ -133,57 +131,51 @@ aws ssm put-parameter --name /shellm/env --type SecureString \
     --region <your-region>
 ```
 
-Every boot overwrites `/opt/shellm/app/.env` (mode 600) with the parameter
-value; the instance role can read exactly that one parameter and nothing
-else. Parameter name = the `env_parameter` variable (default
-`/shellm/env`; `""` disables). Standard-tier parameters cap at 4 KB —
-plenty for an env file.
+**First boot** writes the parameter to `/opt/shellm/app/.env` (mode 600),
+so instance rebuilds self-heal; the instance role can read exactly that
+one parameter and nothing else. Parameter name = the `env_parameter`
+variable (default `/shellm/env`; `""` disables). Standard-tier parameters
+cap at 4 KB — plenty for an env file.
 
-- **Add/rotate keys:** edit your local `.env`, re-run the put-parameter
-  command, then either replace the instance or re-fetch in place:
+Which key(s) to include is a `SHELLM_MODEL` decision — e.g.
+`SHELLM_MODEL=openai/gpt-oss-120b` routes via OpenRouter and needs
+`OPENROUTER_API_KEY`; a `claude-*` model needs `ANTHROPIC_API_KEY`.
+Switching providers is just a different parameter value.
 
-  ```bash
-  # in an SSM session — pull the new .env without a rebuild
-  sudo -u shellm bash -c 'aws ssm get-parameter --name /shellm/env \
-      --with-decryption --region <your-region> \
-      --query Parameter.Value --output text > /opt/shellm/app/.env'
-  ```
-
-  (No service restart needed — thinkers source `.env` at every start.)
-
-If the parameter is missing at boot, the bootstrap warns and continues
-with the seeded stub — fall back to the manual flow below.
-
-**Fallback: install a key manually over SSM** after any (re)creation:
+**Rotating keys / changing model** — user-data runs *once per instance*,
+so after `put-parameter` the box needs one of:
 
 ```bash
-# 1. wait for first boot to finish (~5 min)
-$(terraform output -raw ssm_session_command)
-tail -f /var/log/shellm-bootstrap.log        # until "shellm bootstrap done"
+# option A: rebuild (clean, ~5 min gap; identities are wiped)
+terraform apply -replace=aws_instance.shellm
 
-# 2. install the key — read -rs keeps it out of history and `ps`
-read -rs KEY                                  # paste sk-ant-..., press enter
-sudo -u shellm sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=$KEY|" /opt/shellm/app/.env
-unset KEY
-
-# 3. verify without printing it
-sudo -u shellm grep -q '^ANTHROPIC_API_KEY=sk-' /opt/shellm/app/.env && echo key installed
+# option B: re-fetch in place (in an SSM session, no downtime)
+sudo -u shellm bash -c 'aws ssm get-parameter --name /shellm/env \
+    --with-decryption --region <your-region> \
+    --query Parameter.Value --output text > /opt/shellm/app/.env'
 ```
 
-No restart needed: thinkers source this `.env` every time they start, and
-the web server itself never reads the key.
+With option B, a rotated *key* applies from the next LLM call (`llm` and
+`shellm` re-read `.env` on every invocation) — but a changed
+`SHELLM_MODEL` needs a thinker stop/start in the UI: running dispatchers
+export the model they started with.
 
-**Repeat steps 2–3 whenever the instance is recreated** — the key lives
-only on the box, and `user_data_replace_on_change` means changing
-repo/branch/emails recreates it. The tell if you forget: thinker logs loop
-with `ANTHROPIC_API_KEY is not set`.
+**Fallback — parameter missing at boot:** the bootstrap warns and
+continues with the seeded stub; install the `.env` by hand in an SSM
+session (`read -rs` keeps the key out of history and `ps`):
 
-Alternative (zero-touch rebuilds): set `anthropic_api_key` in tfvars — the
-key then also lives in Terraform state and the EC2 user-data attribute
-(console-visible). Acceptable for a spend-capped key with local state.
+```bash
+$(terraform output -raw ssm_session_command)
+read -rs KEY                              # paste the key, press enter
+printf 'OPENROUTER_API_KEY=%s\nSHELLM_MODEL=openai/gpt-oss-120b\n' "$KEY" \
+    | sudo -u shellm tee /opt/shellm/app/.env >/dev/null
+unset KEY
+```
 
-Either way: use a **dedicated, spend-capped key**. The agent executes
-arbitrary bash on this box; the cap is the real safety net.
+Whatever the provider: use a **dedicated key with a hard spend limit**
+(OpenRouter: prepaid credits *are* the cap; Anthropic: set a spend cap).
+The agent executes arbitrary bash on this box; the cap is the real
+safety net.
 
 ## Day-2 operations
 
@@ -194,8 +186,9 @@ arbitrary bash on this box; the cap is the real safety net.
 | App logs | `journalctl -u shellm-web -f` |
 | Update the app (after pushing!) | `eval "$(terraform output -raw update_command)"` — streams deploy/update.sh (pull, rebuild, restart, health check) |
 | Add/remove viewers | edit `allowed_emails`, `terraform apply` |
+| Rotate keys / change model | `aws ssm put-parameter ... --overwrite`, then rebuild or re-fetch in place — see "The .env" above |
 | Panic | Kill All in the UI → `shellm-killall` on the box → stop the instance |
-| Rebuild from scratch | `terraform destroy && terraform apply`, then re-install the API key (identities/trajectories are lost — copy them off first if they matter) |
+| Rebuild from scratch | `terraform destroy && terraform apply` — `.env` self-heals from the SSM parameter (identities/trajectories are lost — copy them off first if they matter) |
 | Pause billing | stop the instance in the console (~$3/mo for the disk); the tunnel reconnects on start |
 
 ## Troubleshooting
@@ -209,14 +202,16 @@ arbitrary bash on this box; the cap is the real safety net.
   your laptop's working tree.** Any local fix needs commit+push before the
   box can see it. Verify what the remote actually has with
   `git ls-tree -r origin/<branch> --name-only | grep <file>`.
-- **Thinker logs loop with `ANTHROPIC_API_KEY is not set`**: the key isn't
-  on the box (fresh or recreated instance) — redo "The API key" steps.
+- **Thinker logs loop with `<PROVIDER>_API_KEY is not set`**: the box's
+  `.env` is missing, stale, or lacks the key that `SHELLM_MODEL` implies
+  (e.g. an `openai/...` OpenRouter model with no `OPENROUTER_API_KEY`).
+  Check the SSM parameter's contents and redo "The .env" steps.
 
 ## Notes & caveats
 
-- **State contains secrets** (tunnel token; the API key if you set it).
-  State and `terraform.tfvars` are gitignored — keep it that way, or move
-  state to a private S3 bucket once this outlives the demo.
+- **State contains secrets** (the tunnel token). State and
+  `terraform.tfvars` are gitignored — keep it that way, or move state to
+  a private S3 bucket once this outlives the demo.
 - The Cloudflare provider is **pinned to v4** (`~> 4.52`). v5 renamed and
   reshaped the tunnel/Access resource schemas; upgrading means rewriting
   those ~5 resources, so don't bump the pin casually.

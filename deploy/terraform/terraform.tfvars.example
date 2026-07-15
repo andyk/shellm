@@ -1,5 +1,6 @@
-# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored —
-# it (and the state file) contain secrets; keep both out of the repo.
+# Copy to terraform.tfvars and fill in. No secrets belong here — the box's
+# .env (API keys, SHELLM_MODEL) lives in the SSM parameter; see README.
+# Gitignored anyway, and the state file DOES hold secrets (tunnel token).
 
 aws_region = "us-east-1"
 
@@ -16,7 +17,3 @@ allowed_emails = [
 
 # Deploy a specific branch while the feature branch is unmerged
 # shellm_branch = "nj/run_local_llm"
-
-# Optional: written to the VM's .env on first boot (lands in TF state!).
-# Leave unset to add the key via SSM after apply instead.
-# anthropic_api_key = "sk-ant-..."

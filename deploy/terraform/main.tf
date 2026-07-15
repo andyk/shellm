@@ -197,11 +197,10 @@ resource "aws_instance" "shellm" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
-    tunnel_token      = cloudflare_zero_trust_tunnel_cloudflared.shellm.tunnel_token
-    repo              = var.shellm_repo
-    branch            = var.shellm_branch
-    hostname          = local.hostname
-    api_key       = var.anthropic_api_key
+    tunnel_token  = cloudflare_zero_trust_tunnel_cloudflared.shellm.tunnel_token
+    repo          = var.shellm_repo
+    branch        = var.shellm_branch
+    hostname      = local.hostname
     env_parameter = var.env_parameter
     region        = var.aws_region
   })
