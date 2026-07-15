@@ -4,6 +4,8 @@ export interface Config {
   root: string;
   version: string;
   controls_enabled: boolean;
+  git_commit: string | null;
+  git_branch: string | null;
 }
 
 export interface DispatcherStatus {

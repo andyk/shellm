@@ -2,6 +2,7 @@
 
 import logging
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,28 @@ from shellm_web import (
 logger = logging.getLogger(__name__)
 
 VERSION = "0.1.0"
+
+# The repo the running server code lives in (…/web/src/shellm_web/server.py)
+_CODE_REPO = Path(__file__).resolve().parents[3]
+
+
+def _git_info() -> dict[str, str | None]:
+    """commit/branch of the code repo, or Nones outside a git checkout."""
+
+    def rev_parse(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(_CODE_REPO), "rev-parse", *args],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    return {
+        "git_commit": rev_parse("--short", "HEAD"),
+        "git_branch": rev_parse("--abbrev-ref", "HEAD"),
+    }
 
 
 def _identity_or_404(root: Path, identity_id: str) -> discovery.IdentityInfo:
@@ -117,9 +140,18 @@ def create_app(
     def health() -> dict:
         return {"status": "ok"}
 
+    # Resolved once at startup: the code can't change under a running server
+    # (deploy/update.sh restarts the service after pulling).
+    git_info = _git_info()
+
     @app.get("/api/config")
     def config() -> dict:
-        return {"root": str(root), "version": VERSION, "controls_enabled": not read_only}
+        return {
+            "root": str(root),
+            "version": VERSION,
+            "controls_enabled": not read_only,
+            **git_info,
+        }
 
     @app.get("/api/identities")
     def identities() -> list[dict]:

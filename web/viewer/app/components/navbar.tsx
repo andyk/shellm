@@ -1,9 +1,11 @@
+import { useQuery } from "@tanstack/react-query";
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 
 import { Button } from "~/components/ui/button";
+import { fetchConfig } from "~/lib/api";
 
 function ThemeToggle() {
   const { resolvedTheme, setTheme } = useTheme();
@@ -28,10 +30,22 @@ function ThemeToggle() {
 }
 
 export function Navbar() {
+  const { data: config } = useQuery({
+    queryKey: ["config"],
+    queryFn: fetchConfig,
+    staleTime: Infinity,
+  });
+  const build = config?.git_commit
+    ? `${config.git_commit}${config.git_branch ? ` (${config.git_branch})` : ""}`
+    : undefined;
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background">
       <div className="flex h-12 items-center justify-between px-4">
-        <Link to="/" className="font-mono text-sm font-semibold tracking-tight">
+        <Link
+          to="/"
+          className="font-mono text-sm font-semibold tracking-tight"
+          title={build ? `running ${build}` : undefined}
+        >
           shellm
         </Link>
         <ThemeToggle />
