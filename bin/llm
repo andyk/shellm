@@ -149,9 +149,10 @@ fi
 
 [[ -z "$LLM_PROMPT" && -z "$LLM_MESSAGES" ]] && die "No prompt or messages provided"
 
-# Default model
+# Default model: the system-wide SHELLM_MODEL when set (so keyless callers
+# like `mem search` follow the configured provider), else claude-sonnet.
 if [[ -z "$LLM_MODEL" ]]; then
-    LLM_MODEL="claude-sonnet-4-5-20250929"
+    LLM_MODEL="${SHELLM_MODEL:-claude-sonnet-4-5-20250929}"
 fi
 
 # ---------------------------------------------------------------------------

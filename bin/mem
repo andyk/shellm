@@ -162,7 +162,10 @@ $(cat "$f")
 "
     done
 
-    llm -s "You are a semantic search engine for memory files. Each memory has a filename header (=== filename ===), YAML frontmatter (summary, type), and a body. Return ONLY the filenames and summaries of semantically matching memories, one per line. If nothing matches, say 'No matches found.'" \
+    # Utility call: use the cheap model class when one is configured
+    # shellcheck disable=SC2086
+    llm ${SHELLM_FAST_MODEL:+-m "$SHELLM_FAST_MODEL"} \
+        -s "You are a semantic search engine for memory files. Each memory has a filename header (=== filename ===), YAML frontmatter (summary, type), and a body. Return ONLY the filenames and summaries of semantically matching memories, one per line. If nothing matches, say 'No matches found.'" \
         "Search these memories for: ${query}
 
 ${memories}"
