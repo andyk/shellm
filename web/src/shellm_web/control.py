@@ -62,13 +62,17 @@ def identity_env(identity: IdentityInfo, root: Path | None = None) -> dict[str, 
             "SHELLM_BROKER_DIR": f"{d}/.shellm/docker-broker",
             "SHELLM_CONF_DIR": f"{d}/.shellm",
             "CHATRC": f"{d}/chat/.chatrc",
-            "THINK_MODEL": info.get("think_model")
-            or os.environ.get("SHELLM_MODEL", "claude-opus-4-7"),
             "THINK_TICK_INTERVAL": info.get("interval", "0"),
             "THINK_CONTEXT_TAIL": os.environ.get("THINK_CONTEXT_TAIL", "30"),
             "PATH": f"{BIN_DIR}:{env.get('PATH', '')}",
         }
     )
+    # Pin THINK_MODEL only when something actually specifies it. A fabricated
+    # default here would shadow SHELLM_MODEL from the serve root's .env
+    # (sourced later by _ENV_WRAPPER), which the step scripts fall back to.
+    think_model = info.get("think_model") or env.get("SHELLM_MODEL")
+    if think_model:
+        env["THINK_MODEL"] = think_model
     return env
 
 
