@@ -229,3 +229,42 @@ safety net.
 - SSM Session Manager needs no SG rules or public IP settings changes —
   the agent is preinstalled on Ubuntu AMIs and dials out, same as the
   tunnel.
+
+## Cheatsheet
+
+```bash
+cd deploy/terraform          # direnv loads CLOUDFLARE_API_TOKEN on cd
+
+# deploy / apply infra changes (instance replaces on user_data changes)
+terraform plan
+terraform apply
+
+# follow first boot until "shellm bootstrap done" (~5 min)
+$(terraform output -raw ssm_session_command)
+tail -f /var/log/shellm-bootstrap.log
+
+# confirm the .env landed from SSM (key names only)
+sudo cut -d= -f1 /opt/shellm/app/.env
+
+# rotate the node WITHOUT any terraform/code change (fresh box, same infra;
+# wipes identities, re-pulls branch + .env parameter on boot)
+terraform apply -replace=aws_instance.shellm
+
+# update secrets/model, then rotate (or re-fetch in place, see above)
+aws ssm put-parameter --name /shellm/env --type SecureString \
+    --value "$(cat ../../.env)" --overwrite --region <your-region>
+terraform apply -replace=aws_instance.shellm
+
+# shut down the node (stops billing ~$60/mo -> ~$3/mo for the disk;
+# tunnel shows down, everything on disk survives)
+aws ec2 stop-instances --region <your-region> \
+    --instance-ids "$(terraform output -raw instance_id)"
+
+# start it back up (tunnel + shellm-web come back via systemd)
+aws ec2 start-instances --region <your-region> \
+    --instance-ids "$(terraform output -raw instance_id)"
+
+# destroy everything (instance, tunnel, DNS, Access app)
+terraform destroy
+```
+
