@@ -8,6 +8,12 @@ from fastapi import HTTPException
 BLOB_NAME_RE = re.compile(r"^[0-9a-f-]{36}-[0-9a-f]{6}\.(stdout|stderr)$")
 LOG_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.log$")
 MEMORY_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.md$")
+# Underscores allowed: existing thinkers (inner_monologue, ...) use them even
+# though `thinkers new` only scaffolds hyphenated names.
+THINKER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# Same rule `identity new` enforces.
+IDENTITY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+CHAT_FROM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def contained_path(base: Path, *parts: str) -> Path:

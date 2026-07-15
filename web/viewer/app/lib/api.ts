@@ -1,13 +1,19 @@
 import type {
+  ChatLog,
   Config,
+  ControlResult,
   DispatchEvent,
+  EnvEntry,
   Identity,
+  IdentityEnv,
   IdentityStatus,
+  KillallResult,
   LogInfo,
   LogTail,
   MemoryInfo,
   Mindlog,
   SubTrajectory,
+  ThinkersStatus,
   TreeNode,
 } from "~/lib/types";
 
@@ -19,6 +25,36 @@ async function getJson<T>(path: string): Promise<T> {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function sendJson<T>(
+  method: string,
+  path: string,
+  body: unknown
+): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    // Control endpoints put the CLI's message in detail.message; plain
+    // FastAPI errors put a string in detail.
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const data = await response.json();
+      if (typeof data?.detail === "string") message = data.detail;
+      else if (data?.detail?.message) message = data.detail.message;
+    } catch {
+      // keep default message
+    }
+    throw new Error(message);
+  }
+  return response.json() as Promise<T>;
+}
+
+function postJson<T>(path: string, body: unknown): Promise<T> {
+  return sendJson("POST", path, body ?? {});
 }
 
 export function fetchConfig(): Promise<Config> {
@@ -86,6 +122,103 @@ export function fetchMemory(
 ): Promise<{ name: string; content: string }> {
   return getJson(
     `/api/identities/${encodeURIComponent(identityId)}/memories/${encodeURIComponent(name)}`
+  );
+}
+
+export function fetchThinkers(identityId: string): Promise<ThinkersStatus> {
+  return getJson(`/api/identities/${encodeURIComponent(identityId)}/thinkers`);
+}
+
+export function startThinkers(
+  identityId: string,
+  names: string[] = []
+): Promise<ControlResult> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/thinkers/start`,
+    { names }
+  );
+}
+
+export function stopThinkers(
+  identityId: string,
+  names: string[] = []
+): Promise<ControlResult> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/thinkers/stop`,
+    { names }
+  );
+}
+
+export function stepThinker(
+  identityId: string,
+  name: string
+): Promise<ControlResult> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/thinkers/${encodeURIComponent(name)}/step`,
+    {}
+  );
+}
+
+export function setThinkerEnabled(
+  identityId: string,
+  name: string,
+  enabled: boolean
+): Promise<{ ok: boolean; name: string; disabled: boolean; needs_restart?: boolean }> {
+  return postJson(
+    `/api/identities/${encodeURIComponent(identityId)}/thinkers/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}`,
+    {}
+  );
+}
+
+export function fetchChat(identityId: string, tail = 200): Promise<ChatLog> {
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/chat?tail=${tail}`
+  );
+}
+
+export function sendChat(
+  identityId: string,
+  content: string,
+  fromName: string
+): Promise<{ ok: boolean; from: string; to: string }> {
+  return postJson(`/api/identities/${encodeURIComponent(identityId)}/chat`, {
+    content,
+    from_name: fromName,
+  });
+}
+
+export function createIdentity(name: string): Promise<{ id: string; name: string }> {
+  return postJson("/api/identities", { name });
+}
+
+export function killAll(dryRun: boolean): Promise<KillallResult> {
+  return postJson("/api/killall", { dry_run: dryRun });
+}
+
+export function fetchIdentityEnv(identityId: string): Promise<IdentityEnv> {
+  return getJson(`/api/identities/${encodeURIComponent(identityId)}/env`);
+}
+
+export function putEnvVar(
+  identityId: string,
+  key: string,
+  value: string
+): Promise<EnvEntry> {
+  return sendJson(
+    "PUT",
+    `/api/identities/${encodeURIComponent(identityId)}/env`,
+    { key, value }
+  );
+}
+
+export function deleteEnvVar(
+  identityId: string,
+  key: string
+): Promise<{ ok: boolean; key: string }> {
+  return sendJson(
+    "DELETE",
+    `/api/identities/${encodeURIComponent(identityId)}/env/${encodeURIComponent(key)}`,
+    undefined
   );
 }
 

@@ -1,0 +1,35 @@
+# Copy to .envrc (gitignored), fill in the op:// references, then:
+#   direnv allow          # required after every edit to .envrc
+# direnv loads this when you cd into deploy/terraform and unloads it on
+# leaving — no credentials lingering in other shells.
+#
+# One-time 1Password CLI setup:
+#   brew install --cask 1password-cli
+#   1Password app -> Settings -> Developer -> "Integrate with 1Password CLI"
+# `op read` will Touch-ID prompt if 1Password is locked. Find any item's
+# vault/title/field-label reference with: op item get <title>
+
+# Needed when the CLI knows multiple accounts (or auth misbehaves without it):
+#export OP_ACCOUNT=yourteam.1password.com
+
+# --- Cloudflare API token (Tunnel:Edit, Access:Edit, DNS:Edit) --------------
+# Store once:
+#   op item create --category=apiCredential --vault=Private \
+#       --title=cloudflare-tf credential=<paste-token>
+export CLOUDFLARE_API_TOKEN="$(op read 'op://Private/cloudflare-tf/credential')"
+
+# --- AWS static access key (IAM console -> user -> Create access key) ------
+# Store once (username = access key id, credential = secret access key):
+#   op item create --category=apiCredential --vault=Private \
+#       --title=aws-terraform username=AKIA... credential=<secret-access-key>
+export AWS_ACCESS_KEY_ID="$(op read 'op://Private/aws-terraform/username')"
+export AWS_SECRET_ACCESS_KEY="$(op read 'op://Private/aws-terraform/credential')"
+# Do NOT set AWS_SESSION_TOKEN with static keys. Not needed if your AWS
+# credentials already live in ~/.aws/credentials — but note the CLI's
+# browser-based `aws login` sessions are NOT visible to Terraform; static
+# keys (or `aws configure export-credentials`) are the reliable path.
+
+# --- No 1Password? Plain paste works on a private machine ------------------
+#export CLOUDFLARE_API_TOKEN="REPLACE_ME"
+#export AWS_ACCESS_KEY_ID="REPLACE_ME"
+#export AWS_SECRET_ACCESS_KEY="REPLACE_ME"

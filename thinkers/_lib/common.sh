@@ -3,6 +3,28 @@
 # Source this file from thinker step scripts.
 
 # ---------------------------------------------------------------------------
+# .env loading
+# ---------------------------------------------------------------------------
+
+# Fill in vars from a .env file WITHOUT overriding anything already set: the
+# dispatcher's environment (web _ENV_WRAPPER, identity shell, an explicit
+# THINK_MODEL=...) always wins, and earlier files beat later ones. Values are
+# extracted by actually sourcing the file in a subshell so quoting behaves
+# exactly like the loaders in bin/llm and bin/shellm.
+_load_env_defaults() {
+    local envfile="$1"
+    [[ -f "$envfile" ]] || return 1
+    local key val
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        [[ -n "${!key+x}" ]] && continue
+        val=$(set -a; . "$envfile" 2>/dev/null; printf '%s' "${!key}") || continue
+        export "$key=$val"
+    done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\2/p' "$envfile")
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Environment checks
 # ---------------------------------------------------------------------------
 
@@ -21,6 +43,13 @@ _require_env() {
     # Defaults
     [[ -z "${SKILLS_DIR:-}" ]] && SKILLS_DIR="$IDENTITY_DIR/skills"
     [[ -z "${SKILLS_KERNEL_DIR:-}" ]] && SKILLS_KERNEL_DIR="$IDENTITY_DIR/kernel"
+
+    # .env fallbacks — step scripts resolve THINK_MODEL/SHELLM_MODEL from
+    # their environment BEFORE invoking llm/shellm (which load .env too
+    # late to influence the -m flag), so the keys must be filled in here.
+    _load_env_defaults "$IDENTITY_DIR/.env" || true
+    _load_env_defaults ".env" || true
+    _load_env_defaults "$HOME/.shellm/.env" || true
 
     mkdir -p "$MEM_DIR" "$SKILLS_DIR" "$SKILLS_KERNEL_DIR" "$TRAJ_DIR"
 }

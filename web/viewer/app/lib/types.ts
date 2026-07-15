@@ -3,6 +3,12 @@
 export interface Config {
   root: string;
   version: string;
+  controls_enabled: boolean;
+}
+
+export interface DispatcherStatus {
+  running: boolean;
+  pid: number | null;
 }
 
 export interface Identity {
@@ -15,6 +21,80 @@ export interface Identity {
   live: boolean;
   last_activity_ts: string | null;
   step_count: number;
+  dispatcher: DispatcherStatus;
+  thinkers_total: number;
+  thinkers_active: number;
+  steps_in_flight: number;
+}
+
+export type ThinkerState = "stopped" | "idle" | "active" | "running" | "disabled";
+
+export interface ThinkerInfo {
+  name: string;
+  state: ThinkerState;
+  steps_in_flight: number;
+  pid: number | null;
+  types: string[];
+  trigger_self: boolean;
+  pending: string[];
+  log_bytes: number | null;
+  log_mtime: string | null;
+}
+
+export interface ThinkersStatus {
+  identity: { id: string; name: string };
+  dispatcher: DispatcherStatus;
+  active_thinkers: number;
+  thinkers_total: number;
+  thinkers_disabled: number;
+  steps_in_flight: number;
+  pending_total: number;
+  thinkers: ThinkerInfo[];
+}
+
+export interface ControlResult {
+  ok: boolean;
+  action: string;
+  names: string[];
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+export interface ChatMessage {
+  ts: string | null;
+  step_id: string | null;
+  from: string;
+  to: string;
+  content: string;
+  filename: string | null;
+}
+
+export interface ChatLog {
+  identity: { id: string; name: string };
+  live: boolean;
+  messages: ChatMessage[];
+}
+
+export interface EnvEntry {
+  key: string;
+  value: string; // full value for non-secrets, redacted peek for secrets
+  secret: boolean;
+  overridden?: boolean; // inherited entries only
+}
+
+export interface IdentityEnv {
+  identity: { id: string; name: string };
+  env: EnvEntry[];
+  inherited: EnvEntry[];
+  note: string;
+}
+
+export interface KillallResult {
+  ok: boolean;
+  dry_run: boolean;
+  stdout: string;
+  stderr: string;
 }
 
 export interface IdentityStatus {

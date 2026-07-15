@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and fill in. No secrets belong here — the box's
+# .env (API keys, SHELLM_MODEL) lives in the SSM parameter; see README.
+# Gitignored anyway, and the state file DOES hold secrets (tunnel token).
+
+aws_region = "us-east-1"
+
+# Cloudflare — IDs are on the zone overview page / Zero Trust dashboard
+cloudflare_account_id = "REPLACE_ME"
+cloudflare_zone_id    = "REPLACE_ME"
+domain                = "example.com"
+subdomain             = "agents"
+
+allowed_emails = [
+  "nick@jalbert.io",
+  "boss@example.com",
+]
+
+# Deploy a specific branch while the feature branch is unmerged
+# shellm_branch = "nj/run_local_llm"
