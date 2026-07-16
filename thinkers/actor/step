@@ -88,9 +88,11 @@ $trigger_desc"
 # SHELLM_TRIGGER_STEP_ID lands as trigger_step on the shellm-run step so
 # viewers can join the run to the step that caused it exactly.
 printf '  executing (%s)...\n' "$trigger_type" >&2
-act_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+# Model goes via --model: the explicit flag beats every env and .env
+# layer, so it can't be shadowed (see design/model-resolution.md).
+act_response=$(SHELLM_NO_BANNER=1 \
     SHELLM_TRIGGER_STEP_ID="$trigger_step_id" \
-    shellm --traj "$TRAJ_ID" \
+    shellm --model "$THINK_MODEL" --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
     "$act_prompt") || true
 

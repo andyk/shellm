@@ -8,21 +8,27 @@ set -euo pipefail
 # Defaults
 # ---------------------------------------------------------------------------
 
-# Load .env if present (check cwd, then script's own directory)
+# Load .env files, layered: cwd's .env, then ~/.shellm/.env fills whatever
+# is still missing. Each fills in only vars that are NOT already set: the
+# real environment always wins over files — same semantics as bin/shellm
+# and thinkers/_lib/common.sh. Values are extracted by sourcing the file in
+# a subshell so quoting behaves like a plain `source`.
 _llm_load_env() {
     local envfile="$1"
-    if [[ -f "$envfile" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        source "$envfile"
-        set +a
-        return 0
-    fi
-    return 1
+    [[ -f "$envfile" ]] || return 1
+    local key val
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        [[ -n "${!key+x}" ]] && continue
+        val=$(set -a; . "$envfile" 2>/dev/null; printf '%s' "${!key}") || continue
+        export "$key=$val"
+    done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\2/p' "$envfile")
+    return 0
 }
-_llm_load_env ".env" || _llm_load_env "$HOME/.shellm/.env" || true
+_llm_load_env ".env" || true
+_llm_load_env "$HOME/.shellm/.env" || true
 
-LLM_MODEL=""
+LLM_MODEL="${LLM_MODEL:-}"
 LLM_SYSTEM=""
 LLM_MAX_TOKENS=""
 LLM_MESSAGES=""

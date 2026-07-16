@@ -67,7 +67,7 @@ Rules:
 The proposal card:
 
 $(cat "$CARD")"
-    SHELLM_MODEL="$MODEL" shellm --workdir "$REPO_ROOT" "$instructions" \
+    shellm --model "$MODEL" --workdir "$REPO_ROOT" "$instructions" \
         || die "shellm implementation run failed"
 fi
 

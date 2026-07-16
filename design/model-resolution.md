@@ -47,31 +47,37 @@ while Anthropic runs keep haiku's cheap summaries.
 
 ## Where the variables come from (.env population)
 
-Two merge semantics, and the difference is deliberate:
+One merge semantic everywhere: **the real environment always beats `.env`
+files** — loaders fill in only *missing* vars, never overwrite. (Until
+2026-07-17 `bin/llm`/`bin/shellm` had clobbering loaders where cwd's
+`.env` silently beat inline `SHELLM_MODEL=x shellm ...`; that footgun is
+gone.) Files layer per variable, nearest layer wins:
 
-- **`bin/llm` and `bin/shellm`** source the first `.env` found — cwd,
-  else `~/.shellm/.env` (first found wins entirely; no merging) — and it
-  **overwrites** already-exported vars. On a deployed box the service's
-  working directory is the app root, so `/opt/shellm/app/.env` is
-  authoritative for these tools.
-- **Thinker step scripts** (`thinkers/_lib/common.sh`) fill in only
-  *missing* vars, trying `$IDENTITY_DIR/.env` → cwd `.env` →
-  `~/.shellm/.env`. Real environment always beats files here because the
-  web control plane's env wrapper has already sourced root + identity
-  `.env` (identity wins) before the dispatcher starts — a clobbering
-  loader in the step would let the root `.env` stomp identity-level
-  overrides that were already applied.
+- **`bin/llm` and `bin/shellm`**: cwd `.env` → `~/.shellm/.env`
+  (`$SHELLM_CONF_DIR/.env` for shellm). A project `.env` that only pins
+  a model still gets API keys from the home file.
+- **Thinker step scripts** (`thinkers/_lib/common.sh`):
+  `$IDENTITY_DIR/.env` → cwd `.env` → `~/.shellm/.env`. The web control
+  plane's env wrapper has already sourced root + identity `.env`
+  (identity wins) into the dispatcher's environment before any of this
+  runs.
 
 Consequences worth knowing:
 
-- A `SHELLM_MODEL=` line in cwd's `.env` silently beats an inline
-  `SHELLM_MODEL=x shellm ...` for `llm`/`shellm` (but not for thinkers).
-- Rotating an API *key* in the box's `.env` takes effect on the next LLM
-  call (`llm`/`shellm` re-source per invocation). Changing `SHELLM_MODEL`
-  needs a thinker stop/start: running dispatchers export the model they
-  started with.
+- Inline env (`SHELLM_MODEL=x shellm ...`) and exported shell vars now
+  reliably beat any `.env` file. Conversely: a stale `export
+  ANTHROPIC_API_KEY=...` in your shell profile now beats the project
+  `.env` — unset it or use flags.
+- Changing *anything* in the box's `.env` — API key or model — needs a
+  thinker stop/start: running dispatchers hold the environment they
+  started with, and that environment now beats the file. (Previously key
+  rotation was picked up per-call; model changes always needed a
+  restart.)
 - Identity-level `.env` overrides root for thinkers — if one identity
   mysteriously uses a different model/key, look there.
+- Model selection should still travel via flags (`--model`, `-m`) rather
+  than inline env when scripting: a flag beats every layer above and is
+  immune to future loader changes.
 
 ## Choosing values (cost)
 

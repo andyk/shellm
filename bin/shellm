@@ -5,25 +5,32 @@ set -euo pipefail
 # An LLM that operates inside a bash shell, generating and executing code
 # to process context and solve tasks recursively.
 
-# Load .env if present (check cwd, then script's own directory)
+# Load .env files, layered: cwd's .env, then the config directory's fills
+# whatever is still missing. Each fills in only vars that are NOT already
+# set: the real environment (an inline SHELLM_MODEL=..., an identity shell,
+# a parent shellm run) always wins over files — same semantics as
+# thinkers/_lib/common.sh:_load_env_defaults. Values are extracted by
+# sourcing the file in a subshell so quoting behaves like a plain `source`.
 _shellm_load_env() {
     local envfile="$1"
-    if [[ -f "$envfile" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        source "$envfile"
-        set +a
-        return 0
-    fi
-    return 1
+    [[ -f "$envfile" ]] || return 1
+    local key val
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        [[ -n "${!key+x}" ]] && continue
+        val=$(set -a; . "$envfile" 2>/dev/null; printf '%s' "${!key}") || continue
+        export "$key=$val"
+    done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\2/p' "$envfile")
+    return 0
 }
 _SHELLM_SCRIPT_PATH=$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]:-$0}")
+_shellm_load_env ".env" || true
+_shellm_load_env "${SHELLM_CONF_DIR:-$HOME/.shellm}/.env" || true
 SHELLM_TRAJ_DIR="${SHELLM_TRAJ_DIR:-${TRAJ_DIR:-$HOME/.shellm/trajectories}}"
 SHELLM_ENVS_DIR="${SHELLM_ENVS_DIR:-$HOME/.shellm/envs}"
 SHELLM_WORKDIRS_DIR="${SHELLM_WORKDIRS_DIR:-$HOME/.shellm/workdirs}"
 SHELLM_BROKER_DIR="${SHELLM_BROKER_DIR:-$HOME/.shellm/docker-broker}"
 SHELLM_CONF_DIR="${SHELLM_CONF_DIR:-$HOME/.shellm}"
-_shellm_load_env ".env" || _shellm_load_env "$SHELLM_CONF_DIR/.env" || true
 
 # ---------------------------------------------------------------------------
 # Config & defaults
@@ -59,14 +66,6 @@ _SHELLM_DOCKER_BROKER_TRANSPORT=""
 _SHELLM_TOOL_MOUNTS_VERSION=2
 _SHELLM_EXTRA_VARS=()
 _SHELLM_EXTRA_BINS=()
-
-# Load .env if present
-if [[ -f ".env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-fi
 
 # ---------------------------------------------------------------------------
 # Utility functions

@@ -57,9 +57,11 @@ done < <(_build_shellm_flags "$IDENTITY_DIR")
 
 
 printf '  thinker: %s...\n' "$THINKER_NAME" >&2
-thinker_response=$(SHELLM_NO_BANNER=1 SHELLM_MODEL="$THINK_MODEL" \
+# Model goes via --model: the explicit flag beats every env and .env
+# layer, so it can't be shadowed (see design/model-resolution.md).
+thinker_response=$(SHELLM_NO_BANNER=1 \
     SHELLM_TRIGGER_STEP_ID="$trigger_step_id" \
-    shellm --traj "$TRAJ_ID" \
+    shellm --model "$THINK_MODEL" --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
     "$thinker_message") || true
 
