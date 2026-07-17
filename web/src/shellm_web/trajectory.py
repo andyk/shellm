@@ -11,6 +11,7 @@ Produces the wire shape the viewer renders:
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,10 @@ class RunGroup:
     command: str = ""
     model: str | None = None
     tldr: str | None = None
+    # index into steps of the last step that mutated this run — lets the
+    # mindlog endpoint ship only changed runs on ?since= deltas (a run's
+    # command embeds the whole prompt, so unchanged runs are dead weight)
+    last_touch: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +105,7 @@ class RunGroup:
             "command": self.command,
             "model": self.model,
             "tldr": self.tldr,
+            "last_touch": self.last_touch,
         }
 
 
@@ -131,15 +137,20 @@ def _action_suffix(command: str) -> str | None:
     return _collapse(command[idx + len("ACTION:") :])
 
 
-def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]:
-    """Normalize steps and group inline runs. Returns {steps, runs}."""
-    steps: list[dict[str, Any]] = []
-    runs: list[RunGroup] = []
-    runs_by_id: dict[str, RunGroup] = {}
-    unmatched_actions: list[dict[str, Any]] = []
-    seen_step_ids: set[str] = set()
+class _Normalizer:
+    """Stateful step normalizer: feed raw steps in order, read results any
+    time. The state (open runs, unmatched actions, seen ids) is exactly what
+    lets a cache continue where it left off when the jsonl grows."""
 
-    for raw in raw_steps:
+    def __init__(self, traj_dir: Path) -> None:
+        self.traj_dir = traj_dir
+        self.steps: list[dict[str, Any]] = []
+        self.runs: list[RunGroup] = []
+        self._runs_by_id: dict[str, RunGroup] = {}
+        self._unmatched_actions: list[dict[str, Any]] = []
+        self._seen_step_ids: set[str] = set()
+
+    def ingest(self, raw: dict[str, Any]) -> None:
         step_type = raw.get("type", "")
         source = raw.get("source")
         step_id = raw.get("step_id", "")
@@ -159,10 +170,12 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
         if step_type == "fork" and raw.get("child"):
             child_ref = raw.get("child_ref", "")
             slug = child_ref.split("/")[0] if child_ref else str(raw["child"])[:8]
-            resolved = bool(child_ref) and (traj_dir / child_ref).is_file()
+            resolved = bool(child_ref) and (self.traj_dir / child_ref).is_file()
             if not resolved:
                 # child_ref missing or stale: try the hex8 glob
-                matches = list(traj_dir.glob(f"{str(raw['child'])[:8]}-*/trajectory.jsonl"))
+                matches = list(
+                    self.traj_dir.glob(f"{str(raw['child'])[:8]}-*/trajectory.jsonl")
+                )
                 if matches:
                     slug = matches[0].parent.name
                     resolved = True
@@ -193,35 +206,37 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                 # command-suffix prefix match against action steps.
                 trigger = raw.get("trigger_step")
                 if trigger:
-                    if trigger in seen_step_ids:
+                    if trigger in self._seen_step_ids:
                         run.trigger_step_id = trigger
                         # consume so a later legacy run can't prefix-match it
-                        unmatched_actions[:] = [
-                            a for a in unmatched_actions if a["step_id"] != trigger
+                        self._unmatched_actions[:] = [
+                            a for a in self._unmatched_actions if a["step_id"] != trigger
                         ]
                 else:
                     suffix = _action_suffix(run.command)
                     if suffix:
-                        for action in reversed(unmatched_actions):
+                        for action in reversed(self._unmatched_actions):
                             action_text = _collapse(str(action["raw"].get("content", "")))
                             if action_text and (
                                 action_text.startswith(suffix[:200])
                                 or suffix.startswith(action_text[:200])
                             ):
                                 run.trigger_step_id = action["step_id"]
-                                unmatched_actions.remove(action)
+                                self._unmatched_actions.remove(action)
                                 break
-                runs.append(run)
-                runs_by_id[run.run_id] = run
+                self.runs.append(run)
+                self._runs_by_id[run.run_id] = run
                 run.step_ids.append(step_id)
+                run.last_touch = len(self.steps)
                 normalized["run_id"] = run.run_id
             else:
                 # Membership is explicit: the step's own run_id field points
                 # at its shellm-run header. Steps without one (pre-run_id
                 # logs) or with an unknown id stay ungrouped.
-                run = runs_by_id.get(raw.get("run_id") or "")
+                run = self._runs_by_id.get(raw.get("run_id") or "")
                 if run is not None:
                     run.step_ids.append(step_id)
+                    run.last_touch = len(self.steps)
                     normalized["run_id"] = run.run_id
                     if step_type == "run-summary":
                         run.tldr = raw.get("tldr") or run.tldr
@@ -229,13 +244,120 @@ def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]
                         run.status = "done"
                         run.ended_ts = ts
         elif step_type == "action":
-            unmatched_actions.append(normalized)
+            self._unmatched_actions.append(normalized)
 
         if step_id:
-            seen_step_ids.add(step_id)
-        steps.append(normalized)
+            self._seen_step_ids.add(step_id)
+        self.steps.append(normalized)
 
-    return {"steps": steps, "runs": [run.to_dict() for run in runs]}
+
+def normalize(raw_steps: list[dict[str, Any]], traj_dir: Path) -> dict[str, Any]:
+    """Normalize steps and group inline runs. Returns {steps, runs}."""
+    normalizer = _Normalizer(traj_dir)
+    for raw in raw_steps:
+        normalizer.ingest(raw)
+    return {
+        "steps": normalizer.steps,
+        "runs": [run.to_dict() for run in normalizer.runs],
+    }
+
+
+class _CacheEntry:
+    def __init__(self, traj_dir: Path) -> None:
+        self.normalizer = _Normalizer(traj_dir)
+        self.offset = 0        # bytes consumed, through the last complete line
+        self.inode: int | None = None
+        self.traj_id = ""
+
+
+class TrajectoryCache:
+    """Append-aware parse cache. Trajectories are append-only, so a refresh
+    reads only the new bytes and continues normalizing from saved state —
+    O(new steps) per poll instead of O(log). A shrunken or replaced file
+    (different inode, or size below the consumed offset) resets the entry.
+    A trailing partial line (a step mid-append) is left unconsumed and picked
+    up whole on the next refresh."""
+
+    def __init__(self, max_entries: int = 8) -> None:
+        self._entries: dict[Path, _CacheEntry] = {}
+        self._lock = threading.Lock()
+        self._max_entries = max_entries
+
+    def load(self, traj_dir: Path) -> dict[str, Any]:
+        """Wire dict like load_trajectory; steps list is shared with the
+        cache — callers must treat it as read-only and build their own
+        response envelope."""
+        traj_dir = traj_dir.resolve()
+        with self._lock:
+            entry = self._entries.get(traj_dir)
+            if entry is None:
+                if len(self._entries) >= self._max_entries:
+                    # Drop the entry with the fewest parsed steps (cheapest
+                    # to rebuild); good enough for a handful of identities.
+                    victim = min(
+                        self._entries, key=lambda k: len(self._entries[k].normalizer.steps)
+                    )
+                    del self._entries[victim]
+                entry = _CacheEntry(traj_dir)
+                self._entries[traj_dir] = entry
+            self._refresh(entry, traj_dir)
+            return {
+                "steps": entry.normalizer.steps,
+                "runs": [run.to_dict() for run in entry.normalizer.runs],
+                "traj_id": entry.traj_id,
+                "step_count": len(entry.normalizer.steps),
+            }
+
+    def _refresh(self, entry: _CacheEntry, traj_dir: Path) -> None:
+        jsonl = traj_dir / "trajectory.jsonl"
+        try:
+            stat = jsonl.stat()
+        except OSError:
+            entry.normalizer = _Normalizer(traj_dir)
+            entry.offset = 0
+            entry.inode = None
+            entry.traj_id = ""
+            return
+
+        if entry.inode != stat.st_ino or stat.st_size < entry.offset:
+            entry.normalizer = _Normalizer(traj_dir)
+            entry.offset = 0
+            entry.inode = stat.st_ino
+
+        if stat.st_size == entry.offset:
+            return  # nothing new
+
+        try:
+            with jsonl.open("rb") as fh:
+                fh.seek(entry.offset)
+                chunk = fh.read()
+        except OSError:
+            return
+
+        # Only consume complete lines; a torn tail waits for the next poll.
+        last_newline = chunk.rfind(b"\n")
+        if last_newline == -1:
+            return
+        consumed = chunk[: last_newline + 1]
+        entry.offset += len(consumed)
+
+        for line in consumed.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                entry.normalizer.ingest(record)
+
+        if not entry.traj_id and entry.normalizer.steps:
+            entry.traj_id = entry.normalizer.steps[0].get("raw", {}).get("step_id", "")
+
+
+# Process-wide cache used by the API endpoints.
+CACHE = TrajectoryCache()
 
 
 def load_trajectory(traj_dir: Path) -> dict[str, Any]:

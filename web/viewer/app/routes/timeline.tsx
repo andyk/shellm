@@ -11,7 +11,8 @@ import {
   EmptyTitle,
 } from "~/components/ui/empty";
 import { LoadingDots } from "~/components/ui/loading-dots";
-import { fetchIdentityStatus, fetchMindlog, pollWhileLive } from "~/lib/api";
+import { fetchIdentityStatus } from "~/lib/api";
+import { useMindlog } from "~/lib/use-mindlog";
 import { stepColor } from "~/lib/step-colors";
 import { buildTimeline } from "~/lib/timeline-model";
 import { TrajContext } from "~/lib/traj-context";
@@ -40,11 +41,7 @@ export default function TimelinePage() {
   });
   const live = status?.live ?? false;
 
-  const { data: mindlog, isLoading } = useQuery({
-    queryKey: ["mindlog", identityId],
-    queryFn: () => fetchMindlog(identityId),
-    refetchInterval: pollWhileLive(live),
-  });
+  const { data: mindlog, isLoading } = useMindlog(identityId, live);
 
   const layout = useMemo(
     () => (mindlog ? buildTimeline(mindlog) : null),

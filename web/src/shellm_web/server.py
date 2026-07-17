@@ -275,18 +275,36 @@ def create_app(
         return status
 
     @app.get("/api/identities/{identity_id}/mindlog")
-    def mindlog(identity_id: str) -> dict:
+    def mindlog(
+        identity_id: str, since: int | None = Query(default=None, ge=0)
+    ) -> dict:
+        """Full mind log, or — with ?since=<steps already held> — only the
+        steps after that index (runs metadata always ships whole: run groups
+        mutate as their sub-runs progress). Backed by the append-aware parse
+        cache, so a poll costs O(new steps), not O(log)."""
         identity = _identity_or_404(root, identity_id)
         traj_dir = discovery.find_root_traj_dir(identity)
         if traj_dir is None:
             raise HTTPException(status_code=404, detail="No mind log trajectory found")
-        result = trajectory.load_trajectory(traj_dir)
+        cached = trajectory.CACHE.load(traj_dir)
         jsonl = traj_dir / "trajectory.jsonl"
         status = liveness.identity_status(identity.path, jsonl)
-        result["live"] = status["live"]
-        result["dir_rel"] = traj_dir.relative_to(identity.path).as_posix()
-        result["identity"] = {"id": identity.id, "name": identity.name}
-        return result
+        steps = cached["steps"]
+        runs = cached["runs"]
+        if since is not None:
+            # Only runs touched by a step the client hasn't seen — the rest
+            # are unchanged and heavy (command embeds the whole prompt)
+            runs = [run for run in runs if run["last_touch"] >= since]
+        return {
+            "steps": steps if since is None else steps[since:],
+            "runs": runs,
+            "traj_id": cached["traj_id"],
+            "step_count": cached["step_count"],
+            "since": since,
+            "live": status["live"],
+            "dir_rel": traj_dir.relative_to(identity.path).as_posix(),
+            "identity": {"id": identity.id, "name": identity.name},
+        }
 
     def _root_traj_dir_or_404(identity: discovery.IdentityInfo):
         traj_dir = discovery.find_root_traj_dir(identity)
@@ -317,7 +335,8 @@ def create_app(
         traj_dir = tree.find_traj_dir(root_traj_dir, traj_id)
         if traj_dir is None:
             raise HTTPException(status_code=404, detail="Trajectory not found")
-        result = trajectory.load_trajectory(traj_dir)
+        # dict() copy: the cache owns the steps list; this endpoint adds keys
+        result = dict(trajectory.CACHE.load(traj_dir))
         result["breadcrumb"] = tree.breadcrumb(root_traj_dir, traj_dir)
         first = result["steps"][0]["raw"] if result["steps"] else {}
         parent_traj = first.get("parent_traj")

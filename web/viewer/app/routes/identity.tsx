@@ -25,8 +25,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { fetchIdentityStatus, fetchMindlog, pollWhileLive } from "~/lib/api";
+import { fetchIdentityStatus } from "~/lib/api";
 import { TrajContext } from "~/lib/traj-context";
+import { useMindlog } from "~/lib/use-mindlog";
 import type { NormalizedStep } from "~/lib/types";
 
 export function meta() {
@@ -62,11 +63,7 @@ export default function IdentityPage() {
   });
   const live = status?.live ?? false;
 
-  const { data: mindlog, isLoading } = useQuery({
-    queryKey: ["mindlog", identityId],
-    queryFn: () => fetchMindlog(identityId),
-    refetchInterval: pollWhileLive(live),
-  });
+  const { data: mindlog, isLoading } = useMindlog(identityId, live);
 
   const hidden = useMemo(
     () => new Set(hideParam.split(",").filter(Boolean)),

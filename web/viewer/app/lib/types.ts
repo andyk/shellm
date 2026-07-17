@@ -262,15 +262,20 @@ export interface RunGroup {
   command: string;
   model: string | null;
   tldr: string | null;
+  /** Step index of the last step that mutated this run (delta filtering). */
+  last_touch: number;
 }
 
 export interface Mindlog {
   traj_id: string;
   dir_rel: string;
   step_count: number;
+  /** Full when fetched without ?since; the delta tail otherwise (the
+   * useMindlog hook merges deltas into the cached full list). */
   steps: NormalizedStep[];
   runs: RunGroup[];
   live: boolean;
+  since?: number | null;
   identity: { id: string; name: string };
 }
 

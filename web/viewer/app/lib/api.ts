@@ -86,8 +86,14 @@ export function fetchIdentityStatus(identityId: string): Promise<IdentityStatus>
   return getJson(`/api/identities/${encodeURIComponent(identityId)}/status`);
 }
 
-export function fetchMindlog(identityId: string): Promise<Mindlog> {
-  return getJson(`/api/identities/${encodeURIComponent(identityId)}/mindlog`);
+export function fetchMindlog(
+  identityId: string,
+  since?: number
+): Promise<Mindlog> {
+  const suffix = since !== undefined ? `?since=${since}` : "";
+  return getJson(
+    `/api/identities/${encodeURIComponent(identityId)}/mindlog${suffix}`
+  );
 }
 
 export function fetchTree(

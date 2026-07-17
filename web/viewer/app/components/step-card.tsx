@@ -1,5 +1,5 @@
 import { GitFork, Undo2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Link } from "react-router";
 
 import { BlobLoader } from "~/components/blob-output";
@@ -287,7 +287,9 @@ export function StepContent({
   }
 }
 
-export function StepCard({
+// memo: incremental mindlog polling keeps old step objects' identity, so
+// existing cards skip re-rendering entirely as new steps stream in.
+export const StepCard = memo(function StepCard({
   step,
   expandAll,
   highlighted = false,
@@ -313,4 +315,4 @@ export function StepCard({
       </div>
     </div>
   );
-}
+});
