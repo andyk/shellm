@@ -80,15 +80,21 @@ block page; people on it authenticate once and land in the viewer.
 
 ## 4. Lock CORS to the public hostname
 
-Uncomment in `/etc/systemd/system/shellm-web.service`:
+Add a systemd drop-in (the main unit file is re-synced from the repo on
+every deploy, so don't hand-edit it — drop-ins survive):
 
-```ini
+```bash
+sudo mkdir -p /etc/systemd/system/shellm-web.service.d
+sudo tee /etc/systemd/system/shellm-web.service.d/override.conf <<'EOF'
+[Service]
 Environment="SHELLM_WEB_ALLOWED_ORIGINS=https://agents.example.com"
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart shellm-web
 ```
 
-then `sudo systemctl daemon-reload && sudo systemctl restart shellm-web`.
 (Default is `*`, which is fine on a laptop but pointless exposure on a
-deployment. Comma-separate multiple origins if you need them.)
+deployment. Comma-separate multiple origins if you need them. The
+terraform deploy writes this drop-in automatically.)
 
 ## 5. Operating it
 
@@ -98,7 +104,7 @@ deployment. Comma-separate multiple origins if you need them.)
 | Restart web server (agents keep running) | `sudo systemctl restart shellm-web` |
 | Stop every agent process | `sudo -u shellm /opt/shellm/app/bin/shellm-killall` |
 | Update to latest code | see below; or click the navbar build stamp → "Pull latest & restart" (needs `SHELLM_WEB_SELF_UPDATE=1` in the unit, which the shipped unit sets) |
-| View-only mode | uncomment `SHELLM_WEB_READONLY=1` in the unit |
+| View-only mode | add `Environment="SHELLM_WEB_READONLY=1"` to the override.conf drop-in (see §4) |
 
 **Updating:**
 

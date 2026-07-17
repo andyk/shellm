@@ -1,6 +1,11 @@
 # shellm-web systemd unit. Installed by deploy/setup.sh, which substitutes
 # @SHELLM_HOME@ (default /opt/shellm; the repo lives at @SHELLM_HOME@/app).
 #
+# deploy/update.sh re-syncs this file on every deploy — do NOT hand-edit the
+# installed copy; put box-local changes in a drop-in that survives deploys:
+#   /etc/systemd/system/shellm-web.service.d/override.conf
+#   ([Service] + Environment=... lines; then daemon-reload + restart)
+#
 # The web server binds 127.0.0.1 only — expose it exclusively through the
 # Cloudflare tunnel (see deploy/DEPLOY.md). Dispatchers started from the UI
 # run in their own sessions and survive restarts of this service.

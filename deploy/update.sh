@@ -9,9 +9,24 @@ set -euo pipefail
 # From an SSM session:  sudo bash /opt/shellm/app/deploy/update.sh
 
 APP_DIR="${APP_DIR:-/opt/shellm/app}"
+UNIT_DST="${UNIT_DST:-/etc/systemd/system/shellm-web.service}"
 
 echo "==> Pulling latest"
 sudo -u shellm git -C "$APP_DIR" pull --ff-only
+
+# Re-sync the systemd unit from the repo so unit changes deploy like code.
+# Box-local customization belongs in shellm-web.service.d/override.conf
+# (drop-ins survive this); hand-edits to the main unit will be overwritten.
+UNIT_SRC="$APP_DIR/deploy/shellm-web.service"
+SHELLM_HOME="${SHELLM_HOME:-$(dirname "$APP_DIR")}"
+if [[ -f "$UNIT_SRC" ]]; then
+    rendered=$(sed "s|@SHELLM_HOME@|$SHELLM_HOME|g" "$UNIT_SRC")
+    if ! printf '%s\n' "$rendered" | cmp -s - "$UNIT_DST" 2>/dev/null; then
+        echo "==> Unit file changed — re-installing $UNIT_DST"
+        printf '%s\n' "$rendered" | sudo tee "$UNIT_DST" >/dev/null
+        sudo systemctl daemon-reload
+    fi
+fi
 
 echo "==> Forcing frontend rebuild on restart"
 sudo -u shellm rm -rf "$APP_DIR/web/src/shellm_web/static"
