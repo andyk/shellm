@@ -90,11 +90,27 @@ $trigger_desc"
 printf '  executing (%s)...\n' "$trigger_type" >&2
 # Model goes via --model: the explicit flag beats every env and .env
 # layer, so it can't be shadowed (see design/model-resolution.md).
+act_rc=0
 act_response=$(SHELLM_NO_BANNER=1 \
     SHELLM_TRIGGER_STEP_ID="$trigger_step_id" \
     shellm --model "$THINK_MODEL" --traj "$TRAJ_ID" \
     "${shellm_flags[@]}" \
-    "$act_prompt") || true
+    "$act_prompt") || act_rc=$?
+
+if [[ "$act_rc" -ne 0 && -z "$act_response" ]]; then
+    # A failed run appends no observation, leaving the action dangling in
+    # the mind log with nothing to prompt a retry. Surface the failure as
+    # an observation so the mind sees it and can decide what to do next.
+    printf '  run failed (exit %s) — appending failure observation\n' "$act_rc" >&2
+    failed_action=$(printf '%.200s' "$trigger_content")
+    jq -nc \
+        --arg content "action failed: the run aborted before producing a result (exit code $act_rc; likely an LLM/provider error — details in the actor log). The action was: $failed_action" \
+        --arg source "$THINKER_NAME" \
+        --arg trigger "$trigger_step_id" \
+        '{type:"observation", content:$content, source:$source}
+         + (if $trigger == "" then {} else {trigger_step: $trigger} end)' \
+        | traj append >/dev/null || true
+fi
 
 if [[ -n "$act_response" ]]; then
     printf '  [observation] %s\n' "$(printf '%s' "$act_response" | head -1)"

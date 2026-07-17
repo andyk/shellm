@@ -39,12 +39,31 @@ LLM_THINKING_LEVEL=""
 LLM_EFFORT=""
 LLM_RAW=0
 LLM_PROMPT=""
+# Transient-failure retries (provider errors, 429/5xx, network). Retries
+# only happen when NOTHING has been emitted yet — a retry after partial
+# streamed output would duplicate text. LLM_RETRIES=0 disables.
+LLM_RETRIES="${LLM_RETRIES:-2}"
+LLM_RETRY_BACKOFF="${LLM_RETRY_BACKOFF:-1}"   # seconds; grows linearly per attempt
 
 # ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
 
 die() { echo "llm: error: $*" >&2; exit 1; }
+
+# Stream handlers run inside a retry subshell. die_retryable marks a failure
+# as transient-and-nothing-emitted: the message is stashed for the final
+# attempt's die, and exit 75 (EX_TEMPFAIL) tells the retry loop to go again.
+die_retryable() {
+    { [[ -n "${LLM_RETRY_ERR:-}" ]] && printf '%s' "$*" > "$LLM_RETRY_ERR" 2>/dev/null; } || true
+    exit 75
+}
+
+# Called by stream handlers the moment anything is emitted (stdout text or
+# thinking on stderr) — from that point on, failures must not retry.
+mark_emitted() {
+    { [[ -n "${LLM_DATA_MARKER:-}" ]] && : > "$LLM_DATA_MARKER" 2>/dev/null; } || true
+}
 
 usage() {
     cat <<'EOF'
@@ -107,6 +126,9 @@ Environment:
   GEMINI_API_KEY           Required for Gemini models
   OPENROUTER_API_KEY       Required for OpenRouter models
   LLM_API_URL              Override provider API URL
+  LLM_RETRIES              Retries for transient API failures (default: 2;
+                           0 disables). Never retries after partial output.
+  LLM_RETRY_BACKOFF        Backoff base seconds between retries (default: 1)
 
 Examples:
   llm -m claude-sonnet-4-5-20250929 "explain quicksort"
@@ -396,8 +418,10 @@ stream_anthropic() {
                     ;;
                 *'"content_block_delta"'*)
                     if [[ "$_block" == "thinking" ]]; then
+                        mark_emitted
                         printf '%s' "$json" | jq -j '.delta.thinking // empty' >&2
                     elif [[ "$_block" == "text" ]]; then
+                        mark_emitted
                         printf '%s' "$json" | jq -j '.delta.text // empty'
                     fi
                     ;;
@@ -418,20 +442,24 @@ stream_anthropic() {
     if [[ "$_saw_data" -eq 0 && -n "$_err_buf" ]]; then
         local _err
         _err=$(printf '%s' "$_err_buf" | jq -r '.error.message // empty' 2>/dev/null || true)
-        [[ -n "$_err" ]] && die "API error: $_err"
-        die "API error: $_err_buf"
+        [[ -n "$_err" ]] && die_retryable "API error: $_err"
+        die_retryable "API error: $_err_buf"
     fi
 }
 
 stream_openai() {
-    local _saw_data=0 _err_buf=""
+    local _saw_data=0 _err_buf="" _chunk=""
     while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         local line="${raw_line%$'\r'}"
         if [[ "$line" == data:\ * ]]; then
             _saw_data=1
             local json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && continue
-            printf '%s' "$json" | jq -j '.choices[0].delta.content // empty'
+            _chunk=$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty')
+            if [[ -n "$_chunk" ]]; then
+                mark_emitted
+                printf '%s' "$_chunk"
+            fi
         elif [[ "$_saw_data" -eq 0 ]]; then
             _err_buf="${_err_buf}${line}
 "
@@ -440,20 +468,24 @@ stream_openai() {
     if [[ "$_saw_data" -eq 0 && -n "$_err_buf" ]]; then
         local _err
         _err=$(printf '%s' "$_err_buf" | jq -r '.error.message // empty' 2>/dev/null || true)
-        [[ -n "$_err" ]] && die "API error: $_err"
-        die "API error: $_err_buf"
+        [[ -n "$_err" ]] && die_retryable "API error: $_err"
+        die_retryable "API error: $_err_buf"
     fi
 }
 
 stream_gemini() {
-    local _saw_data=0 _err_buf=""
+    local _saw_data=0 _err_buf="" _chunk=""
     while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         local line="${raw_line%$'\r'}"
         if [[ "$line" == data:\ * ]]; then
             _saw_data=1
             local json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && continue
-            printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty'
+            _chunk=$(printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty')
+            if [[ -n "$_chunk" ]]; then
+                mark_emitted
+                printf '%s' "$_chunk"
+            fi
         elif [[ "$_saw_data" -eq 0 ]]; then
             _err_buf="${_err_buf}${line}
 "
@@ -462,8 +494,8 @@ stream_gemini() {
     if [[ "$_saw_data" -eq 0 && -n "$_err_buf" ]]; then
         local _err
         _err=$(printf '%s' "$_err_buf" | jq -r '.error.message // empty' 2>/dev/null || true)
-        [[ -n "$_err" ]] && die "API error: $_err"
-        die "API error: $_err_buf"
+        [[ -n "$_err" ]] && die_retryable "API error: $_err"
+        die_retryable "API error: $_err_buf"
     fi
 }
 
@@ -482,27 +514,66 @@ url=""
 headers=()
 get_url_headers
 
+[[ "$LLM_RETRIES" =~ ^[0-9]+$ ]] || LLM_RETRIES=0
+_max_attempts=$(( LLM_RETRIES + 1 ))
+
 if [[ "$LLM_STREAM" -eq 1 ]]; then
-    # Streaming path — use process substitution so stream handler runs in the
-    # main shell (not a pipeline subshell), allowing die() to exit properly.
-    _block=""
-    _curl_err=$(mktemp)
-    "stream_${LLM_PROVIDER}" < <(curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>"$_curl_err")
-    # If we get here, the stream handler didn't die — check for curl errors
-    # (no `local` here: this is top-level script code, not a function)
-    if [[ -s "$_curl_err" ]]; then
-        _ce=$(cat "$_curl_err")
-        rm -f "$_curl_err"
-        die "curl error: $_ce"
-    fi
-    rm -f "$_curl_err"
+    # Streaming path. Each attempt runs the handler in a subshell so a
+    # retryable failure (exit 75 from die_retryable — error before any
+    # output) comes back here instead of killing the script; a mid-stream
+    # die still prints its message and we propagate its exit. Retries only
+    # fire while the emission marker doesn't exist.
+    _attempt=0
+    while :; do
+        _attempt=$(( _attempt + 1 ))
+        _block=""
+        _curl_err=$(mktemp)
+        LLM_RETRY_ERR=$(mktemp)
+        LLM_DATA_MARKER="${LLM_RETRY_ERR}.emitted"
+        _rc=0
+        ( "stream_${LLM_PROVIDER}" < <(curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>"$_curl_err") ) || _rc=$?
+
+        _emitted=0
+        [[ -e "$LLM_DATA_MARKER" ]] && _emitted=1
+        _ce=""
+        [[ -s "$_curl_err" ]] && _ce=$(cat "$_curl_err")
+        _retry_msg=""
+        [[ -s "$LLM_RETRY_ERR" ]] && _retry_msg=$(cat "$LLM_RETRY_ERR")
+        rm -f "$_curl_err" "$LLM_RETRY_ERR" "$LLM_DATA_MARKER"
+
+        if [[ "$_rc" -eq 0 && -z "$_ce" ]]; then
+            break   # success
+        fi
+        if [[ "$_emitted" -eq 0 && "$_attempt" -lt "$_max_attempts" ]]; then
+            echo "llm: transient API failure (attempt $_attempt/$_max_attempts): ${_retry_msg:-${_ce:-exit $_rc}} — retrying" >&2
+            sleep $(( LLM_RETRY_BACKOFF * _attempt ))
+            continue
+        fi
+        # Exhausted or output already emitted: fail like before
+        [[ -n "$_retry_msg" ]] && die "$_retry_msg"
+        [[ -n "$_ce" ]] && die "curl error: $_ce"
+        exit "$_rc"   # mid-stream die already printed its message
+    done
 else
     # Non-streaming path
-    local_resp=$(mktemp)
-    http_code=$(curl -sS -o "$local_resp" -w '%{http_code}' \
-        "${headers[@]}" -d "$payload" "$url" 2>/dev/null)
+    _attempt=0
+    while :; do
+        _attempt=$(( _attempt + 1 ))
+        local_resp=$(mktemp)
+        http_code=$(curl -sS -o "$local_resp" -w '%{http_code}' \
+            "${headers[@]}" -d "$payload" "$url" 2>/dev/null) || http_code="000"
 
-    if [[ "$http_code" -ge 400 ]]; then
+        # Transient: network failure, timeout, rate limit, server error
+        if [[ "$http_code" =~ ^(000|408|429|5[0-9][0-9])$ && "$_attempt" -lt "$_max_attempts" ]]; then
+            echo "llm: transient API failure (attempt $_attempt/$_max_attempts): HTTP $http_code — retrying" >&2
+            rm -f "$local_resp"
+            sleep $(( LLM_RETRY_BACKOFF * _attempt ))
+            continue
+        fi
+        break
+    done
+
+    if [[ "$http_code" -ge 400 || "$http_code" == "000" ]]; then
         error_msg=$(jq -r '.error.message // .message // empty' "$local_resp" 2>/dev/null || true)
         rm -f "$local_resp"
         if [[ -n "$error_msg" ]]; then
