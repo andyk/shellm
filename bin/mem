@@ -334,16 +334,17 @@ $updated_block
 $text
 EOF
 
-    # Auto-update slug in filename
+    # Auto-update slug in filename. Always sanitize through slugify: sed is
+    # line-oriented and lets embedded newlines through into the filename, and
+    # a raw --slug could carry newlines or even path separators.
     local base
     base=$(basename "$file" .md)
     parse_filename "$base"
     local new_slug
     if [[ -n "$slug" ]]; then
-        new_slug="$slug"
+        new_slug=$(slugify "$slug")
     else
-        # Generate slug from first 80 chars of new text
-        new_slug=$(printf '%s' "$text" | head -c 80 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+        new_slug=$(slugify "$text")
     fi
     if [[ -n "$new_slug" && "$new_slug" != "$_pf_slug" ]]; then
         local new_file="$MEM_DIR/${_pf_ts}_${_pf_id}_${new_slug}.md"
