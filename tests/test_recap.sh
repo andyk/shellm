@@ -147,5 +147,60 @@ check_not "concurrent recap refused" run_recap
 rmdir "$RUN/recap/.lock"
 check "recap works after lock removed" run_recap --cached
 
+# ---------------------------------------------------------------------------
+# Gap-aware windows: a >=30 min gap cuts an episode before the size cap
+# ---------------------------------------------------------------------------
+
+GAPRUN="$TRAJ_ROOT/cafe0001-gaps"
+mkdir -p "$GAPRUN"
+GJ="$GAPRUN/trajectory.jsonl"
+gstep() { # gstep <id> <HH> <MM>
+    printf '{"type":"thought","step_id":"%s","ts":"2026-07-17T%s:%s:00+0000","content":"gap fixture","source":"tester"}\n' \
+        "$1" "$2" "$3" >> "$GJ"
+}
+echo '{"type":"trajectory","step_id":"cafe0001-1111-4111-8111-111111111111","ts":"t0"}' > "$GJ"
+# session A: 12 steps, 10:00-10:11; then a 49-minute gap; session B: 16 steps, 11:00-11:15
+for i in $(seq 0 11);  do gstep "ga$(printf '%06d' "$i")" 10 "$(printf '%02d' "$i")"; done
+for i in $(seq 0 15);  do gstep "gb$(printf '%06d' "$i")" 11 "$(printf '%02d' "$i")"; done
+
+recap cafe0001 --traj_dir "$TRAJ_ROOT" --window 20 -q >/dev/null 2>&1
+GEPS="$GAPRUN/recap/episodes.jsonl"
+check "gap produces two episodes" test "$(wc -l < "$GEPS" | tr -d ' ')" = "2"
+check "episode 1 cut at the gap (12 steps, complete)" \
+    test "$(head -1 "$GEPS" | jq -r '.n_steps,.partial,.last_step' | tr '\n' ' ')" = "12 false ga000011 "
+check "episode 2 is the new session (16 steps, partial at eof)" \
+    test "$(tail -1 "$GEPS" | jq -r '.n_steps,.partial,.first_step' | tr '\n' ' ')" = "16 true gb000000 "
+
+# mixed timezones must not create phantom gaps: 10:50+0000 == 18:52+0800 (2 min later)
+TZRUN="$TRAJ_ROOT/cafe0002-tz"
+mkdir -p "$TZRUN"
+TJ="$TZRUN/trajectory.jsonl"
+echo '{"type":"trajectory","step_id":"cafe0002-1111-4111-8111-111111111111","ts":"t0"}' > "$TJ"
+for i in $(seq 0 11); do
+    printf '{"type":"thought","step_id":"tz%06d","ts":"2026-07-17T10:%02d:00+0000","content":"utc side","source":"tester"}\n' "$i" $((40 + i)) >> "$TJ"
+done
+for i in $(seq 0 11); do
+    printf '{"type":"thought","step_id":"tw%06d","ts":"2026-07-17T18:%02d:00+0800","content":"local side","source":"tester"}\n' "$i" $((52 + i)) >> "$TJ"
+done
+recap cafe0002 --traj_dir "$TRAJ_ROOT" --window 40 -q >/dev/null 2>&1
+check "timezone change is not a phantom gap" \
+    test "$(wc -l < "$TZRUN/recap/episodes.jsonl" | tr -d ' ')" = "1"
+
+# ---------------------------------------------------------------------------
+# Byte cap closes oversized windows even under the step cap
+# ---------------------------------------------------------------------------
+
+BYTERUN="$TRAJ_ROOT/cafe0003-bytes"
+mkdir -p "$BYTERUN"
+BJ="$BYTERUN/trajectory.jsonl"
+echo '{"type":"trajectory","step_id":"cafe0003-1111-4111-8111-111111111111","ts":"t0"}' > "$BJ"
+big=$(printf 'x%.0s' $(seq 1 400))
+for i in $(seq 1 30); do
+    printf '{"type":"thought","step_id":"by%06d","ts":"2026-07-17T12:%02d:00+0000","content":"%s","source":"tester"}\n' "$i" $((i % 60)) "$big" >> "$BJ"
+done
+RECAP_MAX_WINDOW_BYTES=2000 recap cafe0003 --traj_dir "$TRAJ_ROOT" --window 100 -q >/dev/null 2>&1
+byte_eps=$(wc -l < "$BYTERUN/recap/episodes.jsonl" | tr -d ' ')
+check "byte cap splits windows (got $byte_eps episodes)" test "$byte_eps" -ge 5
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

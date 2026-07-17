@@ -34,12 +34,30 @@ goes through `llm`.
    bookkeeping below.
 
 2. **Map: windows → episodes.** The filtered stream is chunked into
-   windows of `--window` steps (default 100). Each window goes to the LLM
-   (one call) which returns strict JSON: a title, a 2–4 sentence summary,
-   1–4 kebab-case themes, and 3–6 *notable steps* — each a step id that
-   literally appears in the window plus a short note. One window = one
-   **episode**, appended to `recap/episodes.jsonl` with provenance
-   (source line range, first/last step ids and timestamps, model, created).
+   windows, and each window goes to the LLM (one call) which returns
+   strict JSON: a title, a 2–4 sentence summary, 1–4 kebab-case themes,
+   and 3–6 *notable steps* — each a step id that literally appears in the
+   window plus a short note. One window = one **episode**, appended to
+   `recap/episodes.jsonl` with provenance (source line range, first/last
+   step ids and timestamps, model, created).
+
+   **Window boundaries are gap-aware.** A window closes at the first of:
+
+   - a **time gap** of ≥ `--gap-minutes` (default 30) before the next
+     step, provided the window already has ≥10 steps — mind logs have
+     natural sessions (agent stopped, overnight idle, between chats), and
+     cutting there makes episodes read like chapters;
+   - `--window` steps (default 100), the hard size cap;
+   - ~60KB of rendered text (`RECAP_MAX_WINDOW_BYTES`), so a run of fat
+     observations can't blow the token budget.
+
+   Gap math converts each `ts` to UTC epoch-minutes by hand (jq
+   arithmetic, days-from-civil) because mind logs mix timezones —
+   inner_monologue stamps `+0800` while the actor stamps `+0000`, and
+   naive string comparison would see 8-hour phantom gaps. Unparseable
+   timestamps simply never trigger a gap cut. Cut points are
+   deterministic functions of the data already seen, so incrementality
+   is unaffected.
 
 3. **Reduce: episodes → themes.** All episode summaries (not the raw log)
    go to the LLM once, returning an **arc** (1–2 narrative paragraphs) and
@@ -76,9 +94,23 @@ The mind log grows continuously, so refresh must be cheap:
 - `--rebuild` drops the cache and starts over (e.g. after a prompt or
   model change). `--cached` prints without any LLM access.
 
+### Models
+
+Map and reduce take separate models; **both default to the smart model**
+(`RECAP_MODEL` → `SHELLM_MODEL`). The stages have different demands:
+
+- *Map* is compression — high call volume (scales with log length
+  forever), modest skill required. `RECAP_MAP_MODEL` / `--map-model`
+  exists so it can be dropped to a cheap model if cost ever matters.
+  Note that episodes are cached forever, so a cheap map model's output
+  quality is locked in until a `--rebuild`.
+- *Reduce* is synthesis — one call over a couple KB of episode summaries,
+  and it produces the arc/themes you actually read first. Keep it smart
+  (`RECAP_REDUCE_MODEL` / `--reduce-model` to override).
+
 Cost intuition: a 2,000-step day ≈ 1,000 filtered steps ≈ 10 window calls
-plus 1 reduce call on the fast model (`RECAP_MODEL` →
-`SHELLM_FAST_MODEL` → `SHELLM_MODEL`).
+plus 1 reduce call — roughly 50k input tokens total, i.e. cents on a
+Sonnet-class model.
 
 ### Concurrency & safety
 
@@ -146,5 +178,10 @@ Standard shape: the CLI owns the logic, the web layer moves bytes.
   week?" (very Headlong: the recap is a compressed self-narrative).
 - **Hierarchical reduce**: when episodes number in the hundreds, add a
   second map level (episode groups → chapters) before the theme reduce.
+- **Semantic window boundaries**: gap-aware cutting covers the natural
+  seams; LLM-chosen or embedding-based cut points would add calls and
+  complexity for marginal gain, since the reduce already smooths over
+  imperfect boundaries. Revisit only if episode titles feel consistently
+  mid-thought.
 - **Sub-trajectory recaps**: the tool already takes any trajectory id;
   the web tab currently only surfaces the root mind log.

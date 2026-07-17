@@ -21,12 +21,20 @@ note() { [[ "$QUIET" -eq 1 ]] || printf 'recap: %s\n' "$*" >&2; }
 
 TRAJ_DIR="${TRAJ_DIR:-}"
 TRAJ_ID_ARG=""
-WINDOW=100          # filtered steps per episode
+WINDOW=100          # max filtered steps per episode
+GAP_MINUTES=30      # prefer to cut windows at time gaps at least this long
+MIN_GAP_WINDOW=10   # never gap-cut a window smaller than this
+MAX_WINDOW_BYTES="${RECAP_MAX_WINDOW_BYTES:-60000}"  # token-budget guard
 MIN_TAIL=15         # don't summarize a trailing partial window smaller than this
 MODE="auto"         # auto | cached | rebuild
 OUTPUT="text"       # text | json
 QUIET=0
-MODEL="${RECAP_MODEL:-${SHELLM_FAST_MODEL:-${SHELLM_MODEL:-claude-sonnet-4-5-20250929}}}"
+# Map (windows -> episodes) and reduce (episodes -> themes) take separate
+# models; both default to the smart model. Set RECAP_MAP_MODEL to a cheap
+# model if map volume ever becomes a cost concern.
+_DEFAULT_MODEL="${RECAP_MODEL:-${SHELLM_MODEL:-claude-sonnet-4-5-20250929}}"
+MAP_MODEL="${RECAP_MAP_MODEL:-$_DEFAULT_MODEL}"
+REDUCE_MODEL="${RECAP_REDUCE_MODEL:-$_DEFAULT_MODEL}"
 
 # Step types that carry narrative signal; everything else (idle, reasoning,
 # shell-output, prompt echoes of sub-runs...) is noise at recap altitude.
@@ -41,14 +49,21 @@ Usage:
 
 Options:
   --traj_dir DIR      Trajectories root (default: $TRAJ_DIR)
-  --window N          Filtered steps per episode window (default: 100)
+  --window N          Max filtered steps per episode window (default: 100)
+  --gap-minutes N     Prefer window cuts at time gaps >= N minutes (default: 30;
+                      0 disables gap-aware cutting)
   --cached            Print the existing recap; never call the LLM
   --rebuild           Drop the cache and re-summarize everything
   --json              Emit {"themes":..., "episodes":[...]} JSON
-  --model MODEL       LLM for summarization
-                      (default: $RECAP_MODEL, $SHELLM_FAST_MODEL, $SHELLM_MODEL)
+  --model MODEL       LLM for both stages (default: $RECAP_MODEL, $SHELLM_MODEL)
+  --map-model MODEL   LLM for window summaries only ($RECAP_MAP_MODEL)
+  --reduce-model MODEL  LLM for the theme reduction only ($RECAP_REDUCE_MODEL)
   -q, --quiet         No progress chatter on stderr
   -h, --help          Show this help
+
+Windows close at the first of: a time gap of --gap-minutes (so episodes align
+with the agent's natural sessions), --window steps, or ~60KB of text
+($RECAP_MAX_WINDOW_BYTES).
 
 Default behavior refreshes the cache incrementally (only new steps get
 summarized), then prints. Cache lives in <traj-dir>/recap/.
@@ -63,10 +78,15 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --traj_dir) TRAJ_DIR="${2:?--traj_dir requires DIR}"; shift 2 ;;
         --window)   WINDOW="${2:?--window requires N}"; shift 2 ;;
+        --gap-minutes) GAP_MINUTES="${2:?--gap-minutes requires N}"; shift 2 ;;
         --cached)   MODE="cached"; shift ;;
         --rebuild)  MODE="rebuild"; shift ;;
         --json)     OUTPUT="json"; shift ;;
-        --model)    MODEL="${2:?--model requires MODEL}"; shift 2 ;;
+        --model)
+            MAP_MODEL="${2:?--model requires MODEL}"
+            REDUCE_MODEL="$2"; shift 2 ;;
+        --map-model)    MAP_MODEL="${2:?--map-model requires MODEL}"; shift 2 ;;
+        --reduce-model) REDUCE_MODEL="${2:?--reduce-model requires MODEL}"; shift 2 ;;
         -q|--quiet) QUIET=1; shift ;;
         -h|--help)  usage ;;
         --version)  echo "recap $RECAP_VERSION"; exit 0 ;;
@@ -113,11 +133,32 @@ LOCK="$CACHE/.lock"
 # Rendering: trajectory lines -> TSV of (raw_line, step_id, ts, text)
 # ---------------------------------------------------------------------------
 
-# Renders signal steps one per line. Raw jsonl line numbers ride along so
-# incremental refresh can resume exactly where the last episode ended.
+# Renders signal steps one per line as TSV: raw jsonl line number (so
+# incremental refresh can resume exactly where the last episode ended),
+# short step id, display ts, prompt text, and UTC epoch-minutes (for
+# gap-aware window cuts; empty when the ts doesn't parse). Epoch math is
+# done by hand because mind logs mix timezones (+0800 thinkers, +0000
+# actor) and naive comparison would see 8-hour phantom gaps.
 _render_steps() {
     local from_line="${1:-1}"
     tail -n "+$from_line" "$JSONL" | jq -r --argjson keep "$KEEP_TYPES" --argjson off "$((from_line - 1))" '
+        def epoch_min:
+          (tostring
+           | capture("^(?<y>[0-9]{4})-(?<mo>[0-9]{2})-(?<d>[0-9]{2})T(?<h>[0-9]{2}):(?<mi>[0-9]{2})(:[0-9]{2})?([.][0-9]+)?(?<tz>Z|[+-][0-9]{4})?")
+           // null) as $c
+          | if $c == null then "" else
+              ($c.y|tonumber) as $y0 | ($c.mo|tonumber) as $m0 | ($c.d|tonumber) as $d0
+              | (if $m0 <= 2 then $y0 - 1 else $y0 end) as $y
+              | (if $m0 <= 2 then $m0 + 12 else $m0 end) as $m
+              | (365*$y + (($y/4)|floor) - (($y/100)|floor) + (($y/400)|floor)
+                 + (((153*($m+1))/5)|floor) + $d0) as $days
+              | (($days*1440 + ($c.h|tonumber)*60 + ($c.mi|tonumber))
+                 - (if ($c.tz != null and $c.tz != "Z" and $c.tz != null)
+                    then (if $c.tz[0:1] == "-" then -1 else 1 end)
+                         * ((($c.tz[1:3])|tonumber)*60 + (($c.tz[3:5])|tonumber))
+                    else 0 end))
+              | tostring
+            end;
         select(type == "object") |
         select(.type as $t | $keep | index($t)) |
         select(.source != "seed") |
@@ -133,9 +174,36 @@ _render_steps() {
                 + ": "
                 + ((.content // .command // .tldr // "") | tostring
                    | gsub("[\\t\\n\\r]+"; " ") | .[0:500])
-            )
+            ),
+            ((.ts // "") | epoch_min)
         ] | @tsv
     ' 2>/dev/null || true
+}
+
+# Emit "start end reason" window ranges over the rendered TSV. A window
+# closes at the first of: a time gap >= GAP_MINUTES before the next step
+# (only once the window has MIN_GAP_WINDOW steps), WINDOW steps, or
+# MAX_WINDOW_BYTES of text. The final range is tagged "eof".
+_window_ranges() {
+    awk -F'\t' -v maxsteps="$WINDOW" -v gapmin="$GAP_MINUTES" \
+        -v mingap="$MIN_GAP_WINDOW" -v maxbytes="$MAX_WINDOW_BYTES" '
+    {
+        if (gapmin > 0 && n >= mingap && $5 != "" && prevts != "" \
+            && ($5 - prevts) >= gapmin) {
+            print start, NR - 1, "gap"
+            n = 0; bytes = 0
+        }
+        if (n == 0) start = NR
+        n++
+        bytes += length($0)
+        if ($5 != "") prevts = $5
+        if (n >= maxsteps || bytes >= maxbytes) {
+            print start, NR, "size"
+            n = 0; bytes = 0
+        }
+    }
+    END { if (n > 0) print start, NR, "eof" }
+    ' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -143,10 +211,12 @@ _render_steps() {
 # ---------------------------------------------------------------------------
 
 _llm_json() {
-    # _llm_json <system_prompt> <user_text> — returns validated JSON or fails
-    local system="$1" user="$2" attempt raw cleaned
+    # _llm_json <model> <system_prompt> <user_text> [max_tokens]
+    # Returns validated JSON or fails. The cap must leave room for
+    # reasoning-channel tokens on models that bill them against max_tokens.
+    local model="$1" system="$2" user="$3" max_tokens="${4:-2048}" attempt raw cleaned
     for attempt in 1 2; do
-        raw=$(printf '%s' "$user" | llm -m "$MODEL" -t 2048 -s "$system") || { raw=""; }
+        raw=$(printf '%s' "$user" | llm -m "$model" -t "$max_tokens" -s "$system") || { raw=""; }
         cleaned=$(printf '%s\n' "$raw" | sed '/^```/d')
         if printf '%s' "$cleaned" | jq -e . >/dev/null 2>&1; then
             printf '%s' "$cleaned"
@@ -191,7 +261,7 @@ _summarize_window() {
 
     note "summarizing episode $idx ($n steps, $first_ts → $last_ts)"
     local body
-    body=$(_llm_json "$_WINDOW_SYSTEM" "$window_text") \
+    body=$(_llm_json "$MAP_MODEL" "$_WINDOW_SYSTEM" "$window_text") \
         || die "episode $idx: model did not produce valid JSON"
 
     jq -n -c \
@@ -201,7 +271,7 @@ _summarize_window() {
         --arg fs "$first_step" --arg ls "$last_step" \
         --arg fts "$first_ts" --arg lts "$last_ts" \
         --argjson n "$n" --argjson partial "$partial" \
-        --arg model "$MODEL" --arg created "$(date +%Y-%m-%dT%H:%M:%S)" '
+        --arg model "$MAP_MODEL" --arg created "$(date +%Y-%m-%dT%H:%M:%S)" '
         {idx: $idx, raw_start_line: $start, raw_end_line: $end,
          first_step: $fs, last_step: $ls, first_ts: $fts, last_ts: $lts,
          n_steps: $n, partial: $partial, model: $model, created: $created}
@@ -227,7 +297,7 @@ _reduce_themes() {
 
     note "reducing $n_episodes episodes into themes"
     local body
-    body=$(_llm_json "$_REDUCE_SYSTEM" "$episode_text") \
+    body=$(_llm_json "$REDUCE_MODEL" "$_REDUCE_SYSTEM" "$episode_text" 8192) \
         || die "theme reduction: model did not produce valid JSON"
 
     local last_end total_lines
@@ -238,7 +308,7 @@ _reduce_themes() {
         --argjson episodes "$n_episodes" \
         --argjson last_end "$last_end" \
         --argjson total "$total_lines" \
-        --arg model "$MODEL" --arg generated "$(date +%Y-%m-%dT%H:%M:%S)" '
+        --arg model "$REDUCE_MODEL" --arg generated "$(date +%Y-%m-%dT%H:%M:%S)" '
         {generated_at: $generated, model: $model,
          episodes: $episodes, raw_end_line: $last_end, total_lines: $total,
          arc: ($body.arc // ""), themes: ($body.themes // [])}
@@ -296,13 +366,14 @@ _refresh() {
     if [[ "$total" -eq 0 ]]; then
         note "no new steps since last recap"
     else
-        local offset=0 size partial
-        while [[ "$offset" -lt "$total" ]]; do
-            size=$WINDOW
+        # Windows close at gaps/size caps (complete) or end-of-data ("eof",
+        # provisional: partial if big enough, deferred if tiny).
+        local rstart rend reason size partial
+        while read -r rstart rend reason; do
+            [[ -n "$rstart" ]] || continue
+            size=$((rend - rstart + 1))
             partial=false
-            local remaining=$((total - offset))
-            if [[ "$remaining" -lt "$WINDOW" ]]; then
-                size=$remaining
+            if [[ "$reason" == "eof" ]]; then
                 # Skip a tiny tail entirely — it'll fold into the next refresh
                 if [[ "$size" -lt "$MIN_TAIL" && -s "$EPISODES" ]]; then
                     note "leaving $size-step tail for the next refresh"
@@ -312,12 +383,11 @@ _refresh() {
             fi
             # sed range, not tail|head: head's early exit would SIGPIPE tail
             # under pipefail once the render outgrows the pipe buffer
-            sed -n "$((offset + 1)),$((offset + size))p" "$rendered" \
+            sed -n "${rstart},${rend}p" "$rendered" \
                 | _summarize_window "$next_idx" "$partial"
             next_idx=$((next_idx + 1))
             new_episodes=$((new_episodes + 1))
-            offset=$((offset + size))
-        done
+        done <<< "$(_window_ranges "$rendered")"
     fi
 
     # Re-reduce when episodes changed or the reduction is missing
