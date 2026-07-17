@@ -119,7 +119,10 @@ if [[ "$LOCAL_ENV" -eq 1 ]]; then export SHELLM_THINKER_ENV="local"; fi
 
 # --- Cleanup on exit: stop thinkers, remove session Docker containers ------
 cleanup() {
-    thinkers stop >/dev/null 2>&1 || true
+    # --force: this harness wants the hard cutoff — it immediately snapshots
+    # the trajectory and tears down session containers, so draining steps
+    # would race both.
+    thinkers stop --force >/dev/null 2>&1 || true
     # Defense in depth: bin/thinkers sweeps leaked tail feeders on stop, but
     # a hard-killed session can still strand them; ours are precisely
     # identifiable by this identity's traj dir.
@@ -153,7 +156,7 @@ printf '▶ Mind running for %ss — watch with: traj tail -f --traj_dir %s %s\n
 sleep "$DURATION_SECS"
 
 printf '▶ Stopping thinkers\n' >&2
-thinkers stop || true
+thinkers stop --force || true  # hard session boundary: eval snapshot follows immediately
 ended_at=$(date +%Y-%m-%dT%H:%M:%S)
 
 # --- Locate trajectory file and record the session -------------------------

@@ -101,7 +101,7 @@ terraform deploy writes this drop-in automatically.)
 | Task | Command |
 |---|---|
 | Logs | `journalctl -u shellm-web -f` |
-| Restart web server (agents keep running) | `sudo systemctl restart shellm-web` |
+| Restart web server (agents keep running — the unit's `KillMode=process` signals only the server; stopping the service doesn't stop agents either) | `sudo systemctl restart shellm-web` |
 | Stop every agent process | `sudo -u shellm /opt/shellm/app/bin/shellm-killall` |
 | Update to latest code | see below; or click the navbar build stamp → "Pull latest & restart" (needs `SHELLM_WEB_SELF_UPDATE=1` in the unit, which the shipped unit sets) |
 | View-only mode | add `Environment="SHELLM_WEB_READONLY=1"` to the override.conf drop-in (see §4) |

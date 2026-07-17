@@ -662,45 +662,128 @@ cmd_start() {
     fi
 }
 
+# Wait for pids to exit on their own (up to timeout seconds), then escalate
+# TERM -> KILL on survivors. Defensive style: this runs detached under
+# set -e, so any bare failing command would silently kill the reaper.
+_wait_or_kill() {
+    local timeout="$1"; shift
+    local deadline=$(( $(date +%s) + timeout ))
+    local p alive
+    while :; do
+        alive=0
+        for p in "$@"; do
+            if kill -0 "$p" 2>/dev/null; then alive=1; break; fi
+        done
+        [[ "$alive" -eq 0 ]] && return 0
+        if [[ $(date +%s) -ge "$deadline" ]]; then
+            for p in "$@"; do
+                if kill -0 "$p" 2>/dev/null; then _kill_tree "$p" TERM; fi
+            done
+            sleep 1
+            for p in "$@"; do
+                if kill -0 "$p" 2>/dev/null; then _kill_tree "$p" KILL; fi
+            done
+            return 0
+        fi
+        sleep 2
+    done
+}
+
+# Detached reaper for one thinker: let in-flight steps finish (a mid-flight
+# actor step gets to append its observation instead of leaving a dangling
+# action in the mind log), then run the stop script and clean up. Detached
+# so `thinkers stop` — and the web request behind it — returns immediately;
+# fds are redirected so a captured stdout can't keep the caller alive.
+_drain_then_finish() {
+    local run_dir="$1" thinker_dir="$2" name="$3" timeout="$4"; shift 4
+    (
+        _wait_or_kill "$timeout" "$@"
+        if [[ -x "$thinker_dir/stop" ]]; then "$thinker_dir/stop" || true; fi
+        rm -f "$run_dir/thinkers/$name.pid"
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
+# Detached reaper for stop-all: drain every in-flight step, then run all
+# stop scripts and clear the step ledger.
+_drain_all_then_finish() {
+    local run_dir="$1" timeout="$2"; shift 2
+    (
+        _wait_or_kill "$timeout" "$@"
+        local thinker_dir
+        while IFS= read -r thinker_dir; do
+            if [[ -x "$thinker_dir/stop" ]]; then "$thinker_dir/stop" || true; fi
+            rm -f "$run_dir/thinkers/$(basename "$thinker_dir").pid"
+        done < <(_list_thinker_dirs)
+        rm -f "$run_dir/step_pids"
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
 cmd_stop() {
     _require_env
 
     local run_dir="$IDENTITY_DIR/run"
+    local force=0 drain_timeout="${THINKERS_DRAIN_TIMEOUT:-180}"
+    local names=()
 
-    if [[ $# -gt 0 ]]; then
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            --drain-timeout)
+                drain_timeout="${2:?--drain-timeout requires seconds}"; shift 2 ;;
+            -*) die "stop: unknown option: $1" ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+    [[ "$drain_timeout" =~ ^[0-9]+$ ]] || die "stop: --drain-timeout must be a number of seconds"
+
+    # Default is a drain stop: deactivate (no new triggers), let in-flight
+    # steps finish, escalate to kill only after --drain-timeout. --force
+    # kills in-flight steps immediately (the old behavior).
+
+    if [[ ${#names[@]} -gt 0 ]]; then
         # --- Stop named thinkers ---
         local name
-        for name in "$@"; do
+        for name in "${names[@]}"; do
             local thinker_dir="$THINKERS_DIR/$name"
             [[ -d "$thinker_dir" ]] || die "Thinker not found: $name"
 
-            # Remove from active_thinkers
+            # Deactivate first: the dispatcher stops routing new triggers
             if [[ -f "$run_dir/active_thinkers" ]]; then
                 grep -vx "$name" "$run_dir/active_thinkers" > "$run_dir/active_thinkers.tmp" 2>/dev/null || true
                 mv "$run_dir/active_thinkers.tmp" "$run_dir/active_thinkers"
             fi
 
-            # Kill running steps for this thinker
-            local step_pids_file="$run_dir/step_pids"
-            if [[ -f "$step_pids_file" ]]; then
-                local step_pid _step_name
+            # Collect this thinker's live in-flight steps
+            local pids=() step_pid _step_name
+            if [[ -f "$run_dir/step_pids" ]]; then
                 while read -r step_pid _step_name; do
                     if [[ "$_step_name" == "$name" && -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
-                        _kill_tree "$step_pid" TERM
+                        pids+=("$step_pid")
                     fi
-                done < "$step_pids_file"
+                done < "$run_dir/step_pids"
             fi
 
-            # Run stop script if present
-            if [[ -x "$thinker_dir/stop" ]]; then
-                "$thinker_dir/stop" || true
+            if [[ ${#pids[@]} -eq 0 || "$force" -eq 1 ]]; then
+                local p
+                for p in ${pids[@]+"${pids[@]}"}; do
+                    _kill_tree "$p" TERM
+                done
+                if [[ -x "$thinker_dir/stop" ]]; then
+                    "$thinker_dir/stop" || true
+                fi
+                rm -f "$run_dir/thinkers/$name.pid"
+                printf 'Stopped thinker: %s\n' "$name" >&2
+            else
+                _drain_then_finish "$run_dir" "$thinker_dir" "$name" "$drain_timeout" "${pids[@]}"
+                printf 'Stopped thinker: %s (draining %d in-flight step(s), max %ss)\n' \
+                    "$name" "${#pids[@]}" "$drain_timeout" >&2
             fi
-            rm -f "$run_dir/thinkers/$name.pid"
-
-            printf 'Stopped thinker: %s\n' "$name" >&2
         done
 
-        # If no active thinkers left, stop dispatcher entirely
+        # If no active thinkers left, stop dispatcher entirely (draining
+        # steps are independent processes and finish on their own)
         local remaining
         remaining=$(grep -c . "$run_dir/active_thinkers" 2>/dev/null) || remaining=0
         if [[ "$remaining" -eq 0 ]]; then
@@ -713,29 +796,41 @@ cmd_stop() {
     # --- Stop all (no name given) ---
     _stop_dispatcher
 
-    # Kill in-flight step processes (and their entire process trees)
+    # Collect all live in-flight steps
     local step_pids_file="$run_dir/step_pids"
+    local all_pids=() step_pid _step_name
     if [[ -f "$step_pids_file" ]]; then
-        local step_pid _step_name
-        local killed=0
         while read -r step_pid _step_name; do
             if [[ -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
-                _kill_tree "$step_pid" TERM
-                killed=$((killed + 1))
+                all_pids+=("$step_pid")
             fi
         done < "$step_pids_file"
-        if [[ "$killed" -gt 0 ]]; then
-            printf 'Killed %d in-flight step process(es).\n' "$killed" >&2
-            # Give them a moment, then force-kill survivors
-            sleep 1
-            while read -r step_pid _step_name; do
-                if [[ -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
-                    _kill_tree "$step_pid" KILL
-                fi
-            done < "$step_pids_file"
-        fi
-        rm -f "$step_pids_file"
     fi
+
+    if [[ ${#all_pids[@]} -gt 0 && "$force" -eq 0 ]]; then
+        _drain_all_then_finish "$run_dir" "$drain_timeout" "${all_pids[@]}"
+        rm -f "$run_dir/active_thinkers"
+        printf 'All thinkers deactivated — draining %d in-flight step(s) (max %ss), stop scripts run after.\n' \
+            "${#all_pids[@]}" "$drain_timeout" >&2
+        return
+    fi
+
+    # Force (or nothing in flight): kill immediately
+    if [[ ${#all_pids[@]} -gt 0 ]]; then
+        local p
+        for p in "${all_pids[@]}"; do
+            _kill_tree "$p" TERM
+        done
+        printf 'Killed %d in-flight step process(es).\n' "${#all_pids[@]}" >&2
+        # Give them a moment, then force-kill survivors
+        sleep 1
+        for p in "${all_pids[@]}"; do
+            if kill -0 "$p" 2>/dev/null; then
+                _kill_tree "$p" KILL
+            fi
+        done
+    fi
+    rm -f "$step_pids_file"
 
     # Call stop scripts on thinkers that have them
     local thinker_dir
@@ -1063,7 +1158,12 @@ thinkers — Modular reactive thought process manager
 Usage:
   thinkers start [--no-self-trigger] [name ...]
                                Start all thinkers (or specific ones by name)
-  thinkers stop [name ...]     Stop all thinkers (or specific ones by name)
+  thinkers stop [name ...] [--force] [--drain-timeout N]
+                               Stop all thinkers (or specific ones by name).
+                               Default is a drain stop: no new triggers, but
+                               in-flight steps finish (killed only after
+                               --drain-timeout, default 180s / $THINKERS_DRAIN_TIMEOUT).
+                               --force kills in-flight steps immediately.
   thinkers status              Show dispatcher and per-thinker status
   thinkers list                List installed thinkers with subscriptions
   thinkers step <name>          Manually trigger a thinker's step

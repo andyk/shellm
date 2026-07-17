@@ -161,11 +161,12 @@ export function startThinkers(
 
 export function stopThinkers(
   identityId: string,
-  names: string[] = []
+  names: string[] = [],
+  force = false
 ): Promise<ControlResult> {
   return postJson(
     `/api/identities/${encodeURIComponent(identityId)}/thinkers/stop`,
-    { names }
+    { names, force }
   );
 }
 

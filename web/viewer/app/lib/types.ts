@@ -39,7 +39,13 @@ export interface Identity {
   steps_in_flight: number;
 }
 
-export type ThinkerState = "stopped" | "idle" | "active" | "running" | "disabled";
+export type ThinkerState =
+  | "stopped"
+  | "idle"
+  | "active"
+  | "running"
+  | "draining"
+  | "disabled";
 
 export interface ThinkerInfo {
   name: string;

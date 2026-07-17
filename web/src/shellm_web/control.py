@@ -167,11 +167,17 @@ def thinkers_start(
     return _result("start", names, proc)
 
 
-def thinkers_stop(root: Path, identity: IdentityInfo, names: list[str]) -> dict:
+def thinkers_stop(
+    root: Path, identity: IdentityInfo, names: list[str], force: bool = False
+) -> dict:
+    """Default is the CLI's drain stop (deactivate now, in-flight steps
+    finish in a detached reaper); force kills them immediately."""
+    args = ["stop"]
+    if force:
+        args.append("--force")
+    args.extend(names)
     with identity_lock(identity.id):
-        proc = run_cli(
-            _wrap("thinkers", "stop", *names), identity_env(identity, root), root
-        )
+        proc = run_cli(_wrap("thinkers", *args), identity_env(identity, root), root)
     _raise_for_failure(proc)
     return _result("stop", names, proc)
 

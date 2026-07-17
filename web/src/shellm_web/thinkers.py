@@ -110,13 +110,16 @@ def thinkers_status(identity_dir: Path) -> dict:
         steps_in_flight = live_steps.get(name, 0)
 
         # Precedence mirrors cmd_status: disabled marker wins, then a live
-        # per-thinker daemon pid, then stopped (dispatcher down or not
-        # active), then active/idle.
+        # per-thinker daemon pid, then draining (deactivated but steps still
+        # finishing after a drain stop), then stopped (dispatcher down or
+        # not active), then active/idle.
         daemon_alive, daemon_pid = pid_alive(run_dir / "thinkers" / f"{name}.pid")
         if is_disabled(thinker_dir):
             state = "disabled"
         elif daemon_alive:
             state = "running"
+        elif (not dispatcher_alive or name not in active_set) and steps_in_flight > 0:
+            state = "draining"
         elif not dispatcher_alive or name not in active_set:
             state = "stopped"
         elif steps_in_flight > 0:

@@ -94,6 +94,7 @@ def _iso(ts: float | None) -> str | None:
 class ThinkerActionBody(BaseModel):
     names: list[str] = []
     no_self_trigger: bool = False
+    force: bool = False  # stop only: kill in-flight steps instead of draining
 
 
 class ChatSendBody(BaseModel):
@@ -476,7 +477,7 @@ def create_app(
         _require_controls()
         identity = _identity_or_404(root, identity_id)
         _checked_thinker_names(identity, body.names)
-        return control.thinkers_stop(root, identity, body.names)
+        return control.thinkers_stop(root, identity, body.names, body.force)
 
     @app.post("/api/identities/{identity_id}/thinkers/{name}/step", status_code=202)
     def thinkers_step(identity_id: str, name: str) -> dict:

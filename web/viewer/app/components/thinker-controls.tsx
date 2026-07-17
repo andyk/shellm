@@ -27,13 +27,15 @@ export function useThinkerMutation(identityId: string) {
     mutationFn: ({
       action,
       names,
+      force,
     }: {
       action: "start" | "stop" | "step";
       names: string[];
+      force?: boolean;
     }): Promise<ControlResult> => {
       if (action === "step") return stepThinker(identityId, names[0]);
       if (action === "start") return startThinkers(identityId, names);
-      return stopThinkers(identityId, names);
+      return stopThinkers(identityId, names, force ?? false);
     },
     onSuccess: (result) => {
       const target = result.names.length ? result.names.join(", ") : "all thinkers";
@@ -83,16 +85,20 @@ export function StartStopButtons({
         variant="outline"
         size="sm"
         disabled={mutation.isPending}
-        onClick={() => {
+        title="Drain stop: no new triggers, in-flight steps finish (shift-click: kill in-flight steps immediately)"
+        onClick={(event) => {
+          const force = event.shiftKey;
           if (
             isAll &&
             !window.confirm(
-              "Stop all thinkers? In-flight steps will be killed."
+              force
+                ? "Force-stop all thinkers? In-flight steps will be killed."
+                : "Stop all thinkers? In-flight steps finish, then everything goes quiet."
             )
           ) {
             return;
           }
-          mutation.mutate({ action: "stop", names });
+          mutation.mutate({ action: "stop", names, force });
         }}
       >
         <Square className="size-3" />

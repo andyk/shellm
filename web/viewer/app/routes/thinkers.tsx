@@ -65,12 +65,16 @@ const STATE_STYLES: Record<ThinkerState, string> = {
   active: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300",
   running:
     "bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300",
+  draining:
+    "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   disabled: "border border-dashed bg-transparent text-muted-foreground",
 };
 
 function StateBadge({ thinker }: { thinker: ThinkerInfo }) {
   let label: string = thinker.state;
   if (thinker.state === "active") label = `active (${thinker.steps_in_flight})`;
+  if (thinker.state === "draining")
+    label = `draining (${thinker.steps_in_flight})`;
   if (thinker.state === "running" && thinker.pid != null)
     label = `running (PID ${thinker.pid})`;
   return <Badge className={STATE_STYLES[thinker.state]}>{label}</Badge>;

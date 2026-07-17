@@ -30,6 +30,12 @@ Environment="SHELLM_WEB_SELF_UPDATE=1"
 ExecStart=@SHELLM_HOME@/app/bin/shellm-web @SHELLM_HOME@/app --host 127.0.0.1 --port 8080
 Restart=always
 RestartSec=3
+# Signal only the main process on stop/restart. Dispatchers and thinker
+# steps are spawned into this service's cgroup, and the default
+# KillMode=control-group would kill every agent on any restart (including
+# the dash's self-update). Agents have their own kill switches: the UI's
+# Kill All button and bin/shellm-killall.
+KillMode=process
 
 # The agent needs broad shell access by design — do NOT run anything else on
 # this machine. Kill switches: `systemctl stop shellm-web` stops the control
