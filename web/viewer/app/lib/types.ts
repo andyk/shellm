@@ -114,6 +114,46 @@ export interface ImportResult {
   imported: { id: string; name: string }[];
 }
 
+export interface RecapStepRef {
+  step: string;
+  note: string;
+}
+
+export interface RecapTheme {
+  name: string;
+  description: string;
+  episodes: number[];
+  key_steps: RecapStepRef[];
+}
+
+export interface RecapEpisode {
+  idx: number;
+  first_step: string;
+  last_step: string;
+  first_ts: string;
+  last_ts: string;
+  n_steps: number;
+  partial: boolean;
+  title: string;
+  summary: string;
+  themes: string[];
+  notable_steps: RecapStepRef[];
+}
+
+export interface Recap {
+  identity: { id: string; name: string };
+  available: boolean;
+  refreshing: boolean;
+  new_steps?: number;
+  themes?: {
+    generated_at: string;
+    model: string;
+    arc: string;
+    themes: RecapTheme[];
+  };
+  episodes?: RecapEpisode[];
+}
+
 export interface IdentityStatus {
   live: boolean;
   pid_alive: boolean;

@@ -23,6 +23,7 @@ shellm takes this idea seriously. It's four small, composable tools — all pure
 | **shellm** | The core loop — sends context to an LLM, executes the bash it writes back, repeats |
 | **llm** | Minimal multi-provider LLM CLI — Anthropic, OpenAI, and Gemini behind one interface |
 | **shellm-explore** | Visualize run trees and generate LLM-powered reports on what a run did and why |
+| **recap** | Summarize a trajectory into themes + episodes with step references (cached, incremental) |
 | **shelly** | Interactive conversational agent with identity, memory, and skills |
 | **mem** | CLI memory store — markdown files with YAML frontmatter, no database |
 | **skills** | Skill manager — install, create, and use SKILL.md-based agent abilities |

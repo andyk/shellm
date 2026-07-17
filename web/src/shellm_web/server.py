@@ -1,5 +1,6 @@
 """FastAPI app factory for the shellm web viewer."""
 
+import json
 import logging
 import os
 import re
@@ -102,6 +103,10 @@ class ChatSendBody(BaseModel):
 
 class NewIdentityBody(BaseModel):
     name: str
+
+
+class RecapRefreshBody(BaseModel):
+    rebuild: bool = False
 
 
 class KillallBody(BaseModel):
@@ -395,6 +400,52 @@ def create_app(
         if not memory_path.is_file():
             raise HTTPException(status_code=404, detail="Memory not found")
         return {"name": name, "content": memory_path.read_text(encoding="utf-8", errors="replace")}
+
+    @app.get("/api/identities/{identity_id}/recap")
+    def identity_recap(identity_id: str) -> dict:
+        """Serve the cached recap (bin/recap output) for the mind log."""
+        identity = _identity_or_404(root, identity_id)
+        traj_dir = _root_traj_dir_or_404(identity)
+        cache = traj_dir / "recap"
+        refreshing = (cache / ".lock").is_dir()
+        base = {
+            "identity": {"id": identity.id, "name": identity.name},
+            "refreshing": refreshing,
+        }
+        themes_file = cache / "themes.json"
+        episodes_file = cache / "episodes.jsonl"
+        if not themes_file.is_file():
+            return {**base, "available": False}
+        try:
+            themes = json.loads(themes_file.read_text())
+            episodes = [
+                json.loads(line)
+                for line in episodes_file.read_text().splitlines()
+                if line.strip()
+            ]
+        except (OSError, ValueError):
+            return {**base, "available": False}
+        total_lines = _count_steps(traj_dir / "trajectory.jsonl")
+        return {
+            **base,
+            "available": True,
+            "themes": themes,
+            "episodes": episodes,
+            "new_steps": max(0, total_lines - int(themes.get("raw_end_line") or 0)),
+        }
+
+    @app.post("/api/identities/{identity_id}/recap/refresh", status_code=202)
+    def identity_recap_refresh(identity_id: str, body: RecapRefreshBody) -> dict:
+        _require_controls()
+        identity = _identity_or_404(root, identity_id)
+        _root_traj_dir_or_404(identity)
+        cache_lock = None
+        traj_dir = discovery.find_root_traj_dir(identity)
+        if traj_dir is not None:
+            cache_lock = traj_dir / "recap" / ".lock"
+        if cache_lock is not None and cache_lock.is_dir():
+            raise HTTPException(status_code=409, detail="A recap is already running")
+        return control.recap_refresh(root, identity, body.rebuild)
 
     @app.get("/api/identities/{identity_id}/thinkers")
     def identity_thinkers(identity_id: str) -> dict:

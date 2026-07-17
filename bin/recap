@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# recap — Summarize a trajectory into themes + episodes with step references
+#
+# Map-reduce over a mind log (or any trajectory): filter out noise steps,
+# chunk what's left into windows, LLM-summarize each window into an
+# "episode" (title, summary, themes, notable steps), then reduce the
+# episodes into top-level themes and a narrative arc. Everything is cached
+# under <traj-dir>/recap/ and refreshed incrementally, so re-running after
+# the agent has lived more life only summarizes the new steps.
+
+RECAP_VERSION="0.1.0"
+
+die() { echo "recap: error: $*" >&2; exit 1; }
+note() { [[ "$QUIET" -eq 1 ]] || printf 'recap: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Defaults & argument parsing
+# ---------------------------------------------------------------------------
+
+TRAJ_DIR="${TRAJ_DIR:-}"
+TRAJ_ID_ARG=""
+WINDOW=100          # filtered steps per episode
+MIN_TAIL=15         # don't summarize a trailing partial window smaller than this
+MODE="auto"         # auto | cached | rebuild
+OUTPUT="text"       # text | json
+QUIET=0
+MODEL="${RECAP_MODEL:-${SHELLM_FAST_MODEL:-${SHELLM_MODEL:-claude-sonnet-4-5-20250929}}}"
+
+# Step types that carry narrative signal; everything else (idle, reasoning,
+# shell-output, prompt echoes of sub-runs...) is noise at recap altitude.
+KEEP_TYPES='["thought","action","observation","message","feedback","final","shellm-run","merge"]'
+
+usage() {
+    cat <<'EOF'
+recap — Summarize a trajectory into themes + episodes with step references
+
+Usage:
+  recap [ID] [options]              ID: traj UUID/hex prefix (default: $TRAJ_ID)
+
+Options:
+  --traj_dir DIR      Trajectories root (default: $TRAJ_DIR)
+  --window N          Filtered steps per episode window (default: 100)
+  --cached            Print the existing recap; never call the LLM
+  --rebuild           Drop the cache and re-summarize everything
+  --json              Emit {"themes":..., "episodes":[...]} JSON
+  --model MODEL       LLM for summarization
+                      (default: $RECAP_MODEL, $SHELLM_FAST_MODEL, $SHELLM_MODEL)
+  -q, --quiet         No progress chatter on stderr
+  -h, --help          Show this help
+
+Default behavior refreshes the cache incrementally (only new steps get
+summarized), then prints. Cache lives in <traj-dir>/recap/.
+
+Inside an identity shell, plain `recap` summarizes the identity's mind log.
+Step references print as [8-char ids] that resolve in the web dash mind log.
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --traj_dir) TRAJ_DIR="${2:?--traj_dir requires DIR}"; shift 2 ;;
+        --window)   WINDOW="${2:?--window requires N}"; shift 2 ;;
+        --cached)   MODE="cached"; shift ;;
+        --rebuild)  MODE="rebuild"; shift ;;
+        --json)     OUTPUT="json"; shift ;;
+        --model)    MODEL="${2:?--model requires MODEL}"; shift 2 ;;
+        -q|--quiet) QUIET=1; shift ;;
+        -h|--help)  usage ;;
+        --version)  echo "recap $RECAP_VERSION"; exit 0 ;;
+        -*)         die "Unknown option: $1" ;;
+        *)
+            [[ -n "$TRAJ_ID_ARG" ]] && die "Usage: recap [ID] [options]"
+            TRAJ_ID_ARG="$1"; shift ;;
+    esac
+done
+
+[[ "$WINDOW" =~ ^[0-9]+$ && "$WINDOW" -ge 10 ]] || die "--window must be a number >= 10"
+
+# ---------------------------------------------------------------------------
+# Resolve the trajectory directory
+# ---------------------------------------------------------------------------
+
+_resolve_traj_dir() {
+    local id="${TRAJ_ID_ARG:-${TRAJ_ID:-}}"
+    [[ -n "$TRAJ_DIR" ]] || die "no trajectory: set TRAJ_DIR (+ TRAJ_ID) or pass --traj_dir DIR <ID>"
+    [[ -d "$TRAJ_DIR" ]] || die "not a directory: $TRAJ_DIR"
+    [[ -n "$id" ]] || die "no trajectory ID: pass one or set TRAJ_ID"
+
+    # Accept a full dir path, a UUID, or a hex prefix
+    if [[ -f "$id/trajectory.jsonl" ]]; then
+        (cd "$id" && pwd)
+        return
+    fi
+    local prefix="${id%%-*}"
+    local match
+    # `|| true`: head's early exit SIGPIPEs find under pipefail
+    match=$(find "$TRAJ_DIR" -maxdepth 4 -type d -name "${prefix}*" 2>/dev/null | head -1) || true
+    [[ -n "$match" && -f "$match/trajectory.jsonl" ]] || die "no trajectory matching: $id (under $TRAJ_DIR)"
+    (cd "$match" && pwd)
+}
+
+RUN_DIR=$(_resolve_traj_dir)
+JSONL="$RUN_DIR/trajectory.jsonl"
+CACHE="$RUN_DIR/recap"
+EPISODES="$CACHE/episodes.jsonl"
+THEMES="$CACHE/themes.json"
+LOCK="$CACHE/.lock"
+
+# ---------------------------------------------------------------------------
+# Rendering: trajectory lines -> TSV of (raw_line, step_id, ts, text)
+# ---------------------------------------------------------------------------
+
+# Renders signal steps one per line. Raw jsonl line numbers ride along so
+# incremental refresh can resume exactly where the last episode ended.
+_render_steps() {
+    local from_line="${1:-1}"
+    tail -n "+$from_line" "$JSONL" | jq -r --argjson keep "$KEEP_TYPES" --argjson off "$((from_line - 1))" '
+        select(type == "object") |
+        select(.type as $t | $keep | index($t)) |
+        select(.source != "seed") |
+        [
+            (input_line_number + $off),
+            ((.step_id // "?") | tostring | .[0:8]),
+            ((.ts // "") | tostring | .[0:16]),
+            (
+                "[" + ((.step_id // "?") | tostring | .[0:8]) + "] "
+                + .type
+                + (if .source then "(" + .source + ")" else "" end)
+                + (if .from then " " + (.from|tostring) + "→" + ((.to // "?")|tostring) else "" end)
+                + ": "
+                + ((.content // .command // .tldr // "") | tostring
+                   | gsub("[\\t\\n\\r]+"; " ") | .[0:500])
+            )
+        ] | @tsv
+    ' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# LLM calls
+# ---------------------------------------------------------------------------
+
+_llm_json() {
+    # _llm_json <system_prompt> <user_text> — returns validated JSON or fails
+    local system="$1" user="$2" attempt raw cleaned
+    for attempt in 1 2; do
+        raw=$(printf '%s' "$user" | llm -m "$MODEL" -t 2048 -s "$system") || { raw=""; }
+        cleaned=$(printf '%s\n' "$raw" | sed '/^```/d')
+        if printf '%s' "$cleaned" | jq -e . >/dev/null 2>&1; then
+            printf '%s' "$cleaned"
+            return 0
+        fi
+        note "model returned invalid JSON (attempt $attempt), retrying"
+    done
+    return 1
+}
+
+_WINDOW_SYSTEM='You summarize one window of an AI agent'\''s mind log. Lines look like "[step-id] type(source): content". Reply with ONLY a JSON object, no markdown fences:
+{"title": "short episode title (<=8 words)",
+ "summary": "2-4 sentences: what the agent did, thought about, and how it went",
+ "themes": ["1-4 short kebab-case topics"],
+ "notable_steps": [{"step": "8-char id from the window", "note": "why it matters (<=15 words)"}]}
+Pick 3-6 notable steps. Use only step ids that literally appear in the window.'
+
+_REDUCE_SYSTEM='You are given numbered episode summaries covering an AI agent'\''s life log in chronological order. Reply with ONLY a JSON object, no markdown fences:
+{"arc": "1-2 paragraphs narrating the overall arc: what this agent has been up to, how its focus evolved, where it stands now",
+ "themes": [{"name": "short theme name",
+             "description": "2-3 sentences on this thread of activity",
+             "episodes": [episode numbers where it shows up],
+             "key_steps": [{"step": "8-char id taken from the episodes'\'' notable steps", "note": "<=15 words"}]}]}
+Give 3-8 themes, most prominent first. Use only step ids that appear in the input.'
+
+_summarize_window() {
+    # stdin: TSV rows of the window. Appends one episode object to $EPISODES.
+    local idx="$1" partial="$2"
+    local rows
+    rows=$(cat)
+    [[ -n "$rows" ]] || return 0
+
+    local first_line last_line first_step last_step first_ts last_ts n window_text
+    first_line=$(head -1 <<<"$rows" | cut -f1)
+    last_line=$(tail -1 <<<"$rows" | cut -f1)
+    first_step=$(head -1 <<<"$rows" | cut -f2)
+    last_step=$(tail -1 <<<"$rows" | cut -f2)
+    first_ts=$(head -1 <<<"$rows" | cut -f3)
+    last_ts=$(tail -1 <<<"$rows" | cut -f3)
+    n=$(wc -l <<<"$rows" | tr -d ' ')
+    window_text=$(cut -f4 <<<"$rows")
+
+    note "summarizing episode $idx ($n steps, $first_ts → $last_ts)"
+    local body
+    body=$(_llm_json "$_WINDOW_SYSTEM" "$window_text") \
+        || die "episode $idx: model did not produce valid JSON"
+
+    jq -n -c \
+        --argjson idx "$idx" \
+        --argjson body "$body" \
+        --argjson start "$first_line" --argjson end "$last_line" \
+        --arg fs "$first_step" --arg ls "$last_step" \
+        --arg fts "$first_ts" --arg lts "$last_ts" \
+        --argjson n "$n" --argjson partial "$partial" \
+        --arg model "$MODEL" --arg created "$(date +%Y-%m-%dT%H:%M:%S)" '
+        {idx: $idx, raw_start_line: $start, raw_end_line: $end,
+         first_step: $fs, last_step: $ls, first_ts: $fts, last_ts: $lts,
+         n_steps: $n, partial: $partial, model: $model, created: $created}
+        + {title: ($body.title // "untitled"),
+           summary: ($body.summary // ""),
+           themes: ($body.themes // []),
+           notable_steps: ($body.notable_steps // [])}
+    ' >> "$EPISODES"
+}
+
+_reduce_themes() {
+    local n_episodes
+    n_episodes=$(wc -l < "$EPISODES" | tr -d ' ')
+    [[ "$n_episodes" -gt 0 ]] || return 0
+
+    local episode_text
+    episode_text=$(jq -r '
+        "EPISODE \(.idx) [\(.first_ts) → \(.last_ts)] \(.title)\n"
+        + "  \(.summary)\n"
+        + "  themes: \(.themes | join(", "))\n"
+        + "  notable: " + ([.notable_steps[]? | "[\(.step)] \(.note)"] | join("; "))
+    ' "$EPISODES")
+
+    note "reducing $n_episodes episodes into themes"
+    local body
+    body=$(_llm_json "$_REDUCE_SYSTEM" "$episode_text") \
+        || die "theme reduction: model did not produce valid JSON"
+
+    local last_end total_lines
+    last_end=$(tail -1 "$EPISODES" | jq -r '.raw_end_line')
+    total_lines=$(wc -l < "$JSONL" | tr -d ' ')
+    jq -n \
+        --argjson body "$body" \
+        --argjson episodes "$n_episodes" \
+        --argjson last_end "$last_end" \
+        --argjson total "$total_lines" \
+        --arg model "$MODEL" --arg generated "$(date +%Y-%m-%dT%H:%M:%S)" '
+        {generated_at: $generated, model: $model,
+         episodes: $episodes, raw_end_line: $last_end, total_lines: $total,
+         arc: ($body.arc // ""), themes: ($body.themes // [])}
+    ' > "$THEMES.tmp" && mv "$THEMES.tmp" "$THEMES"
+}
+
+# ---------------------------------------------------------------------------
+# Refresh: summarize whatever the cache doesn't cover yet
+# ---------------------------------------------------------------------------
+
+_refresh() {
+    mkdir -p "$CACHE"
+
+    # One recap at a time per trajectory (web + CLI can race otherwise).
+    if [[ -d "$LOCK" ]]; then
+        # a crashed run leaves a stale lock; 30 min is far beyond a real run
+        if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]]; then
+            rmdir "$LOCK" 2>/dev/null || true
+        else
+            die "another recap is in progress (remove $LOCK if that's wrong)"
+        fi
+    fi
+    mkdir "$LOCK" || die "another recap is in progress (remove $LOCK if that's wrong)"
+    # shellcheck disable=SC2064
+    trap "rmdir '$LOCK' 2>/dev/null || true" EXIT
+
+    local from_line=1 next_idx=1
+    if [[ -s "$EPISODES" ]]; then
+        # Resume after the last complete episode; a trailing partial episode
+        # gets dropped and re-summarized now that more steps may exist.
+        local last partial
+        last=$(tail -1 "$EPISODES")
+        partial=$(jq -r '.partial' <<<"$last")
+        if [[ "$partial" == "true" ]]; then
+            from_line=$(jq -r '.raw_start_line' <<<"$last")
+            next_idx=$(jq -r '.idx' <<<"$last")
+            local trimmed
+            trimmed=$(mktemp)
+            sed '$d' "$EPISODES" > "$trimmed"   # portable "all but last line"
+            mv "$trimmed" "$EPISODES"
+        else
+            from_line=$(( $(jq -r '.raw_end_line' <<<"$last") + 1 ))
+            next_idx=$(( $(jq -r '.idx' <<<"$last") + 1 ))
+        fi
+    fi
+
+    local rendered
+    rendered=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$rendered'; rmdir '$LOCK' 2>/dev/null || true" EXIT
+    _render_steps "$from_line" > "$rendered"
+
+    local total new_episodes=0
+    total=$(wc -l < "$rendered" | tr -d ' ')
+    if [[ "$total" -eq 0 ]]; then
+        note "no new steps since last recap"
+    else
+        local offset=0 size partial
+        while [[ "$offset" -lt "$total" ]]; do
+            size=$WINDOW
+            partial=false
+            local remaining=$((total - offset))
+            if [[ "$remaining" -lt "$WINDOW" ]]; then
+                size=$remaining
+                # Skip a tiny tail entirely — it'll fold into the next refresh
+                if [[ "$size" -lt "$MIN_TAIL" && -s "$EPISODES" ]]; then
+                    note "leaving $size-step tail for the next refresh"
+                    break
+                fi
+                partial=true
+            fi
+            # sed range, not tail|head: head's early exit would SIGPIPE tail
+            # under pipefail once the render outgrows the pipe buffer
+            sed -n "$((offset + 1)),$((offset + size))p" "$rendered" \
+                | _summarize_window "$next_idx" "$partial"
+            next_idx=$((next_idx + 1))
+            new_episodes=$((new_episodes + 1))
+            offset=$((offset + size))
+        done
+    fi
+
+    # Re-reduce when episodes changed or the reduction is missing
+    if [[ "$new_episodes" -gt 0 || ! -s "$THEMES" ]]; then
+        _reduce_themes
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+_print_text() {
+    [[ -s "$THEMES" ]] || die "no recap yet — run without --cached to generate one"
+    jq -r '
+        "◆ recap — \(.episodes) episodes over \(.total_lines) steps · generated \(.generated_at) · \(.model)\n"
+    ' "$THEMES"
+    jq -r '.arc' "$THEMES"
+    printf '\nTHEMES\n'
+    jq -r '
+        .themes | to_entries[] |
+        "\(.key + 1). \(.value.name) — \(.value.description)"
+        + "\n     steps: " + ([.value.key_steps[]? | "[\(.step)] \(.note)"] | join("; "))
+        + "  (episodes \(.value.episodes | map(tostring) | join(",")))"
+    ' "$THEMES"
+    printf '\nEPISODES\n'
+    jq -r '
+        "\(.idx). \(.first_ts) → \(.last_ts)  \(.title)\(if .partial then " (partial)" else "" end)"
+        + "\n     \(.summary)"
+        + "\n     " + ([.notable_steps[]? | "[\(.step)] \(.note)"] | join("; "))
+    ' "$EPISODES"
+}
+
+_print_json() {
+    [[ -s "$THEMES" ]] || die "no recap yet — run without --cached to generate one"
+    jq -n \
+        --slurpfile themes "$THEMES" \
+        --slurpfile episodes <(jq -c . "$EPISODES") '
+        {themes: $themes[0], episodes: $episodes}
+    '
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+case "$MODE" in
+    rebuild)
+        rm -rf "$CACHE"
+        _refresh
+        ;;
+    auto)
+        _refresh
+        ;;
+    cached)
+        ;;
+esac
+
+if [[ "$OUTPUT" == "json" ]]; then
+    _print_json
+else
+    _print_text
+fi

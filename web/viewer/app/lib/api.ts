@@ -13,6 +13,7 @@ import type {
   LogTail,
   MemoryInfo,
   Mindlog,
+  Recap,
   SelfUpdateResult,
   SubTrajectory,
   ThinkersStatus,
@@ -129,6 +130,19 @@ export function fetchMemory(
   return getJson(
     `/api/identities/${encodeURIComponent(identityId)}/memories/${encodeURIComponent(name)}`
   );
+}
+
+export function fetchRecap(identityId: string): Promise<Recap> {
+  return getJson(`/api/identities/${encodeURIComponent(identityId)}/recap`);
+}
+
+export function refreshRecap(
+  identityId: string,
+  rebuild = false
+): Promise<{ ok: boolean }> {
+  return postJson(`/api/identities/${encodeURIComponent(identityId)}/recap/refresh`, {
+    rebuild,
+  });
 }
 
 export function fetchThinkers(identityId: string): Promise<ThinkersStatus> {

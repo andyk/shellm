@@ -191,6 +191,22 @@ def thinkers_step(root: Path, identity: IdentityInfo, name: str) -> dict:
     return {"ok": True, "action": "step", "names": [name]}
 
 
+def recap_refresh(root: Path, identity: IdentityInfo, rebuild: bool = False) -> dict:
+    """Fire-and-forget: recap makes one LLM call per window and can run for
+    minutes; its own .lock serializes concurrent refreshes."""
+    args = ["-q"] + (["--rebuild"] if rebuild else [])
+    subprocess.Popen(
+        _wrap("recap", *args),
+        env=identity_env(identity, root),
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"ok": True, "action": "recap-refresh", "rebuild": rebuild}
+
+
 def chat_send(root: Path, identity: IdentityInfo, content: str, from_name: str) -> dict:
     env = identity_env(identity, root)
     to_name = env["IDENTITY_NAME"]

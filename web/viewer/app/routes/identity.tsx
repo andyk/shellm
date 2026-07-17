@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { FoldVertical, UnfoldVertical } from "lucide-react";
 import { parseAsString, useQueryState } from "nuqs";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { FollowPin } from "~/components/follow-pin";
@@ -51,6 +51,8 @@ export default function IdentityPage() {
     "source",
     parseAsString.withDefault("all")
   );
+  // Deep link (?step=<id or prefix>) from recap step references and elsewhere
+  const [stepParam] = useQueryState("step", parseAsString.withDefault(""));
   const [expandAll, setExpandAll] = useState(false);
 
   const { data: status } = useQuery({
@@ -75,6 +77,45 @@ export default function IdentityPage() {
     () => (mindlog ? assembleStream(mindlog.steps, mindlog.runs) : []),
     [mindlog]
   );
+
+  useEffect(() => {
+    if (!stepParam || !mindlog) return;
+    const target = mindlog.steps.find((step) =>
+      step.step_id?.startsWith(stepParam)
+    );
+    if (!target) return;
+    // The step may render as its own card, inside a run group, or — for
+    // action steps that triggered a run — as the run group's header.
+    const triggeredRun = mindlog.runs.find(
+      (run) => run.trigger_step_id === target.step_id
+    );
+    const candidates = [target.step_id, target.run_id, triggeredRun?.run_id]
+      .filter(Boolean)
+      .map((id) => `step-${id}`);
+    // A large mind log takes a while to render — retry until an element
+    // exists, then scroll + highlight (same flash as scrollToStep).
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const attempt = () => {
+      const el = candidates
+        .map((id) => document.getElementById(id))
+        .find(Boolean);
+      if (el) {
+        // Instant, not smooth: late layout shifts on a large log cancel the
+        // smooth animation. Re-assert once after things settle.
+        el.scrollIntoView({ block: "center" });
+        el.classList.add("bg-primary/10");
+        setTimeout(() => el.scrollIntoView({ block: "center" }), 600);
+        setTimeout(() => el.classList.remove("bg-primary/10"), 2000);
+        return;
+      }
+      if (tries++ < 40) timer = setTimeout(attempt, 250);
+    };
+    timer = setTimeout(attempt, 100);
+    return () => clearTimeout(timer);
+    // scroll once per navigation, not on live-poll refreshes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepParam, mindlog?.traj_id]);
 
   const typeCounts = useMemo(() => {
     const counts = new Map<string, number>();
