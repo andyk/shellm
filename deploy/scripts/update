@@ -38,11 +38,13 @@ unpushed=0
 if git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
     unpushed=$(git -C "$REPO_ROOT" rev-list --count "origin/$branch..refs/heads/$branch")
 fi
-dirty=$(git -C "$REPO_ROOT" status --porcelain | wc -l | tr -d ' ')
+# Untracked files excluded: scratch notes aren't deploy candidates — only
+# modified tracked files signal "you changed code the box won't get".
+dirty=$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 
 info "Will deploy origin/$branch: $remote_head"
 [[ "$dirty" -gt 0 ]] \
-    && echo "note: $dirty uncommitted change(s) in your working tree won't deploy" >&2
+    && echo "note: $dirty modified tracked file(s) in your working tree won't deploy" >&2
 if [[ "$unpushed" -gt 0 ]]; then
     echo "warning: local '$branch' is $unpushed commit(s) ahead of origin — those won't deploy until pushed" >&2
     if [[ "$yes" -ne 1 && "$dry_run" -ne 1 ]]; then
