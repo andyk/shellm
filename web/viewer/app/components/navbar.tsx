@@ -101,7 +101,7 @@ function LlmHealthChip() {
   return (
     <div className="relative">
       <button
-        className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+        className="inline-flex h-8 items-center gap-1.5 font-mono text-[11px] leading-none text-muted-foreground hover:text-foreground"
         title={`LLM provider: ${health.status}`}
         onClick={() => setOpen(!open)}
       >
@@ -204,7 +204,7 @@ function BuildMenu({ config }: { config: Config }) {
   return (
     <div className="relative">
       <button
-        className="font-mono text-[11px] text-muted-foreground hover:text-foreground"
+        className="inline-flex h-8 items-center font-mono text-[11px] leading-none text-muted-foreground hover:text-foreground"
         title="Build info"
         onClick={() => setOpen(!open)}
       >
