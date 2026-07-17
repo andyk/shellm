@@ -1622,7 +1622,8 @@ ${combined}"
         --arg tldr "${tldr:-(summary generation failed)}" \
         --arg full "$full_summary" \
         --arg run_id "$run_step_id" \
-        '{type:"run-summary", tldr:$tldr, full_summary:$full, run_id:$run_id}')
+        --arg model "$summary_model" \
+        '{type:"run-summary", tldr:$tldr, full_summary:$full, run_id:$run_id, model:$model}')
     printf '%s' "$summary_json" | traj append --traj_dir "$traj_dir" "$traj_id" >/dev/null 2>/dev/null || true
 }
 

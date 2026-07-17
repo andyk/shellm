@@ -1,4 +1,4 @@
-import { Bot, Cog } from "lucide-react";
+import { Bot, Cog, Cpu } from "lucide-react";
 import { toast } from "sonner";
 
 import { stepColor } from "~/lib/step-colors";
@@ -63,6 +63,12 @@ export function StepHeader({ step }: { step: NormalizedStep }) {
       ) : (
         <Chip className="text-muted-foreground/60" title="shellm machinery step">
           <Cog className="h-2.5 w-2.5" />
+        </Chip>
+      )}
+      {typeof step.raw.model === "string" && step.raw.model && step.type !== "shellm-run" && (
+        <Chip className="text-muted-foreground/60" title={`model ${step.raw.model}`}>
+          <Cpu className="h-2.5 w-2.5" />
+          {step.raw.model}
         </Chip>
       )}
     </div>

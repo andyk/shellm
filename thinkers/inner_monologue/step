@@ -116,8 +116,9 @@ jq -nc \
     --arg type "$step_type" \
     --arg content "$step_content" \
     --arg source "$THINKER_NAME" \
+    --arg model "$THINK_MODEL" \
     --arg trigger "$trigger_step_id" \
-    '{type:$type, content:$content, source:$source}
+    '{type:$type, content:$content, source:$source, model:$model}
      + (if $trigger == "" then {} else {trigger_step: $trigger} end)' \
     | traj append >/dev/null
 

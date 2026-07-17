@@ -267,8 +267,12 @@ The user's initial prompt for the run.
 Auto-generated summary of the run (produced asynchronously by a fast model).
 
 ```json
-{"type":"run-summary", "tldr":"<one-line summary>", "full_summary":"<longer summary>", "run_id":"<shellm-run step_id>"}
+{"type":"run-summary", "tldr":"<one-line summary>", "full_summary":"<longer summary>", "run_id":"<shellm-run step_id>", "model":"<summary model>"}
 ```
+
+`model` is the model that wrote the summary (the `SHELLM_SUMMARY_MODEL` →
+`SHELLM_FAST_MODEL` → run-model resolution) — usually NOT the run's own
+model. Absent on steps written before 2026-07-17.
 
 #### `final`
 
@@ -322,10 +326,12 @@ carry `run_id` instead (stamped by `traj append`).
 
 #### `thought`
 
-The inner monologue's default output.
+The inner monologue's default output. `model` is the model that produced
+it (`THINK_MODEL` resolution); the monologue's `action`/`idle` steps carry
+it too. Absent on steps written before 2026-07-17.
 
 ```json
-{"type":"thought", "content":"<thought text>", "source":"inner_monologue", "trigger_step":"<uuid>"}
+{"type":"thought", "content":"<thought text>", "source":"inner_monologue", "model":"<think model>", "trigger_step":"<uuid>"}
 ```
 
 Logs written before 2026-07-10 also used `thought` (with
