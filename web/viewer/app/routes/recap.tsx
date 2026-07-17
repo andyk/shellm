@@ -43,27 +43,60 @@ function StepRef({
   );
 }
 
-function RefreshButton({ identityId, refreshing }: { identityId: string; refreshing: boolean }) {
+function RefreshButtons({
+  identityId,
+  refreshing,
+  showRebuild = true,
+}: {
+  identityId: string;
+  refreshing: boolean;
+  showRebuild?: boolean;
+}) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: (rebuild: boolean) => refreshRecap(identityId, rebuild),
-    onSuccess: () => {
-      toast.success("Recap refresh started — new steps get summarized in the background");
+    onSuccess: (_result, rebuild) => {
+      toast.success(
+        rebuild
+          ? "Full rebuild started — the whole log gets re-summarized in the background"
+          : "Recap refresh started — new steps get summarized in the background"
+      );
       queryClient.invalidateQueries({ queryKey: ["recap", identityId] });
     },
     onError: (error: Error) => toast.error(error.message),
   });
+  const busy = refreshing || mutation.isPending;
   return (
-    <Button
-      variant="outline"
-      size="sm"
-      disabled={refreshing || mutation.isPending}
-      title="Summarize steps added since the last recap (shift-click: rebuild from scratch)"
-      onClick={(event) => mutation.mutate(event.shiftKey)}
-    >
-      <RefreshCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
-      {refreshing ? "Recapping…" : "Refresh"}
-    </Button>
+    <div className="flex items-center gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={busy}
+        title="Incremental: summarize only the steps added since the last recap"
+        onClick={() => mutation.mutate(false)}
+      >
+        <RefreshCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
+        {refreshing ? "Recapping…" : "Refresh"}
+      </Button>
+      {showRebuild && (
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          title="Full refresh: discard all cached episodes and re-summarize the entire log (use after changing model or window settings)"
+          onClick={() => {
+            if (
+              window.confirm(
+                "Rebuild the recap from scratch? All cached episodes are discarded and the full log is re-summarized (one LLM call per window)."
+              )
+            )
+              mutation.mutate(true);
+          }}
+        >
+          Rebuild
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -114,7 +147,7 @@ export default function RecapPage() {
             </EmptyDescription>
           </EmptyHeader>
           {controlsEnabled && !recap.refreshing && (
-            <RefreshButton identityId={identityId} refreshing={false} />
+            <RefreshButtons identityId={identityId} refreshing={false} showRebuild={false} />
           )}
           {recap.refreshing && (
             <div className="mt-4 flex justify-center">
@@ -145,7 +178,7 @@ export default function RecapPage() {
           )}
           {controlsEnabled && (
             <div className="ml-auto">
-              <RefreshButton identityId={identityId} refreshing={recap.refreshing} />
+              <RefreshButtons identityId={identityId} refreshing={recap.refreshing} />
             </div>
           )}
         </div>
