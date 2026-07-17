@@ -99,6 +99,11 @@ export interface KillallResult {
   stderr: string;
 }
 
+export interface ImportResult {
+  ok: boolean;
+  imported: { id: string; name: string }[];
+}
+
 export interface IdentityStatus {
   live: boolean;
   pid_alive: boolean;

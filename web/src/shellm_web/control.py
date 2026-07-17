@@ -7,6 +7,7 @@ concurrent mutations per identity, and maps CLI failures to HTTP errors.
 
 import os
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -20,6 +21,8 @@ BIN_DIR = Path(
 )
 
 DEFAULT_TIMEOUT = 60
+# tar+gzip over a long-lived identity's trajectories can take a while
+EXPORT_IMPORT_TIMEOUT = 300
 
 # Serialize start/stop per identity: cmd_stop rewrites run/active_thinkers
 # with a non-atomic grep>tmp;mv, so concurrent mutations can clobber it.
@@ -202,18 +205,79 @@ def chat_send(root: Path, identity: IdentityInfo, content: str, from_name: str) 
 
 
 def identity_new(root: Path, name: str) -> dict:
+    proc = run_cli(
+        [str(BIN_DIR / "identity"), "new", name], _identities_root_env(root), root
+    )
+    _raise_for_failure(proc)
+    return {
+        "ok": True,
+        "id": f".identities~{name}",
+        "name": name,
+        "stderr": proc.stderr,
+    }
+
+
+def _identities_root_env(root: Path) -> dict[str, str]:
+    """Env for identity-CLI calls that operate on the serve root's .identities
+    (same shape as identity_new builds inline)."""
     env = os.environ.copy()
     env["PATH"] = f"{BIN_DIR}:{env.get('PATH', '')}"
     env["IDENTITY_DIR"] = str(root / ".identities")
     # With IDENTITY_NAME set, bin/identity treats IDENTITY_DIR as an active
     # identity and rebases to its parent — make sure we pass the root form.
     env.pop("IDENTITY_NAME", None)
-    proc = run_cli([str(BIN_DIR / "identity"), "new", name], env, root)
+    return env
+
+
+def _export_to_tempfile(root: Path, args: list[str], env: dict[str, str]) -> Path:
+    fd, tmp = tempfile.mkstemp(suffix=".shellm.tgz")
+    os.close(fd)
+    proc = run_cli(
+        [str(BIN_DIR / "identity"), "export", *args, "-o", tmp],
+        env,
+        root,
+        timeout=EXPORT_IMPORT_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        Path(tmp).unlink(missing_ok=True)
     _raise_for_failure(proc)
+    return Path(tmp)
+
+
+def identity_export(root: Path, identity: IdentityInfo, soul_only: bool = False) -> Path:
+    """Export one identity (any discovered dir, via --path) to a temp .tgz.
+    Caller owns the returned file and must delete it."""
+    args = ["--path", str(identity.path)]
+    if soul_only:
+        args.append("--soul-only")
+    return _export_to_tempfile(root, args, _identities_root_env(root))
+
+
+def identity_export_all(root: Path, soul_only: bool = False) -> Path:
+    """Export every identity under the serve root's .identities to a temp .tgz."""
+    args = ["--all"]
+    if soul_only:
+        args.append("--soul-only")
+    return _export_to_tempfile(root, args, _identities_root_env(root))
+
+
+def identity_import(root: Path, archive: Path, name: str | None = None) -> dict:
+    args = ["import", str(archive)]
+    if name:
+        args.extend(["--name", name])
+    proc = run_cli(
+        [str(BIN_DIR / "identity"), *args],
+        _identities_root_env(root),
+        root,
+        timeout=EXPORT_IMPORT_TIMEOUT,
+    )
+    _raise_for_failure(proc)
+    imported = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     return {
         "ok": True,
-        "id": f".identities~{name}",
-        "name": name,
+        "imported": [
+            {"id": f".identities~{n}", "name": n} for n in imported
+        ],
         "stderr": proc.stderr,
     }
 

@@ -111,6 +111,26 @@ sudo systemctl restart shellm-web
 **Kill switches, in escalating order:** Kill All button in the UI →
 `shellm-killall` on the box → `systemctl stop shellm-web` → stop the VM.
 
+**Moving identities on/off the box:** every identity page has a Config →
+Export button (and the home page has Export all / Import) producing a
+portable `.shellm.tgz` — secrets (`.env`) and runtime state never leave the
+machine. Use it to seed the deployment from a laptop identity, or as the
+pre-demo backup. Two caveats:
+
+- Importing an identity installs its thinkers — scripts that run when the
+  identity is started. Only import archives you trust.
+- Cloudflare's proxy caps request bodies at 100 MB on the free plan. For
+  bigger archives, copy the file and use the CLI:
+
+  ```bash
+  scp big.shellm.tgz vm:/tmp/ && ssh vm \
+      'sudo -u shellm env IDENTITY_DIR=/opt/shellm/app/.identities \
+       /opt/shellm/app/bin/identity import /tmp/big.shellm.tgz'
+  ```
+
+  Uploads are also capped server-side via `SHELLM_WEB_MAX_IMPORT_MB`
+  (default 512).
+
 ## Security notes
 
 - The VM is the sandbox. Dedicated key with a spend cap, nothing else on

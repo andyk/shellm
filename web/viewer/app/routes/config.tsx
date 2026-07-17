@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
+import { Download, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useParams } from "react-router";
 import { toast } from "sonner";
@@ -8,6 +8,7 @@ import { IdentityTabs } from "~/components/identity-tabs";
 import { useControlsEnabled } from "~/components/thinker-controls";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import { Checkbox } from "~/components/ui/checkbox";
 import { Input } from "~/components/ui/input";
 import { LoadingDots } from "~/components/ui/loading-dots";
 import {
@@ -20,6 +21,7 @@ import {
 } from "~/components/ui/table";
 import {
   deleteEnvVar,
+  exportIdentityUrl,
   fetchIdentityEnv,
   fetchIdentityStatus,
   putEnvVar,
@@ -203,6 +205,40 @@ function AddVarForm({
   );
 }
 
+function ExportSection({ identityId }: { identityId: string }) {
+  const [soulOnly, setSoulOnly] = useState(false);
+  return (
+    <section className="mt-8">
+      <div className="mb-2 flex items-baseline gap-3">
+        <h2 className="font-mono text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          export
+        </h2>
+        <span className="text-[11px] text-muted-foreground">
+          Snapshot this identity as a portable .tgz — import it on another
+          shellm dash (or with `identity import`). Secrets (.env) and runtime
+          state never leave the box.
+        </span>
+      </div>
+      <div className="flex items-center gap-4 rounded-lg border p-3">
+        <Button variant="outline" size="sm" asChild>
+          <a href={exportIdentityUrl(identityId, soulOnly)} download>
+            <Download className="size-3" />
+            Download export
+          </a>
+        </Button>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox
+            checked={soulOnly}
+            onCheckedChange={(checked) => setSoulOnly(checked === true)}
+          />
+          soul only — skip trajectories (memories, thinkers, and skills; the
+          import starts a fresh mind log)
+        </label>
+      </div>
+    </section>
+  );
+}
+
 export default function ConfigPage() {
   const { identityId = "" } = useParams();
   const controlsEnabled = useControlsEnabled();
@@ -330,6 +366,8 @@ export default function ConfigPage() {
           </Table>
         </div>
       </section>
+
+      <ExportSection identityId={identityId} />
       </div>
     </div>
   );

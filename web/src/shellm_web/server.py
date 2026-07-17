@@ -2,15 +2,19 @@
 
 import logging
 import os
+import re
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from shellm_web import (
     chat,
@@ -415,6 +419,70 @@ def create_app(
         if not safety.CHAT_FROM_RE.match(body.from_name):
             raise HTTPException(status_code=422, detail="Invalid sender name")
         return control.chat_send(root, identity, body.content, body.from_name)
+
+    # -- Import / export ---------------------------------------------------
+    # Archives are produced/consumed by `identity export` / `identity import`
+    # (bin/identity); the endpoints only move bytes. Export stays available in
+    # read-only mode: it reveals nothing the viewer doesn't already show, and
+    # it doubles as the backup path.
+
+    def _export_download(tmp: Path, basename: str) -> FileResponse:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "-", basename) or "identity"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return FileResponse(
+            tmp,
+            media_type="application/gzip",
+            filename=f"{safe}-{stamp}.shellm.tgz",
+            background=BackgroundTask(tmp.unlink, missing_ok=True),
+        )
+
+    @app.get("/api/identities/{identity_id}/export")
+    def export_identity(
+        identity_id: str, soul_only: bool = Query(default=False)
+    ) -> FileResponse:
+        identity = _identity_or_404(root, identity_id)
+        tmp = control.identity_export(root, identity, soul_only)
+        return _export_download(tmp, identity.name)
+
+    @app.get("/api/export")
+    def export_all_identities(soul_only: bool = Query(default=False)) -> FileResponse:
+        tmp = control.identity_export_all(root, soul_only)
+        return _export_download(tmp, "identities")
+
+    @app.post("/api/identities/import", status_code=201)
+    async def import_identities(
+        request: Request, name: str | None = Query(default=None)
+    ) -> dict:
+        _require_controls()
+        if name is not None and not safety.IDENTITY_NAME_RE.match(name):
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid identity name (use lowercase alphanumeric + hyphens)",
+            )
+        max_bytes = int(os.environ.get("SHELLM_WEB_MAX_IMPORT_MB", "512")) * 1024 * 1024
+        fd, tmp_name = tempfile.mkstemp(suffix=".shellm.tgz")
+        tmp = Path(tmp_name)
+        total = 0
+        first_chunk = b""
+        try:
+            with os.fdopen(fd, "wb") as out:
+                async for chunk in request.stream():
+                    if not first_chunk:
+                        first_chunk = chunk
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Archive exceeds SHELLM_WEB_MAX_IMPORT_MB ({max_bytes // (1024 * 1024)} MB)",
+                        )
+                    out.write(chunk)
+            if not first_chunk.startswith(b"\x1f\x8b"):
+                raise HTTPException(
+                    status_code=422, detail="Not a gzip archive (.shellm.tgz expected)"
+                )
+            return await run_in_threadpool(control.identity_import, root, tmp, name)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @app.post("/api/identities", status_code=201)
     def create_identity(body: NewIdentityBody) -> dict:

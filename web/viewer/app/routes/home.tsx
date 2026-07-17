@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Skull } from "lucide-react";
-import { useState } from "react";
+import { Download, Plus, Skull, Upload } from "lucide-react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -23,7 +23,13 @@ import {
   TableHeader,
   TableRow,
 } from "~/components/ui/table";
-import { createIdentity, fetchIdentities, killAll } from "~/lib/api";
+import {
+  createIdentity,
+  exportAllUrl,
+  fetchIdentities,
+  importIdentities,
+  killAll,
+} from "~/lib/api";
 import type { Identity } from "~/lib/types";
 
 export function meta() {
@@ -124,6 +130,85 @@ function NewIdentityForm() {
   );
 }
 
+function ImportIdentityForm() {
+  const [open, setOpen] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [name, setName] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: ({ file, name }: { file: File; name?: string }) =>
+      importIdentities(file, name),
+    onSuccess: (result) => {
+      const names = result.imported.map((i) => i.name);
+      toast.success(
+        names.length === 1
+          ? `Imported identity ${names[0]}`
+          : `Imported ${names.length} identities: ${names.join(", ")}`
+      );
+      queryClient.invalidateQueries({ queryKey: ["identities"] });
+      setOpen(false);
+      setFile(null);
+      setName("");
+      if (result.imported.length === 1)
+        navigate(`/i/${encodeURIComponent(result.imported[0].id)}/thinkers`);
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  if (!open) {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        title="Install identities from an `identity export` archive"
+        onClick={() => setOpen(true)}
+      >
+        <Upload className="size-3" />
+        Import
+      </Button>
+    );
+  }
+  return (
+    <form
+      className="flex items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (file) mutation.mutate({ file, name: name.trim() || undefined });
+      }}
+    >
+      <input
+        ref={fileInput}
+        type="file"
+        accept=".tgz,.gz,application/gzip"
+        className="w-56 text-xs file:mr-2 file:rounded-md file:border file:bg-transparent file:px-2 file:py-1 file:text-xs"
+        onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+      />
+      <Input
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="rename (optional)"
+        pattern="[a-z0-9][a-z0-9-]*"
+        title="lowercase alphanumeric + hyphens; only for single-identity archives"
+        className="h-8 w-40 font-mono text-xs"
+      />
+      <Button type="submit" size="sm" disabled={mutation.isPending || !file}>
+        {mutation.isPending ? "Importing…" : "Import"}
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={() => setOpen(false)}
+      >
+        Cancel
+      </Button>
+    </form>
+  );
+}
+
 function KillAllButton() {
   const queryClient = useQueryClient();
   const mutation = useMutation({
@@ -183,12 +268,28 @@ export default function Home() {
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-8 px-4">
-      {controlsEnabled && (
-        <div className="flex items-center justify-between">
-          <NewIdentityForm />
-          <KillAllButton />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {controlsEnabled && <NewIdentityForm />}
+          {controlsEnabled && <ImportIdentityForm />}
         </div>
-      )}
+        <div className="flex items-center gap-2">
+          {(identities?.length ?? 0) > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              asChild
+              title="Download every identity under .identities as one .shellm.tgz"
+            >
+              <a href={exportAllUrl()} download>
+                <Download className="size-3" />
+                Export all
+              </a>
+            </Button>
+          )}
+          {controlsEnabled && <KillAllButton />}
+        </div>
+      </div>
       {!identities || identities.length === 0 ? (
         <Empty>
           <EmptyHeader>

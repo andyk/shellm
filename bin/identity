@@ -352,6 +352,367 @@ printf 'Activated identity: %s\n' "$IDENTITY_NAME" >&2
 ACTIVATE
 }
 
+# ---------------------------------------------------------------------------
+# Export / import helpers
+# ---------------------------------------------------------------------------
+
+# Archive layout (format 1): manifest.json + one top-level dir per identity.
+# Never travels: run/ (live pids/fifos), .shellm/ (docker state), kernel/ and
+# activate (regenerated on import), .env (secrets).
+
+# List an identity's exportable files relative to its parent dir.
+# NUL-delimited: agent-created filenames can contain newlines (e.g. mem slugs
+# from multi-line titles), which would split into bogus names in tar -T.
+_export_file_list() {
+    local parent="$1" base="$2" soul_only="$3"
+    local prunes=( -path "$base/run" -o -path "$base/.shellm" -o -path "$base/kernel" -o -path "$base/thinkers" )
+    [[ "$soul_only" -eq 1 ]] && prunes+=( -o -path "$base/trajectories" )
+    (cd "$parent" && find "$base" \( "${prunes[@]}" \) -prune -o \
+        \( -path "$base/.env" -o -path "$base/activate" \) -prune -o -print0)
+}
+
+# Emit one manifest entry (JSON object) for an identity dir.
+_export_manifest_entry() {
+    local dir="$1"
+    local base name created rt mems steps jsonl
+    base=$(basename "$dir")
+    name=$(grep '^name=' "$dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    [[ -z "$name" ]] && name="$base"
+    created=$(grep '^created=' "$dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    rt=$(grep '^root_trajectory=' "$dir/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    # Count via NUL delimiters — newline-bearing filenames would inflate wc -l
+    mems=$(find "$dir/memories" -name '*.md' -print0 2>/dev/null | tr -cd '\0' | wc -c | tr -d ' ') || mems=0
+    steps=0
+    if [[ -n "$rt" ]]; then
+        for jsonl in "$dir/trajectories/${rt:0:8}"-*/trajectory.jsonl; do
+            if [[ -f "$jsonl" ]]; then
+                steps=$(wc -l < "$jsonl" | tr -d ' ')
+                break
+            fi
+        done
+    fi
+    jq -n --arg dir "$base" --arg name "$name" --arg created "$created" \
+        --arg rt "$rt" --argjson memories "${mems:-0}" --argjson traj_steps "${steps:-0}" \
+        '{dir: $dir, name: $name, created: $created, root_trajectory: $rt,
+          memories: $memories, traj_steps: $traj_steps}'
+}
+
+# Append one identity's files to the (uncompressed) archive.
+_export_append_identity() {
+    local tarfile="$1" staging="$2" dir="$3" soul_only="$4" idx="$5"
+    local parent base
+    parent=$(dirname "$dir")
+    base=$(basename "$dir")
+
+    local listfile="$staging/files.$idx"
+    _export_file_list "$parent" "$base" "$soul_only" > "$listfile"
+    tar -rf "$tarfile" --null --no-recursion -C "$parent" -T "$listfile"
+
+    # Thinkers are shipped dereferenced: with a --symlinks install their code
+    # files point into this checkout and would dangle on another host.
+    if [[ -d "$dir/thinkers" ]]; then
+        mkdir -p "$staging/deref/$idx/$base"
+        cp -RL "$dir/thinkers" "$staging/deref/$idx/$base/" 2>/dev/null \
+            || debug "some thinker symlinks did not resolve; dropped"
+        tar -rf "$tarfile" -C "$staging/deref/$idx" "$base/thinkers"
+    fi
+}
+
+cmd_export() {
+    local out="" soul_only=0 all=0
+    local names=() paths=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
+Usage: identity export [names...] [--all] [--path DIR] [-o FILE|-] [--soul-only]
+
+Package one or more identities into a portable .tgz for `identity import`
+(same machine or another one). Excludes runtime state (run/, .shellm/),
+regenerated files (kernel/, activate), and secrets (.env).
+
+  names          Identities to export (default: the default identity)
+  --all          Export every identity under IDENTITY_DIR
+  --path DIR     Export the identity directory at DIR (repeatable)
+  -o FILE        Output file (default: <name>-<timestamp>.shellm.tgz; - for stdout)
+  --soul-only    Skip trajectories/ — memories, thinkers, and skills only
+EOF
+                return 0
+                ;;
+            -o|--output)
+                [[ -z "${2:-}" ]] && die "export: -o requires a file argument"
+                out="$2"; shift 2 ;;
+            --soul-only) soul_only=1; shift ;;
+            --all) all=1; shift ;;
+            --path)
+                [[ -z "${2:-}" ]] && die "export: --path requires a directory argument"
+                paths+=("$2"); shift 2 ;;
+            -*) die "export: unknown option: $1" ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+
+    # Resolve the set of identity dirs to export
+    local dirs=() d p n
+    if [[ ${#paths[@]} -gt 0 ]]; then
+        [[ "$all" -eq 1 || ${#names[@]} -gt 0 ]] && die "export: pass names, --all, or --path — not a mix"
+        for p in "${paths[@]}"; do
+            [[ -d "$p" ]] || die "export: not a directory: $p"
+            [[ -f "$p/info.txt" ]] || die "export: not an identity dir (no info.txt): $p"
+            dirs+=("$(cd "$p" && pwd)")
+        done
+    elif [[ "$all" -eq 1 ]]; then
+        [[ ${#names[@]} -gt 0 ]] && die "export: pass names or --all, not both"
+        [[ -d "$IDENTITY_DIR" ]] || die "No identities found"
+        for d in "$IDENTITY_DIR"/*/; do
+            [[ -d "$d" ]] || continue
+            [[ "$(basename "$d")" == "default" ]] && continue
+            if [[ ! -f "${d}info.txt" ]]; then
+                debug "skipping (no info.txt): $d"
+                continue
+            fi
+            dirs+=("$(cd "$d" && pwd)")
+        done
+        [[ ${#dirs[@]} -gt 0 ]] || die "No identities found"
+    elif [[ ${#names[@]} -gt 0 ]]; then
+        for n in "${names[@]}"; do
+            dirs+=("$(_resolve_identity_path "$n")")
+        done
+    else
+        dirs+=("$(_resolve_identity_path "")")
+    fi
+
+    # Directory basenames become archive member prefixes — must be unique
+    local seen=" " base
+    for d in "${dirs[@]}"; do
+        base=$(basename "$d")
+        [[ "$seen" == *" $base "* ]] && die "export: duplicate identity directory name: $base"
+        seen="$seen$base "
+    done
+
+    if [[ -z "$out" ]]; then
+        local stamp
+        stamp=$(date +%Y%m%d-%H%M%S)
+        if [[ ${#dirs[@]} -eq 1 ]]; then
+            out="$(basename "${dirs[0]}")-$stamp.shellm.tgz"
+        else
+            out="identities-$stamp.shellm.tgz"
+        fi
+    fi
+
+    local staging
+    staging=$(mktemp -d)
+    # shellcheck disable=SC2064
+    trap "rm -rf '$staging'" EXIT
+
+    # Manifest first, so it lands at the front of the archive
+    local entries="$staging/entries.jsonl" soul_json="false"
+    [[ "$soul_only" -eq 1 ]] && soul_json="true"
+    for d in "${dirs[@]}"; do
+        _export_manifest_entry "$d" >> "$entries"
+    done
+    jq -s --arg ts "$(iso_timestamp)" --argjson soul "$soul_json" \
+        '{format: 1, exported_at: $ts, soul_only: $soul, identities: .}' \
+        "$entries" > "$staging/manifest.json"
+
+    local tarfile="$staging/archive.tar"
+    tar -cf "$tarfile" -C "$staging" manifest.json
+    local idx=0
+    for d in "${dirs[@]}"; do
+        _export_append_identity "$tarfile" "$staging" "$d" "$soul_only" "$idx"
+        idx=$((idx + 1))
+    done
+
+    if [[ "$out" == "-" ]]; then
+        gzip -c "$tarfile"
+    else
+        gzip -c "$tarfile" > "$out"
+        printf 'Exported %d identit%s -> %s\n' \
+            "${#dirs[@]}" "$([[ ${#dirs[@]} -eq 1 ]] && echo y || echo ies)" "$out" >&2
+    fi
+}
+
+# Install one extracted identity dir under IDENTITY_DIR as $name and repair
+# everything host-specific (kernel links, bundled skills/thinkers, activate).
+_install_imported_identity() {
+    local src="$1" name="$2"
+
+    # Strip anything that must never travel — even from hand-built archives
+    rm -rf "$src/run" "$src/.shellm" "$src/kernel"
+    rm -f "$src/.env" "$src/activate"
+
+    local dest="$IDENTITY_DIR/$name"
+    mv "$src" "$dest"
+    dest=$(cd "$dest" && pwd)
+
+    mkdir -p "$dest/memories" "$dest/skills" "$dest/kernel" "$dest/trajectories" "$dest/thinkers"
+
+    # info.txt name follows the install name (import may rename)
+    local tmp_info
+    tmp_info=$(mktemp)
+    { printf 'name=%s\n' "$name"; grep -v '^name=' "$dest/info.txt" || true; } > "$tmp_info"
+    mv "$tmp_info" "$dest/info.txt"
+
+    # Ensure a live root trajectory (soul-only archives ship without one)
+    local old_rt="" new_rt="" have_traj=0 jsonl
+    old_rt=$(grep '^root_trajectory=' "$dest/info.txt" 2>/dev/null | cut -d= -f2-) || true
+    if [[ -n "$old_rt" ]]; then
+        for jsonl in "$dest/trajectories/${old_rt:0:8}"-*/trajectory.jsonl; do
+            [[ -f "$jsonl" ]] && have_traj=1 && break
+        done
+    fi
+    if [[ "$have_traj" -eq 0 ]]; then
+        new_rt=$(traj new --traj_dir "$dest/trajectories" --slug "root" | head -1)
+        tmp_info=$(mktemp)
+        { grep -v '^root_trajectory=' "$dest/info.txt" || true; printf 'root_trajectory=%s\n' "$new_rt"; } > "$tmp_info"
+        mv "$tmp_info" "$dest/info.txt"
+        # Re-point thinker subscriptions at the new root trajectory
+        if [[ -n "$old_rt" ]]; then
+            local subs tmp_subs
+            for subs in "$dest/thinkers"/*/subscriptions.jsonl; do
+                [[ -f "$subs" && ! -L "$subs" ]] || continue
+                tmp_subs=$(mktemp)
+                sed "s/$old_rt/$new_rt/g" "$subs" > "$tmp_subs" && mv "$tmp_subs" "$subs"
+            done
+        fi
+        debug "Created new root trajectory: $new_rt"
+    fi
+
+    # Drop symlinks that don't resolve on this host (e.g. skills pointing into
+    # the source machine's checkout); bundled ones are re-installed below.
+    local link
+    while IFS= read -r link; do
+        [[ -n "$link" ]] || continue
+        printf 'import: dropping dangling symlink: %s\n' "${link#"$dest"/}" >&2
+        rm -f "$link"
+    done < <(find "$dest" -type l ! -exec test -e {} \; -print 2>/dev/null)
+
+    # Same bootstrap as `identity new`
+    local core_skills="$HOME/.skills/core-skills"
+    if [[ -d "$core_skills" && ! -f "$dest/skills/.skillsrc" ]]; then
+        printf 'SKILLS_REMOTES="%s"\n' "$core_skills" > "$dest/skills/.skillsrc"
+    fi
+    _ensure_kernel "$dest/kernel"
+    _install_bundled_skills "$dest/skills"
+    _ensure_thinkers "$dest"
+    _write_activate_script "$dest"
+}
+
+cmd_import() {
+    local archive="" new_name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
+Usage: identity import <file|-> [--name NEW]
+
+Install identities from an `identity export` archive into IDENTITY_DIR.
+Multi-identity archives import every identity they contain; --name renames
+a single-identity archive. Runtime state and .env are never imported;
+kernel/bundled skills and the activate script are regenerated.
+
+Note: an identity's thinkers are scripts that run when the identity is
+started — only import archives you trust.
+EOF
+                return 0
+                ;;
+            --name)
+                [[ -z "${2:-}" ]] && die "import: --name requires a name argument"
+                new_name="$2"; shift 2 ;;
+            -*) die "import: unknown option: $1" ;;
+            *)
+                [[ -n "$archive" ]] && die "Usage: identity import <file|-> [--name NEW]"
+                archive="$1"; shift ;;
+        esac
+    done
+
+    [[ -n "$archive" ]] || die "Usage: identity import <file|-> [--name NEW]"
+
+    local staging
+    staging=$(mktemp -d)
+    # shellcheck disable=SC2064
+    trap "rm -rf '$staging'" EXIT
+
+    if [[ "$archive" == "-" ]]; then
+        cat > "$staging/stdin.tgz"
+        archive="$staging/stdin.tgz"
+    fi
+    [[ -f "$archive" ]] || die "import: no such file: $archive"
+
+    # Refuse absolute or parent-escaping member paths before extracting
+    local members bad
+    members=$(tar -tzf "$archive" 2>/dev/null) || die "import: not a .tgz archive: $archive"
+    bad=$(grep -E '^/|^\.\.(/|$)|/\.\.(/|$)' <<< "$members" || true)
+    [[ -n "$bad" ]] && die "import: archive contains unsafe paths:
+$bad"
+
+    local extract="$staging/x"
+    mkdir "$extract"
+    tar -xzf "$archive" -C "$extract"
+
+    local manifest="$extract/manifest.json"
+    if [[ -f "$manifest" ]]; then
+        local fmt
+        fmt=$(jq -r '.format // 1' "$manifest" 2>/dev/null) || fmt=1
+        if [[ "$fmt" =~ ^[0-9]+$ ]] && [[ "$fmt" -gt 1 ]]; then
+            die "import: archive format $fmt is newer than this tool understands"
+        fi
+    fi
+
+    local src_dirs=() d
+    for d in "$extract"/*/; do
+        [[ -d "$d" ]] && src_dirs+=("${d%/}")
+    done
+    [[ ${#src_dirs[@]} -ge 1 ]] || die "import: no identity directories in archive"
+    [[ -n "$new_name" && ${#src_dirs[@]} -gt 1 ]] \
+        && die "import: --name only applies to single-identity archives (found ${#src_dirs[@]})"
+
+    mkdir -p "$IDENTITY_DIR"
+
+    # Resolve every target name, then check conflicts before touching anything
+    local targets=() base name conflicts=""
+    for d in "${src_dirs[@]}"; do
+        base=$(basename "$d")
+        [[ -f "$d/info.txt" ]] || die "import: '$base' has no info.txt — not an identity"
+        if [[ -n "$new_name" ]]; then
+            name="$new_name"
+        else
+            name=""
+            if [[ -f "$manifest" ]]; then
+                name=$(jq -r --arg dir "$base" \
+                    '[.identities[]? | select(.dir == $dir) | .name][0] // empty' \
+                    "$manifest" 2>/dev/null) || name=""
+            fi
+            [[ -z "$name" ]] && name=$(grep '^name=' "$d/info.txt" 2>/dev/null | cut -d= -f2-) || true
+            [[ -z "$name" ]] && name="$base"
+        fi
+        if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            die "import: invalid identity name: '$name' (use --name to rename)"
+        fi
+        [[ "$(printf ' %s ' "${targets[@]+"${targets[@]}"}")" == *" $name "* ]] \
+            && die "import: archive maps two identities to the same name: $name"
+        [[ -d "$IDENTITY_DIR/$name" ]] && conflicts="$conflicts $name"
+        targets+=("$name")
+    done
+    [[ -n "$conflicts" ]] && die "import: identity already exists:$conflicts (use --name or delete first)"
+
+    local i=0 imported=()
+    for d in "${src_dirs[@]}"; do
+        _install_imported_identity "$d" "${targets[$i]}"
+        imported+=("${targets[$i]}")
+        i=$((i + 1))
+    done
+
+    # First identity ever -> set default (mirrors cmd_new)
+    [[ -L "$IDENTITY_DIR/default" ]] || ln -sfn "${imported[0]}" "$IDENTITY_DIR/default"
+
+    printf '%s\n' "${imported[@]}"
+    printf 'Imported %d identit%s: %s\n' \
+        "${#imported[@]}" "$([[ ${#imported[@]} -eq 1 ]] && echo y || echo ies)" "${imported[*]}" >&2
+}
+
 # Guard: die with a helpful message if already inside an identity shell.
 # Resolves the target name to show the exact `source` command.
 _guard_identity_shell() {
@@ -994,6 +1355,10 @@ Usage:
   identity sync-kernel [name|--all]  Symlink bundled kernel skills into identities
   identity default [name]     Show or set the default identity
   identity delete <name>     Delete an identity
+  identity export [names...] [--all] [--path DIR] [-o FILE|-] [--soul-only]
+                             Package identities into a portable .tgz
+  identity import <file|-> [--name NEW]
+                             Install identities from an export archive
   identity shell [name]      Start a subshell with identity env vars set
   identity prompt            Assemble and print the system prompt
 
@@ -1071,6 +1436,12 @@ main() {
         delete)
             _require_identity
             cmd_delete "$@"
+            ;;
+        export)
+            cmd_export "$@"
+            ;;
+        import)
+            cmd_import "$@"
             ;;
         shell)
             _require_identity

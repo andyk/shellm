@@ -6,6 +6,7 @@ import type {
   EnvEntry,
   Identity,
   IdentityEnv,
+  ImportResult,
   IdentityStatus,
   KillallResult,
   LogInfo,
@@ -193,6 +194,40 @@ export function createIdentity(name: string): Promise<{ id: string; name: string
 
 export function killAll(dryRun: boolean): Promise<KillallResult> {
   return postJson("/api/killall", { dry_run: dryRun });
+}
+
+// Export endpoints are plain downloads — link to them, don't fetch.
+export function exportIdentityUrl(identityId: string, soulOnly = false): string {
+  const suffix = soulOnly ? "?soul_only=true" : "";
+  return `${API_BASE}/api/identities/${encodeURIComponent(identityId)}/export${suffix}`;
+}
+
+export function exportAllUrl(): string {
+  return `${API_BASE}/api/export`;
+}
+
+export async function importIdentities(
+  file: File,
+  name?: string
+): Promise<ImportResult> {
+  const suffix = name ? `?name=${encodeURIComponent(name)}` : "";
+  const response = await fetch(`${API_BASE}/api/identities/import${suffix}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/gzip" },
+    body: file,
+  });
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const data = await response.json();
+      if (typeof data?.detail === "string") message = data.detail;
+      else if (data?.detail?.message) message = data.detail.message;
+    } catch {
+      // keep default message
+    }
+    throw new Error(message);
+  }
+  return response.json() as Promise<ImportResult>;
 }
 
 export function fetchIdentityEnv(identityId: string): Promise<IdentityEnv> {
