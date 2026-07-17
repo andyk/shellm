@@ -19,6 +19,9 @@ Environment="PATH=@SHELLM_HOME@/.local/bin:@SHELLM_HOME@/.bun/bin:/usr/local/bin
 #Environment="SHELLM_WEB_ALLOWED_ORIGINS=https://agents.example.com"
 # For a view-only deployment (no start/stop/chat/config mutations):
 #Environment="SHELLM_WEB_READONLY=1"
+# The dash's build-stamp menu can pull the repo and restart the service
+# (safe here because Restart=always brings it back). Remove to disable.
+Environment="SHELLM_WEB_SELF_UPDATE=1"
 ExecStart=@SHELLM_HOME@/app/bin/shellm-web @SHELLM_HOME@/app --host 127.0.0.1 --port 8080
 Restart=always
 RestartSec=3

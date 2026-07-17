@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# deploy/scripts/shell — interactive shell on the box via SSM (no SSH,
+# no inbound ports; relayed outbound through AWS, authorized by IAM).
+#
+# Usage: deploy/scripts/shell
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+case "${1:-}" in
+    -h|--help) sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+require_tools terraform aws session-manager-plugin
+require_state
+require_aws
+
+exec aws ssm start-session --region "$(region)" --target "$(instance_id)"

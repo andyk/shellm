@@ -3,8 +3,11 @@
 import logging
 import os
 import re
+import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +38,16 @@ VERSION = "0.1.0"
 
 # The repo the running server code lives in (…/web/src/shellm_web/server.py)
 _CODE_REPO = Path(__file__).resolve().parents[3]
+
+# The built frontend; deleting it makes the next startup rebuild (see cli.py).
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _schedule_restart(delay: float = 0.75) -> None:
+    """Exit shortly after the current response flushes. Under systemd
+    (Restart=always) the service comes back on the freshly pulled code and
+    rebuilds static/; without a supervisor the process just stops."""
+    threading.Timer(delay, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
 
 
 def _git_info() -> dict[str, str | None]:
@@ -145,8 +158,16 @@ def create_app(
         return {"status": "ok"}
 
     # Resolved once at startup: the code can't change under a running server
-    # (deploy/update.sh restarts the service after pulling).
+    # (both update paths restart the service after pulling).
     git_info = _git_info()
+
+    # Opt-in: the dash can pull its own repo and restart itself. Enabled on
+    # the demo deployment (systemd restarts it); off by default elsewhere —
+    # without a supervisor the process would just exit.
+    self_update_enabled = (
+        os.environ.get("SHELLM_WEB_SELF_UPDATE") == "1" and not read_only
+    )
+    update_lock = threading.Lock()
 
     @app.get("/api/config")
     def config() -> dict:
@@ -154,8 +175,62 @@ def create_app(
             "root": str(root),
             "version": VERSION,
             "controls_enabled": not read_only,
+            "self_update_enabled": self_update_enabled,
             **git_info,
         }
+
+    @app.post("/api/update", status_code=202)
+    def self_update() -> dict:
+        _require_controls()
+        if not self_update_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Self-update is disabled (set SHELLM_WEB_SELF_UPDATE=1)",
+            )
+        if not update_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Update already in progress")
+        # On success the lock is held until the process exits — by design.
+        keep_locked = False
+        try:
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", str(_CODE_REPO), "pull", "--ff-only"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"git pull failed: {exc}"
+                ) from exc
+            if proc.returncode != 0:
+                stderr_lines = [l for l in (proc.stderr or "").splitlines() if l.strip()]
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": stderr_lines[-1] if stderr_lines else "git pull failed",
+                        "stderr": proc.stderr,
+                    },
+                )
+            new_commit = _git_info()["git_commit"]
+            if new_commit == git_info["git_commit"]:
+                return {
+                    "ok": True,
+                    "updated": False,
+                    "commit": new_commit,
+                    "restarting": False,
+                }
+            shutil.rmtree(_STATIC_DIR, ignore_errors=True)
+            _schedule_restart()
+            keep_locked = True
+            return {
+                "ok": True,
+                "updated": True,
+                "from_commit": git_info["git_commit"],
+                "to_commit": new_commit,
+                "restarting": True,
+            }
+        finally:
+            if not keep_locked:
+                update_lock.release()
 
     @app.get("/api/identities")
     def identities() -> list[dict]:

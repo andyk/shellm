@@ -182,12 +182,26 @@ safety net.
 
 ## Day-2 operations
 
+The common ones are wrapped as scripts in `deploy/scripts/` (they need AWS
+creds + this directory's terraform state, but not the Cloudflare token):
+
+| Script | Does |
+|---|---|
+| `deploy/scripts/update` | Deploy the latest **pushed** commit: streams deploy/update.sh on the box (pull, rebuild, restart, health check). Warns when your local branch is ahead of origin. `--dry-run` to preview. |
+| `deploy/scripts/status` | Instance state + service health + deployed commit |
+| `deploy/scripts/shell` | Interactive SSM shell on the box |
+| `deploy/scripts/stop` / `start` | Pause/resume billing (disk + identities survive) |
+
+There's also an in-dash path: click the **build stamp** in the navbar →
+"Pull latest & restart" (the server pulls its repo and restarts itself via
+systemd; enabled by `SHELLM_WEB_SELF_UPDATE=1` in the unit).
+
 | Task | How |
 |---|---|
-| Shell on the box | `$(terraform output -raw ssm_session_command)` |
+| Shell on the box | `deploy/scripts/shell` (or `$(terraform output -raw ssm_session_command)`) |
 | Watch first-boot progress | in a session: `tail -f /var/log/shellm-bootstrap.log` |
 | App logs | `journalctl -u shellm-web -f` |
-| Update the app (after pushing!) | `eval "$(terraform output -raw update_command)"` — streams deploy/update.sh (pull, rebuild, restart, health check) |
+| Update the app (after pushing!) | `deploy/scripts/update` (or `eval "$(terraform output -raw update_command)"`) |
 | Add/remove viewers | edit `allowed_emails`, `terraform apply` |
 | Rotate keys / change model | `aws ssm put-parameter ... --overwrite`, then rebuild or re-fetch in place — see "The .env" above |
 | Panic | Kill All in the UI → `shellm-killall` on the box → stop the instance |

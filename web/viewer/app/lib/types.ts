@@ -4,8 +4,18 @@ export interface Config {
   root: string;
   version: string;
   controls_enabled: boolean;
+  self_update_enabled: boolean;
   git_commit: string | null;
   git_branch: string | null;
+}
+
+export interface SelfUpdateResult {
+  ok: boolean;
+  updated: boolean;
+  restarting: boolean;
+  commit?: string;
+  from_commit?: string;
+  to_commit?: string;
 }
 
 export interface DispatcherStatus {

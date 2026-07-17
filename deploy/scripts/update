@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# deploy/scripts/update — deploy the latest pushed commit to the demo box.
+#
+# Streams deploy/update.sh on the box over SSM: git pull, frontend rebuild,
+# service restart, health check. Running agents are untouched.
+#
+# Usage: deploy/scripts/update [-y] [--dry-run]
+#   -y          skip the confirmation when local commits aren't pushed
+#   --dry-run   show what would deploy, touch nothing
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+yes=0 dry_run=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -y|--yes) yes=1; shift ;;
+        --dry-run) dry_run=1; shift ;;
+        -h|--help) sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+require_tools terraform aws git session-manager-plugin jq
+require_state
+require_aws
+
+branch=$(tfvar shellm_branch main)
+
+# The local fetch is informational only — the box pulls from origin itself.
+info "Fetching origin/$branch"
+git -C "$REPO_ROOT" fetch --quiet origin "$branch" \
+    || echo "warning: couldn't fetch origin — comparing against last-known origin/$branch" >&2
+remote_head=$(git -C "$REPO_ROOT" log -1 --oneline "origin/$branch" 2>/dev/null) \
+    || die "no origin/$branch ref — fetch once from a shell with git access"
+
+# Golden rule: the box runs what's *pushed* to origin, never your working tree.
+unpushed=0
+if git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+    unpushed=$(git -C "$REPO_ROOT" rev-list --count "origin/$branch..refs/heads/$branch")
+fi
+dirty=$(git -C "$REPO_ROOT" status --porcelain | wc -l | tr -d ' ')
+
+info "Will deploy origin/$branch: $remote_head"
+[[ "$dirty" -gt 0 ]] \
+    && echo "note: $dirty uncommitted change(s) in your working tree won't deploy" >&2
+if [[ "$unpushed" -gt 0 ]]; then
+    echo "warning: local '$branch' is $unpushed commit(s) ahead of origin — those won't deploy until pushed" >&2
+    if [[ "$yes" -ne 1 && "$dry_run" -ne 1 ]]; then
+        read -r -p "Deploy origin/$branch anyway? [y/N] " reply
+        [[ "$reply" =~ ^[Yy] ]] || die "aborted"
+    fi
+fi
+
+state=$(instance_state)
+[[ "$state" == "running" ]] || die "instance is '$state' — start it with deploy/scripts/start"
+
+if [[ "$dry_run" -eq 1 ]]; then
+    info "dry run — would run on $(instance_id) ($(region)): sudo bash /opt/shellm/app/deploy/update.sh"
+    exit 0
+fi
+
+info "Updating the box (frontend rebuild takes ~1-2 min)"
+run_on_box "sudo bash /opt/shellm/app/deploy/update.sh"
+info "Dashboard: $(tf output -raw url)"

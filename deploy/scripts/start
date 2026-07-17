@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# deploy/scripts/start — start the stopped demo box. The tunnel and
+# shellm-web come back via systemd (~1-2 min after "running").
+#
+# Usage: deploy/scripts/start
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+case "${1:-}" in
+    -h|--help) sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+require_tools terraform aws
+require_state
+require_aws
+
+info "Starting $(instance_id) ($(region))"
+aws ec2 start-instances --region "$(region)" --instance-ids "$(instance_id)" \
+    --query 'StartingInstances[0].CurrentState.Name' --output text
+info "Waiting for the instance to be running"
+aws ec2 wait instance-running --region "$(region)" --instance-ids "$(instance_id)"
+info "Running. Tunnel + dashboard follow shortly: $(tf output -raw url)"

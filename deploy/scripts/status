@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# deploy/scripts/status — instance state, service health, deployed commit.
+#
+# Usage: deploy/scripts/status
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+case "${1:-}" in
+    -h|--help) sed -n '2,4p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+require_tools terraform aws
+require_state
+require_aws
+
+state=$(instance_state)
+info "Instance:  $(instance_id) ($(region)) — $state"
+info "Dashboard: $(tf output -raw url)"
+
+if [[ "$state" == "running" ]]; then
+    run_on_box '
+        echo "health:   $(curl -fsS localhost:8080/api/health 2>/dev/null || echo DOWN)"
+        echo "service:  $(systemctl is-active shellm-web)"
+        echo "deployed: $(sudo -u shellm git -C /opt/shellm/app log -1 --oneline)"'
+else
+    info "start it with: deploy/scripts/start"
+fi

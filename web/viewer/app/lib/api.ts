@@ -13,6 +13,7 @@ import type {
   LogTail,
   MemoryInfo,
   Mindlog,
+  SelfUpdateResult,
   SubTrajectory,
   ThinkersStatus,
   TreeNode,
@@ -60,6 +61,10 @@ function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export function fetchConfig(): Promise<Config> {
   return getJson("/api/config");
+}
+
+export function selfUpdate(): Promise<SelfUpdateResult> {
+  return postJson("/api/update", {});
 }
 
 export function fetchIdentities(): Promise<Identity[]> {
