@@ -26,6 +26,7 @@ from shellm_web import (
     discovery,
     envfile,
     liveness,
+    llm_health,
     logs,
     safety,
     thinkers,
@@ -625,6 +626,20 @@ def create_app(
     def api_killall(body: KillallBody) -> dict:
         _require_controls()
         return control.killall(body.dry_run)
+
+    # -- LLM health ---------------------------------------------------------
+
+    @app.get("/api/llm-health")
+    def llm_health_endpoint() -> dict:
+        """Passive provider-health signals inferred from the mind logs
+        (failure-marker steps + thought cadence). Free; briefly cached."""
+        return llm_health.llm_health(root)
+
+    @app.post("/api/llm-health/probe")
+    def llm_probe_endpoint() -> dict:
+        """Active check: one tiny real LLM call (costs a fraction of a cent)."""
+        _require_controls()
+        return control.llm_probe(root)
 
     @app.get("/api/identities/{identity_id}/env")
     def identity_env_get(identity_id: str) -> dict:

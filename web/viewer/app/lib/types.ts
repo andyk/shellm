@@ -9,6 +9,37 @@ export interface Config {
   git_branch: string | null;
 }
 
+export interface LlmHealthIdentity {
+  id: string;
+  name: string;
+  live: boolean;
+  failures_1h: number;
+  failures_15m: number;
+  last_failure: { ts: string; content: string } | null;
+  cadence: {
+    recent_median_s: number;
+    baseline_median_s: number | null;
+    recent_n: number;
+  } | null;
+}
+
+export interface LlmHealth {
+  status: "ok" | "degraded" | "erroring" | "unknown";
+  failures_15m: number;
+  failures_1h: number;
+  cadence_slow: boolean;
+  checked_at: string;
+  identities: LlmHealthIdentity[];
+}
+
+export interface LlmProbeResult {
+  ok: boolean;
+  latency_ms: number;
+  model: string | null;
+  provider?: string | null;
+  error?: string;
+}
+
 export interface SelfUpdateResult {
   ok: boolean;
   updated: boolean;

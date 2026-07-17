@@ -5,14 +5,17 @@ Process management stays in bash — this module only builds env, serializes
 concurrent mutations per identity, and maps CLI failures to HTTP errors.
 """
 
+import json
 import os
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from fastapi import HTTPException
 
+from shellm_web import envfile
 from shellm_web.discovery import IdentityInfo, _parse_info_txt
 
 # Repo layout: <repo>/web/src/shellm_web/control.py -> <repo>/bin
@@ -195,6 +198,50 @@ def thinkers_step(root: Path, identity: IdentityInfo, name: str) -> dict:
         start_new_session=True,
     )
     return {"ok": True, "action": "step", "names": [name]}
+
+
+def llm_probe(root: Path) -> dict:
+    """One tiny real LLM call through the same .env the thinkers use —
+    answers 'is the provider healthy right now'. LLM_RETRIES=0 so the raw
+    outcome isn't masked by llm's transient-retry logic."""
+    model = ""
+    for key, value in envfile.parse_env_file(root / ".env"):
+        if key == "SHELLM_MODEL":
+            model = value
+    model = model or os.environ.get("SHELLM_MODEL", "")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{BIN_DIR}:{env.get('PATH', '')}"
+    env["SHELLM_WEB_SERVE_ROOT"] = str(root)
+    env["LLM_RETRIES"] = "0"
+    args = ["--no-stream", "--raw", "-t", "60"]
+    if model:
+        args.extend(["-m", model])
+    args.append("ping")
+
+    start = time.monotonic()
+    proc = run_cli(_wrap("llm", *args), env, root, timeout=45)
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    if proc.returncode != 0:
+        stderr_lines = [l for l in (proc.stderr or "").splitlines() if l.strip()]
+        return {
+            "ok": False,
+            "latency_ms": latency_ms,
+            "model": model or None,
+            "error": stderr_lines[-1] if stderr_lines else f"exit {proc.returncode}",
+        }
+    provider = None
+    try:
+        provider = json.loads(proc.stdout).get("provider")
+    except ValueError:
+        pass
+    return {
+        "ok": True,
+        "latency_ms": latency_ms,
+        "model": model or None,
+        "provider": provider,
+    }
 
 
 def recap_refresh(root: Path, identity: IdentityInfo, rebuild: bool = False) -> dict:

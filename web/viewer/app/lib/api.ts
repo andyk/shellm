@@ -7,6 +7,8 @@ import type {
   Identity,
   IdentityEnv,
   ImportResult,
+  LlmHealth,
+  LlmProbeResult,
   IdentityStatus,
   KillallResult,
   LogInfo,
@@ -66,6 +68,14 @@ export function fetchConfig(): Promise<Config> {
 
 export function selfUpdate(): Promise<SelfUpdateResult> {
   return postJson("/api/update", {});
+}
+
+export function fetchLlmHealth(): Promise<LlmHealth> {
+  return getJson("/api/llm-health");
+}
+
+export function probeLlm(): Promise<LlmProbeResult> {
+  return postJson("/api/llm-health/probe", {});
 }
 
 export function fetchIdentities(): Promise<Identity[]> {
