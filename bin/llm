@@ -455,7 +455,14 @@ stream_openai() {
             _saw_data=1
             local json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && continue
-            _chunk=$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty')
+            # The trailing X is load-bearing: command substitution strips
+            # trailing newlines, so a delta of "\n" would arrive here as the
+            # empty string and be dropped by the -n guard below, and a delta
+            # of "bash\n" would lose its newline. That silently reflows the
+            # model's output onto one line, which turns a fenced code block
+            # into an unparseable ```bash<first-line-of-code>.
+            _chunk=$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty'; printf X)
+            _chunk="${_chunk%X}"
             if [[ -n "$_chunk" ]]; then
                 mark_emitted
                 printf '%s' "$_chunk"
@@ -481,7 +488,9 @@ stream_gemini() {
             _saw_data=1
             local json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && continue
-            _chunk=$(printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty')
+            # Trailing X preserves newline-only deltas; see stream_openai.
+            _chunk=$(printf '%s' "$json" | jq -j '.candidates[0].content.parts[0].text // empty'; printf X)
+            _chunk="${_chunk%X}"
             if [[ -n "$_chunk" ]]; then
                 mark_emitted
                 printf '%s' "$_chunk"
