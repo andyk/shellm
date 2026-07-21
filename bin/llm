@@ -243,8 +243,14 @@ fi
 # Build messages JSON
 # ---------------------------------------------------------------------------
 
+# Nothing that can hold the whole prompt may travel through argv. Linux caps a
+# single argument at 128 KiB and macOS caps total argv at 1 MiB, so `--arg p
+# "$LLM_PROMPT"` dies with "Argument list too long" once a caller sends a large
+# prompt — a long agent trajectory, a whole file, a judge transcript. The
+# prompt comes in on stdin here, and the built messages go to the payload
+# builders below via --slurpfile rather than --argjson.
 if [[ -z "$LLM_MESSAGES" ]]; then
-    LLM_MESSAGES=$(jq -n --arg p "$LLM_PROMPT" '[{"role":"user","content":$p}]')
+    LLM_MESSAGES=$(printf '%s' "$LLM_PROMPT" | jq -Rs '[{"role":"user","content":.}]')
 fi
 
 # ---------------------------------------------------------------------------
@@ -255,14 +261,13 @@ build_payload_anthropic() {
     local -a jq_args=(
         --arg model "$LLM_MODEL"
         --argjson max_tokens "$LLM_MAX_TOKENS"
-        --argjson messages "$LLM_MESSAGES"
         --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )"
     )
-    local jq_filter='{model:$model, max_tokens:$max_tokens, messages:$messages, stream:$stream}'
+    local jq_filter='{model:$model, max_tokens:$max_tokens, messages:., stream:$stream}'
 
     if [[ -n "$LLM_SYSTEM" ]]; then
         jq_args+=(--arg system "$LLM_SYSTEM")
-        jq_filter='{model:$model, max_tokens:$max_tokens, system:$system, messages:$messages, stream:$stream}'
+        jq_filter='{model:$model, max_tokens:$max_tokens, system:$system, messages:., stream:$stream}'
     fi
 
     if [[ "$LLM_THINKING" -eq 1 ]]; then
@@ -273,15 +278,15 @@ build_payload_anthropic() {
         jq_filter="${jq_filter%\}} , output_config:{effort:\"$LLM_EFFORT\"}}"
     fi
 
-    jq -n "${jq_args[@]}" "$jq_filter"
+    printf '%s' "$LLM_MESSAGES" | jq "${jq_args[@]}" "$jq_filter"
 }
 
 build_payload_openai() {
     local msgs="$LLM_MESSAGES"
     # Prepend system message if provided
     if [[ -n "$LLM_SYSTEM" ]]; then
-        msgs=$(jq -n --arg s "$LLM_SYSTEM" --argjson m "$msgs" \
-            '[{"role":"system","content":$s}] + $m')
+        msgs=$(printf '%s' "$msgs" | jq --arg s "$LLM_SYSTEM" \
+            '[{"role":"system","content":$s}] + .')
     fi
 
     # GPT-5 and o-series reasoning models require max_completion_tokens
@@ -295,10 +300,9 @@ build_payload_openai() {
         --arg model "$LLM_MODEL"
         --arg tokens_field "$tokens_field"
         --argjson max_tokens "$LLM_MAX_TOKENS"
-        --argjson messages "$msgs"
         --argjson stream "$( [[ "$LLM_STREAM" -eq 1 ]] && echo true || echo false )"
     )
-    local jq_filter='{model:$model, messages:$messages, stream:$stream} + {($tokens_field): $max_tokens}'
+    local jq_filter='{model:$model, messages:., stream:$stream} + {($tokens_field): $max_tokens}'
 
     # Map --thinking LEVEL to OpenAI reasoning.effort (only when an explicit
     # level is given; bare --thinking without a level is ignored for OpenAI
@@ -308,7 +312,7 @@ build_payload_openai() {
         jq_filter="${jq_filter%\}} , reasoning:{effort:\$effort, summary:\"auto\"}}"
     fi
 
-    jq -n "${jq_args[@]}" "$jq_filter"
+    printf '%s' "$msgs" | jq "${jq_args[@]}" "$jq_filter"
 }
 
 build_payload_gemini() {
@@ -316,7 +320,7 @@ build_payload_gemini() {
     local contents
     contents=$(printf '%s' "$LLM_MESSAGES" | jq '[.[] | {role: (if .role == "assistant" then "model" else .role end), parts: [{text: .content}]}]')
 
-    local -a jq_args=(--argjson contents "$contents" --argjson maxOutputTokens "$LLM_MAX_TOKENS")
+    local -a jq_args=(--argjson maxOutputTokens "$LLM_MAX_TOKENS")
     local gen_config='maxOutputTokens:$maxOutputTokens'
 
     if [[ -n "$LLM_THINKING_LEVEL" ]]; then
@@ -324,14 +328,14 @@ build_payload_gemini() {
         gen_config="${gen_config}, thinkingConfig:{thinkingLevel:\$thinkingLevel}"
     fi
 
-    local jq_filter="{contents:\$contents, generationConfig:{${gen_config}}}"
+    local jq_filter="{contents:., generationConfig:{${gen_config}}}"
 
     if [[ -n "$LLM_SYSTEM" ]]; then
         jq_args+=(--arg system "$LLM_SYSTEM")
-        jq_filter="{contents:\$contents, systemInstruction:{parts:[{text:\$system}]}, generationConfig:{${gen_config}}}"
+        jq_filter="{contents:., systemInstruction:{parts:[{text:\$system}]}, generationConfig:{${gen_config}}}"
     fi
 
-    jq -n "${jq_args[@]}" "$jq_filter"
+    printf '%s' "$contents" | jq "${jq_args[@]}" "$jq_filter"
 }
 
 # OpenRouter is OpenAI-compatible (chat/completions wire format)
@@ -515,8 +519,13 @@ stream_openrouter() { stream_openai; }
 # Main execution
 # ---------------------------------------------------------------------------
 
-# Build payload
-payload=$("build_payload_${LLM_PROVIDER}")
+# Build payload. It goes to curl from a file, not from argv: the payload
+# carries the whole prompt, and `-d "$payload"` dies with "Argument list too
+# long" on a large one (Linux caps a single argument at 128 KiB, macOS caps
+# total argv at 1 MiB). The file is reused across retries and removed on exit.
+payload_file=$(mktemp "${TMPDIR:-/tmp}/llm-payload.XXXXXX")
+trap 'rm -f "$payload_file"' EXIT
+"build_payload_${LLM_PROVIDER}" > "$payload_file"
 
 # Get URL and headers
 url=""
@@ -540,7 +549,7 @@ if [[ "$LLM_STREAM" -eq 1 ]]; then
         LLM_RETRY_ERR=$(mktemp)
         LLM_DATA_MARKER="${LLM_RETRY_ERR}.emitted"
         _rc=0
-        ( "stream_${LLM_PROVIDER}" < <(curl -sS -N "${headers[@]}" -d "$payload" "$url" 2>"$_curl_err") ) || _rc=$?
+        ( "stream_${LLM_PROVIDER}" < <(curl -sS -N "${headers[@]}" -d @"$payload_file" "$url" 2>"$_curl_err") ) || _rc=$?
 
         _emitted=0
         [[ -e "$LLM_DATA_MARKER" ]] && _emitted=1
@@ -570,7 +579,7 @@ else
         _attempt=$(( _attempt + 1 ))
         local_resp=$(mktemp)
         http_code=$(curl -sS -o "$local_resp" -w '%{http_code}' \
-            "${headers[@]}" -d "$payload" "$url" 2>/dev/null) || http_code="000"
+            "${headers[@]}" -d @"$payload_file" "$url" 2>/dev/null) || http_code="000"
 
         # Transient: network failure, timeout, rate limit, server error
         if [[ "$http_code" =~ ^(000|408|429|5[0-9][0-9])$ && "$_attempt" -lt "$_max_attempts" ]]; then
