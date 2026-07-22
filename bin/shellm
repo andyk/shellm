@@ -36,7 +36,22 @@ SHELLM_CONF_DIR="${SHELLM_CONF_DIR:-$HOME/.shellm}"
 # Config & defaults
 # ---------------------------------------------------------------------------
 
-SHELLM_MODEL="${SHELLM_MODEL:-claude-opus-4-7}"
+# Default model: pick for whichever provider has an API key set, matching
+# llm's own fallback order. With no key at all, leave the Anthropic default
+# so llm's key error names the missing variable.
+if [[ -z "${SHELLM_MODEL:-}" ]]; then
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        SHELLM_MODEL="claude-opus-4-7"
+    elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        SHELLM_MODEL="gpt-5.5"
+    elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+        SHELLM_MODEL="gemini-3.5-flash"
+    elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+        SHELLM_MODEL="anthropic/claude-sonnet-4.5"
+    else
+        SHELLM_MODEL="claude-opus-4-7"
+    fi
+fi
 SHELLM_MAX_ITERATIONS="${SHELLM_MAX_ITERATIONS:-}"
 SHELLM_TRUNCATE="${SHELLM_TRUNCATE:-2000}"
 SHELLM_API_URL="${SHELLM_API_URL:-}"
@@ -127,7 +142,10 @@ Options:
   --max-iterations N   Max loop iterations (default: unlimited)
   --max-tokens N       Max tokens per response (default: model's max output cap)
   --effort LEVEL       Thinking effort: low, medium, high, xhigh, max (default: high)
-  --workdir DIR        Use specific working directory (preserved after run)
+  --workdir DIR        Working directory for generated code (default: a
+                       fresh per-run directory under ~/.shellm/workdirs)
+  --here               Shorthand for --workdir "$PWD": work on the project
+                       in the current directory
   --env NAME           Use/create a named env (Docker container or local)
   --new-env            Force creation of a new env (cannot combine with --env)
   --temp-docker        Teardown Docker container on exit (default: persist)
@@ -997,6 +1015,7 @@ docker_attach() {
 env_resolve() {
     local name="$1"
     local explicit="${2:-0}"
+    local want_workdir="${3:-}"
     local ws_dir="$SHELLM_ENVS_DIR/$name"
     mkdir -p "$ws_dir"
 
@@ -1016,6 +1035,14 @@ env_resolve() {
             progress "Skipping env $name because its shellm tool mounts are stale"
             return 1
         fi
+        if [[ -n "$container_id" && -n "$want_workdir" ]] && \
+           ! docker_container_can_reach_path "$container_id" "$want_workdir"; then
+            if [[ "$explicit" -eq 1 ]]; then
+                die "Env $name was created without a mount for this run's workdir ($want_workdir). Use --new-env, a different --env, or remove $SHELLM_ENVS_DIR/$name so shellm can recreate it."
+            fi
+            progress "Skipping env $name because it cannot reach workdir $want_workdir"
+            return 1
+        fi
         if [[ -n "$container_id" ]] && docker_attach "$container_id"; then
             return 0
         fi
@@ -1028,7 +1055,21 @@ env_resolve() {
 }
 
 # Find any running shellm env. Prints its name and returns 0, or returns 1.
+# True when the container can reach the given host path at the same path
+# inside: the path must sit under one of the container's mount destinations.
+# Mounts are fixed at container creation, so a container made in another
+# directory can never chdir into this run's workdir.
+docker_container_can_reach_path() {
+    local cid="$1" path="$2" dest
+    while IFS= read -r dest; do
+        [[ -n "$dest" ]] || continue
+        [[ "$path" == "$dest" || "$path" == "$dest"/* ]] && return 0
+    done < <(docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$cid" 2>/dev/null)
+    return 1
+}
+
 env_find_running() {
+    local want_workdir="${1:-}"
     [[ -d "$SHELLM_ENVS_DIR" ]] || return 1
     local name
     for d in "$SHELLM_ENVS_DIR"/*/; do
@@ -1042,6 +1083,9 @@ env_find_running() {
         state=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null) || continue
         if [[ "$state" == "running" ]]; then
             docker_container_has_unusable_tool_mounts "$cid" && continue
+            if [[ -n "$want_workdir" ]] && ! docker_container_can_reach_path "$cid" "$want_workdir"; then
+                continue
+            fi
             printf '%s\n' "$name"
             return 0
         fi
@@ -1719,7 +1763,8 @@ run_loop() {
         _SHELLM_ROOT_RUNDIR="$rundir"
     fi
 
-    # Create or use workdir
+    # Create or use workdir. Default is a fresh per-run directory; --here
+    # (workdir = current directory) or --workdir DIR override it.
     if [[ -n "$_SHELLM_WORKDIR_USER" ]]; then
         workdir="$_SHELLM_WORKDIR_USER"
     else
@@ -1808,14 +1853,14 @@ run_loop() {
         else
             # Default: try to reuse any running env
             local running
-            running=$(env_find_running) || true
+            running=$(env_find_running "$workdir") || true
             if [[ -n "$running" ]]; then
                 ws_name="$running"
             else
                 ws_name=$(make_env_name "$prompt")
             fi
         fi
-        if env_resolve "$ws_name" "$env_explicit"; then
+        if env_resolve "$ws_name" "$env_explicit" "$workdir"; then
             progress "Using env: $ws_name"
         else
             docker_setup "$workdir" "$shellm_path" "$ws_name" "${context_files[@]+"${context_files[@]}"}"
@@ -2400,6 +2445,10 @@ main() {
             --workdir)
                 _SHELLM_WORKDIR_USER="${2:?--workdir requires a value}"
                 shift 2
+                ;;
+            --here)
+                _SHELLM_WORKDIR_USER="$PWD"
+                shift
                 ;;
             --env)
                 _SHELLM_ENV_NAME="${2:?--env requires a value}"

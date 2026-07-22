@@ -222,6 +222,9 @@ Each run records its metadata and conversation history in a trajectory file unde
 Each run also has a **workdir** — a directory where generated code executes:
 
 - All generated code executes in `$SHELLM_WORKDIR`
+- The default workdir is a fresh per-run directory. Pass `--here` to work
+  on the project in your current directory, or `--workdir DIR` for a
+  specific location.
 - Files created by the agent persist across iterations
 - Sub-runs are tracked as forked branches in the trajectory, not as nested directories
 
@@ -434,7 +437,8 @@ All configuration is available as both CLI flags and environment variables. Flag
 | `--max-tokens` | `SHELLM_MAX_TOKENS` | model's max output cap | Max tokens per API response |
 | `--effort` | `SHELLM_EFFORT` | `high` | Thinking effort: low, medium, high, xhigh, max |
 | — | `SHELLM_INACTIVITY_TIMEOUT` | `30` | Seconds before killing idle execution |
-| `--workdir DIR` | — | `~/.shellm/workdirs/...` | Working directory for the run |
+| `--workdir DIR` | — | fresh per-run dir | Working directory for the run |
+| `--here` | — | off | Shorthand for `--workdir "$PWD"` |
 | `--env NAME` | `SHELLM_ENV` | auto-generated | Named execution environment (Docker container or `local`) |
 | `--temp-docker` | `SHELLM_TEMP_DOCKER=1` | off | Teardown Docker container on exit |
 | `--docker-image` | `SHELLM_DOCKER_IMAGE` | `ubuntu:latest` | Docker image to use |
