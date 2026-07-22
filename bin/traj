@@ -2256,6 +2256,7 @@ cmd_parents()  { cmd_list --children 0 "$@"; }
 cmd_children() { cmd_list --parents 0 "$@"; }
 
 cmd_repl() {
+    command -v shellm-tui >/dev/null 2>&1 || die "traj repl needs shellm-tui on PATH (build it from tui/)"
     exec shellm-tui traj "$@"
 }
 
