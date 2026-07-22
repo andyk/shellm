@@ -73,7 +73,8 @@ Usage:
   llm [options] -M MESSAGES_JSON
 
 Options:
-  -m, --model MODEL        Model to use. Default: claude-sonnet-4-5-20250929
+  -m, --model MODEL        Model to use. Default: picked for whichever API
+                           key is set (Anthropic, then OpenAI, Gemini, OpenRouter)
   -s, --system-prompt TEXT System prompt text
   --system-prompt-file F   Read system prompt from file
   -t, --max-tokens N       Max output tokens. Default: model-specific cap
@@ -178,9 +179,22 @@ fi
 [[ -z "$LLM_PROMPT" && -z "$LLM_MESSAGES" ]] && die "No prompt or messages provided"
 
 # Default model: the system-wide SHELLM_MODEL when set (so keyless callers
-# like `mem search` follow the configured provider), else claude-sonnet.
+# like `mem search` follow the configured provider). Otherwise pick a default
+# for whichever provider has an API key set, preferring Anthropic.
 if [[ -z "$LLM_MODEL" ]]; then
-    LLM_MODEL="${SHELLM_MODEL:-claude-sonnet-4-5-20250929}"
+    if [[ -n "${SHELLM_MODEL:-}" ]]; then
+        LLM_MODEL="$SHELLM_MODEL"
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        LLM_MODEL="claude-sonnet-4-5-20250929"
+    elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        LLM_MODEL="gpt-5.5"
+    elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+        LLM_MODEL="gemini-3.5-flash"
+    elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+        LLM_MODEL="anthropic/claude-sonnet-4.5"
+    else
+        die "No model specified and no API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENROUTER_API_KEY, or pass -m MODEL."
+    fi
 fi
 
 # ---------------------------------------------------------------------------
