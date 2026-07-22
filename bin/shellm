@@ -91,14 +91,28 @@ die() { echo "shellm: error: $*" >&2; exit 1; }
 banner() {
     [[ "$QUIET" -eq 1 ]] && return
     [[ "${SHELLM_NO_BANNER:-0}" -eq 1 ]] && return
-    cat <<'BANNER' >&2
-
-███      █████ ██  ██ █████ ██ ██    ███   ███
-  ███    ██    ██  ██ ██    ██ ██    ██ ███ ██
-    ███  █████ ██▀▀██ ████  ██ ██    ██  █  ██
-  ███       ██ ██  ██ ██    ██ █████ ██     ██    
-███      █████ ██  ██ █████ ████████ 
-BANNER
+    local -a _b_lines=(
+'███      █████ ██  ██ █████ ██ ██    ███   ███'
+'  ███    ██    ██  ██ ██    ██ ██    ██ ███ ██'
+'    ███  █████ ██▀▀██ ████  ██ ██    ██  █  ██'
+'  ███       ██ ██  ██ ██    ██ █████ ██     ██'
+'███      █████ ██  ██ █████ ████████'
+    )
+    # Cyan-to-blue ramp on a tty, plain otherwise
+    local -a _b_ramp=(51 45 39 33 27)
+    local _b_i
+    echo >&2
+    for _b_i in 0 1 2 3 4; do
+        if [[ -t 2 ]]; then
+            printf '\033[38;5;%sm%s\033[0m\n' "${_b_ramp[$_b_i]}" "${_b_lines[$_b_i]}" >&2
+        else
+            printf '%s\n' "${_b_lines[$_b_i]}" >&2
+        fi
+    done
+    if [[ -t 2 ]]; then
+        printf '\033[90m%s\033[0m\n' 'the model writes bash. the shell is the tool loop.' >&2
+    fi
+    echo >&2
 }
 
 # Dim gray for debug, bold for status, colors for code/output
@@ -1777,6 +1791,13 @@ run_loop() {
     export TRAJ_ID="$_run_traj_id"
     # Preserve the root trajectory ID so chat history/reply work in forked trajs
     export ROOT_TRAJ_ID="${ROOT_TRAJ_ID:-$_run_traj_id}"
+
+    # Show the banner at the top of interactive runs only: skip nested runs
+    # (generated code calling shellm inherits SHELLM_RUN_STEP_ID) and
+    # non-tty stderr, so piped and scripted runs stay clean.
+    if [[ -t 2 && -z "${SHELLM_RUN_STEP_ID:-}" ]]; then
+        banner
+    fi
 
     progress "Trajectory: $_run_traj_id (dir: $_run_traj_dir)"
     progress "Workdir: $workdir"
